@@ -745,6 +745,94 @@ func TestResetAbandonedBead_NoRouter(t *testing.T) {
 	}
 }
 
+func TestResetAbandonedBead_ClosesWhenWorkOnMain(t *testing.T) {
+	// Not parallel: overrides package-level verifyCommitOnMain + bdRun/bdExec vars.
+	// When verifyCommitOnMain returns true, resetAbandonedBead should close the
+	// bead instead of resetting it for re-dispatch. This is the fix for #2036.
+
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return true, nil // work is on main
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	mock := installMockBd(t,
+		func(args []string) (string, error) {
+			// bdExec — getBeadStatus calls "show <id> --json"
+			if len(args) >= 1 && args[0] == "show" {
+				return `[{"status":"hooked"}]`, nil
+			}
+			return "", nil
+		},
+		func(args []string) error {
+			// bdRun — should be called with "close" (not "update --status=open")
+			return nil
+		},
+	)
+
+	result := resetAbandonedBead("/tmp/test", "testrig", "gt-work123", "alpha", nil)
+	if !result {
+		t.Error("resetAbandonedBead should return true when work is on main")
+	}
+
+	// Verify "close" was called, NOT "update ... --status=open"
+	var foundClose, foundUpdate bool
+	for _, call := range mock.calls {
+		if strings.Contains(call, "close gt-work123") {
+			foundClose = true
+		}
+		if strings.Contains(call, "update") && strings.Contains(call, "--status=open") {
+			foundUpdate = true
+		}
+	}
+	if !foundClose {
+		t.Errorf("expected bd close to be called, got calls: %v", mock.calls)
+	}
+	if foundUpdate {
+		t.Error("bd update --status=open should NOT be called when work is on main")
+	}
+}
+
+func TestResetAbandonedBead_ResetsWhenWorkNotOnMain(t *testing.T) {
+	// Not parallel: overrides package-level verifyCommitOnMain + bdRun/bdExec vars.
+	// When verifyCommitOnMain returns false, resetAbandonedBead should reset
+	// the bead for re-dispatch (existing behavior).
+
+	oldVerify := verifyCommitOnMain
+	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+		return false, nil // work NOT on main
+	}
+	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
+
+	mock := installMockBd(t,
+		func(args []string) (string, error) {
+			if len(args) >= 1 && args[0] == "show" {
+				return `[{"status":"hooked"}]`, nil
+			}
+			return "", nil
+		},
+		func(args []string) error {
+			return nil
+		},
+	)
+
+	result := resetAbandonedBead("/tmp/test", "testrig", "gt-work123", "alpha", nil)
+	if !result {
+		t.Error("resetAbandonedBead should return true when bead is reset")
+	}
+
+	// Verify "update --status=open" was called (normal reset path)
+	var foundUpdate bool
+	for _, call := range mock.calls {
+		if strings.Contains(call, "update") && strings.Contains(call, "--status=open") {
+			foundUpdate = true
+		}
+	}
+	if !foundUpdate {
+		t.Errorf("expected bd update --status=open to be called, got calls: %v", mock.calls)
+	}
+}
+
 func TestBeadRecoveredField_DefaultFalse(t *testing.T) {
 	t.Parallel()
 	// BeadRecovered should default to false (zero value)

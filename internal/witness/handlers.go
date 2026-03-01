@@ -808,7 +808,11 @@ func AutoNukeIfClean(workDir, rigName, polecatName string) *NukePolecatResult {
 //   - true, nil: commit is verified on default branch
 //   - false, nil: commit is NOT on default branch (don't nuke!)
 //   - false, error: couldn't verify (treat as unsafe)
-func verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
+//
+// This is a package-level var so tests can override it.
+var verifyCommitOnMain = _verifyCommitOnMain
+
+func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 	// Find town root from workDir
 	townRoot, err := workspace.Find(workDir)
 	if err != nil || townRoot == "" {
@@ -1619,6 +1623,8 @@ func getBeadStatus(workDir, beadID string) string {
 
 // resetAbandonedBead resets a dead polecat's hooked bead so it can be re-dispatched.
 // If the bead is in "hooked" or "in_progress" status, it:
+// 0. Checks if the polecat's work is already on main — if so, closes
+//    the bead instead of resetting (prevents re-dispatch of completed work)
 // 1. Records the respawn in the witness spawn-count ledger
 // 2. Resets status to open
 // 3. Clears assignee
@@ -1632,6 +1638,15 @@ func resetAbandonedBead(workDir, rigName, hookBead, polecatName string, router *
 	status := getBeadStatus(workDir, hookBead)
 	if status != "hooked" && status != "in_progress" {
 		return false
+	}
+
+	// Guard: if the polecat's commit is already on the default branch,
+	// the work is done — close the bead instead of resetting for re-dispatch.
+	// This prevents the spawn-storm / duplicate-work loop described in #2036.
+	if onMain, err := verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
+		reason := fmt.Sprintf("Work already on main (verified by witness, polecat %s)", polecatName)
+		_ = bdRun(workDir, "close", hookBead, "-r", reason)
+		return true
 	}
 
 	// Track respawn count for audit and storm detection.
