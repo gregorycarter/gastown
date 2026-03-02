@@ -1083,18 +1083,25 @@ func Start(townRoot string) error {
 		return err
 	}
 
-	// Start dolt sql-server with --data-dir to serve all databases
-	// Note: --user flag is deprecated in newer Dolt; authentication is handled
-	// via privilege system. Default is root user with no password for localhost.
-	args := []string{"sql-server",
-		"--port", strconv.Itoa(config.Port),
-		"--data-dir", config.DataDir,
-	}
-	if config.MaxConnections > 0 {
-		args = append(args, "--max-connections", strconv.Itoa(config.MaxConnections))
-	}
-	if config.LogLevel != "" {
-		args = append(args, "--loglevel", config.LogLevel)
+	// Start dolt sql-server. If a config.yaml exists in the data directory,
+	// pass --config to enable config-only features like auto_gc_behavior.
+	// When --config is used, all other CLI flags are ignored by dolt, so the
+	// config file must contain the full server configuration.
+	var args []string
+	configPath := filepath.Join(config.DataDir, "config.yaml")
+	if _, err := os.Stat(configPath); err == nil {
+		args = []string{"sql-server", "--config", configPath}
+	} else {
+		args = []string{"sql-server",
+			"--port", strconv.Itoa(config.Port),
+			"--data-dir", config.DataDir,
+		}
+		if config.MaxConnections > 0 {
+			args = append(args, "--max-connections", strconv.Itoa(config.MaxConnections))
+		}
+		if config.LogLevel != "" {
+			args = append(args, "--loglevel", config.LogLevel)
+		}
 	}
 	cmd := exec.Command("dolt", args...)
 	cmd.Stdout = logFile
