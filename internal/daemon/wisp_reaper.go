@@ -318,7 +318,8 @@ func (d *Daemon) reaperOpenDB(dbName string, readTimeout, writeTimeout time.Dura
 }
 
 // parentCheckWhere returns the SQL WHERE fragment that restricts operations to
-// wisps whose parent molecule is closed or that have no parent (orphans).
+// wisps whose parent molecule is closed, that have no parent (orphans), or
+// whose parent was purged (dangling dependency reference).
 func parentCheckWhere(dbName string) string {
 	return fmt.Sprintf(`
 		(
@@ -333,7 +334,14 @@ func parentCheckWhere(dbName string) string {
 				WHERE wd.issue_id = w.id AND wd.type = 'parent-child'
 				AND parent.status = 'closed'
 			)
-		)`, dbName, dbName, dbName)
+			OR
+			EXISTS (
+				SELECT 1 FROM `+"`%s`"+`.wisp_dependencies wd
+				LEFT JOIN `+"`%s`"+`.wisps parent ON parent.id = wd.depends_on_id
+				WHERE wd.issue_id = w.id AND wd.type = 'parent-child'
+				AND parent.id IS NULL
+			)
+		)`, dbName, dbName, dbName, dbName, dbName)
 }
 
 // reapWispsInDB closes stale wisps in a single database.
@@ -673,6 +681,15 @@ func (d *Daemon) batchDeleteRows(ctx context.Context, db *sql.DB, dbName string,
 			if _, err := db.ExecContext(ctx, delAux, args...); err != nil {
 				d.logger.Printf("wisp_reaper: %s: delete from %s: %v", dbName, tbl, err)
 			}
+		}
+
+		// Clean up reverse references: children's dependency rows that point to
+		// these wisps as parents. Without this, purging a parent leaves dangling
+		// depends_on_id references that make children permanently unreapable
+		// (parentCheckWhere can't match them via either NOT EXISTS or JOIN).
+		delReverse := fmt.Sprintf("DELETE FROM `%s`.`wisp_dependencies` WHERE depends_on_id IN %s", dbName, inClause) //nolint:gosec // G201: dbName is internal, inClause is placeholders
+		if _, err := db.ExecContext(ctx, delReverse, args...); err != nil {
+			d.logger.Printf("wisp_reaper: %s: delete reverse deps: %v", dbName, err)
 		}
 
 		delPrimary := fmt.Sprintf("DELETE FROM `%s`.`%s` WHERE id IN %s", dbName, primaryTable, inClause) //nolint:gosec // G201: dbName is an internal Dolt database name, inClause is placeholders
