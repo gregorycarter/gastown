@@ -324,6 +324,20 @@ type DaemonThresholds struct {
 
 	// DeaconGracePeriod is time to wait after starting Deacon before checking heartbeat (default "5m").
 	DeaconGracePeriod string `json:"deacon_grace_period,omitempty"`
+
+	// PressureCPUThreshold is the per-core load average above which new
+	// non-infrastructure spawns are deferred. Disabled by default (0).
+	// Recommended starting value: 3.0 (only trips under severe load).
+	PressureCPUThreshold *float64 `json:"pressure_cpu_threshold,omitempty"`
+
+	// PressureMemThresholdGB is the minimum available memory (in GB) below
+	// which new non-infrastructure spawns are deferred. Disabled by default (0).
+	// Recommended starting value: 0.5 (only trips when swapping).
+	PressureMemThresholdGB *float64 `json:"pressure_mem_threshold_gb,omitempty"`
+
+	// PressureMaxSessions is the maximum number of concurrent agent tmux
+	// sessions before new non-infrastructure spawns are deferred. Disabled by default (0 = unlimited).
+	PressureMaxSessions *int `json:"pressure_max_sessions,omitempty"`
 }
 
 // DeaconThresholds configures deacon health-check and dispatch thresholds.
