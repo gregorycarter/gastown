@@ -570,10 +570,17 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		var refspec string
 		var pushErr error
 
-		// Resume: skip push if already completed in a previous run (gt-aufru)
+		// Resume: skip push if already completed in a previous run (gt-aufru).
+		// Validate checkpoint branch matches current branch (ge-sbo: stale checkpoint
+		// on polecat reassignment causes new work to skip push for old branch).
 		if checkpoints[CheckpointPushed] != "" {
-			fmt.Printf("%s Branch already pushed (resumed from checkpoint)\n", style.Bold.Render("✓"))
-			goto afterPush
+			if checkpoints[CheckpointPushed] == branch {
+				fmt.Printf("%s Branch already pushed (resumed from checkpoint)\n", style.Bold.Render("✓"))
+				goto afterPush
+			}
+			// Stale checkpoint from a previous assignment — discard and push normally.
+			fmt.Printf("→ Discarding stale push checkpoint (was for branch %s, now on %s)\n",
+				checkpoints[CheckpointPushed], branch)
 		}
 
 		// CRITICAL: Push branch BEFORE creating MR bead (hq-6dk53, hq-a4ksk)
@@ -828,10 +835,21 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// Resume: skip MR creation if already completed in a previous run (gt-aufru).
 		// Mirrors the push checkpoint pattern above. Without this, every retry
 		// re-attempts bd.Create which hits unique constraints or creates duplicates.
+		// Validate that the checkpoint MR corresponds to the current branch (ge-sbo:
+		// stale checkpoint on polecat reassignment would reuse old MR for new work).
 		if checkpoints[CheckpointMRCreated] != "" {
-			mrID = checkpoints[CheckpointMRCreated]
-			fmt.Printf("%s MR already created (resumed from checkpoint: %s)\n", style.Bold.Render("✓"), mrID)
-			goto afterMR
+			cpMRID := checkpoints[CheckpointMRCreated]
+			if cpMR, cpErr := bd.Show(cpMRID); cpErr == nil && cpMR != nil {
+				branchPrefix := "branch: " + branch + "\n"
+				if strings.HasPrefix(cpMR.Description, branchPrefix) {
+					mrID = cpMRID
+					fmt.Printf("%s MR already created (resumed from checkpoint: %s)\n", style.Bold.Render("✓"), mrID)
+					goto afterMR
+				}
+				// Checkpoint MR is for a different branch — discard and create fresh.
+				fmt.Printf("→ Discarding stale MR checkpoint %s (was for different branch)\n", cpMRID)
+			}
+			// If MR lookup fails, fall through to create/find MR normally.
 		}
 
 		// Check if MR bead already exists for this branch (idempotency)
