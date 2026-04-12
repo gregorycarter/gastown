@@ -2076,6 +2076,69 @@ func VerifyDatabases(townRoot string) (served, missing []string, err error) {
 	return verifyDatabasesWithRetry(townRoot, 1)
 }
 
+// VerifyExpectedDatabasesAtConfig queries SHOW DATABASES on the exact server
+// described by config and reports which expected database names are missing.
+// Unlike VerifyDatabases, this helper does not inspect the filesystem; it is
+// intended for health checks that must validate a specific server address from
+// metadata rather than the town's default local Dolt config.
+func VerifyExpectedDatabasesAtConfig(config *Config, expected []string) (served, missing []string, err error) {
+	const baseBackoff = 1 * time.Second
+	const maxBackoff = 8 * time.Second
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		args := []string{
+			"sql",
+			"--host", config.EffectiveHost(),
+			"--port", strconv.Itoa(config.Port),
+			"--user", config.User,
+			"--no-tls",
+			"-r", "json",
+			"-q", "SHOW DATABASES",
+		}
+		cmd := exec.CommandContext(ctx, "dolt", args...)
+		cmd.Dir = config.DataDir
+		if config.Password != "" {
+			cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD="+config.Password)
+		}
+
+		var stderrBuf bytes.Buffer
+		cmd.Stderr = &stderrBuf
+		output, queryErr := cmd.Output()
+		cancel()
+		if queryErr != nil {
+			stderrMsg := strings.TrimSpace(stderrBuf.String())
+			errDetail := strings.TrimSpace(string(output))
+			if stderrMsg != "" {
+				errDetail = errDetail + " (stderr: " + stderrMsg + ")"
+			}
+			lastErr = fmt.Errorf("querying SHOW DATABASES: %w (output: %s)", queryErr, errDetail)
+			if attempt < 3 {
+				backoff := baseBackoff
+				for i := 1; i < attempt; i++ {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+						break
+					}
+				}
+				time.Sleep(backoff)
+			}
+			continue
+		}
+
+		served, err = parseShowDatabases(output)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parsing SHOW DATABASES output: %w", err)
+		}
+
+		missing = findMissingDatabases(served, expected)
+		return served, missing, nil
+	}
+
+	return nil, nil, lastErr
+}
+
 // VerifyDatabasesWithRetry is like VerifyDatabases but retries the SHOW DATABASES
 // query with exponential backoff to handle the case where the server has just started
 // and is still loading databases.
