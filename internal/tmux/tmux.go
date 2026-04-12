@@ -3426,6 +3426,9 @@ var safePrefixRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9-]{0,19}$`)
 func sessionPrefixPattern() string {
 	seen := map[string]bool{"hq": true, "gt": true} // always include HQ + gastown fallback
 	townRoot := os.Getenv("GT_ROOT")
+	if townRoot == "" {
+		townRoot = os.Getenv("GT_TOWN_ROOT")
+	}
 	if townRoot != "" {
 		for _, p := range config.AllRigPrefixes(townRoot) {
 			if safePrefixRe.MatchString(p) {

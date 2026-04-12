@@ -2146,6 +2146,38 @@ func TestSessionPrefixPattern_WithTownRoot(t *testing.T) {
 	}
 }
 
+func TestSessionPrefixPattern_FallsBackToGTTownRoot(t *testing.T) {
+	// When GT_ROOT is empty but GT_TOWN_ROOT is set, sessionPrefixPattern
+	// should use GT_TOWN_ROOT to discover rig prefixes.
+	townRoot := os.Getenv("GT_ROOT")
+	if townRoot == "" {
+		townRoot = os.Getenv("GT_TOWN_ROOT")
+	}
+	if townRoot == "" {
+		t.Skip("neither GT_ROOT nor GT_TOWN_ROOT set; skipping")
+	}
+
+	// Clear GT_ROOT, set GT_TOWN_ROOT — simulates daemon startup env.
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("GT_TOWN_ROOT", townRoot)
+
+	pattern := sessionPrefixPattern()
+	if !strings.Contains(pattern, "gt") {
+		t.Errorf("pattern %q missing 'gt'", pattern)
+	}
+	if !strings.Contains(pattern, "hq") {
+		t.Errorf("pattern %q missing 'hq'", pattern)
+	}
+	// With a real rigs.json via GT_TOWN_ROOT, we expect more than just gt+hq.
+	// At minimum there should be 3+ prefixes in a multi-rig town.
+	inner := strings.TrimPrefix(pattern, "^(")
+	inner = strings.TrimSuffix(inner, ")-")
+	prefixes := strings.Split(inner, "|")
+	if len(prefixes) < 3 {
+		t.Errorf("expected at least 3 prefixes via GT_TOWN_ROOT fallback, got %d: %v", len(prefixes), prefixes)
+	}
+}
+
 func TestZombieStatusString(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
