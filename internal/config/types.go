@@ -1161,6 +1161,12 @@ type ThemeConfig struct {
 	// Custom overrides the palette with specific colors.
 	Custom *CustomTheme `json:"custom,omitempty"`
 
+	// CrewThemes maps crew member names to theme names.
+	// Checked before RoleThemes, so individual crew members can have distinct colors
+	// while other crew members fall back to the role-level theme.
+	// Example: {"krieger": "teal", "mallory": "ember"}
+	CrewThemes map[string]string `json:"crew_themes,omitempty"`
+
 	// RoleThemes overrides themes for specific roles in this rig.
 	// Keys: "witness", "refinery", "crew", "polecat".
 	// A value of "none" disables tmux theming for that role.
@@ -1189,6 +1195,10 @@ type TownThemeConfig struct {
 	// Custom overrides the palette with specific colors when no role-specific
 	// override exists.
 	Custom *CustomTheme `json:"custom,omitempty"`
+
+	// CrewThemes maps crew member names to theme names (town-wide defaults).
+	// Checked before RoleDefaults. Per-rig CrewThemes take precedence.
+	CrewThemes map[string]string `json:"crew_themes,omitempty"`
 
 	// RoleDefaults sets default themes for roles across all rigs.
 	// Keys: "mayor", "deacon", "witness", "refinery", "crew", "polecat".
@@ -1219,6 +1229,13 @@ type WindowTint struct {
 	// RoleTints overrides window tint themes for specific roles.
 	// Keys: "witness", "refinery", "crew", "polecat"
 	RoleTints map[string]string `json:"role_tints,omitempty"`
+
+	// TintFactor controls how much the window background is darkened when
+	// inheriting from the status bar theme (0.0–1.0). Lower = darker.
+	// Default: 0.4 (40% of status bar brightness).
+	// Only applies when window tint inherits from the status bar theme
+	// (i.e., no explicit name, custom, or role_tints match).
+	TintFactor *float64 `json:"tint_factor,omitempty"`
 }
 
 // BuiltinRoleThemes returns the default themes for each role.
