@@ -28,9 +28,17 @@ func TestWispTypeToCategory(t *testing.T) {
 		t.Run(tc.wispType, func(t *testing.T) {
 			got := wispTypeToCategory(tc.wispType, "")
 			if got != tc.want {
-				t.Errorf("wispTypeToCategory(%q) = %q, want %q", tc.wispType, got, tc.want)
+				t.Errorf("wispTypeToCategory(%q, \"\") = %q, want %q", tc.wispType, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestWispTypeToCategory_TitlePatrolFallback(t *testing.T) {
+	t.Parallel()
+	got := wispTypeToCategory("", "nightly patrol sweep")
+	if got != "Patrols" {
+		t.Errorf("empty wisp_type + patrol in title = %q, want Patrols", got)
 	}
 }
 
