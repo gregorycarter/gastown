@@ -63,6 +63,9 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 		parts := strings.Split(r.Path, "/")
 		if len(parts) >= 1 && parts[0] != "." {
 			rigName := parts[0]
+			if ctx.RigName != "" && rigName != ctx.RigName {
+				continue
+			}
 			prefix := strings.TrimSuffix(r.Prefix, "-")
 			prefixToRig[prefix] = rigInfo{
 				name:      rigName,
@@ -339,6 +342,9 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 		parts := strings.Split(r.Path, "/")
 		if len(parts) >= 1 && parts[0] != "." {
 			rigName := parts[0]
+			if ctx.RigName != "" && rigName != ctx.RigName {
+				continue
+			}
 			prefix := strings.TrimSuffix(r.Prefix, "-")
 			prefixToRig[prefix] = rigInfo{
 				name:      rigName,
