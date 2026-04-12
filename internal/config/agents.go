@@ -36,6 +36,8 @@ const (
 	// AgentOmp is Oh My Pi (OMP) — Pi fork with hook-based lifecycle.
 	// Inspired by github.com/ProbabilityEngineer/pi-mono gastown integration.
 	AgentOmp AgentPreset = "omp"
+	// AgentMistral is Mistral Vibe CLI.
+	AgentMistral AgentPreset = "vibe"
 )
 
 // AgentPresetInfo contains the configuration details for an agent preset.
@@ -426,6 +428,30 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		NonInteractive: &NonInteractiveConfig{
 			PromptFlag: "--prompt",
 		},
+	},
+	AgentMistral: {
+		Name:                AgentMistral,
+		Command:             "vibe",
+		Args:                []string{"--agent", "auto-approve"},
+		ProcessNames:        []string{"vibe"},
+		SessionIDEnv:        "VIBE_SESSION_ID",
+		ResumeFlag:          "--resume",
+		ContinueFlag:        "--continue",
+		ResumeStyle:         "flag",
+		SupportsHooks:       true,
+		SupportsForkSession: false,
+		NonInteractive: &NonInteractiveConfig{
+			PromptFlag: "-p",
+			OutputFlag: "json",
+		},
+		PromptMode:        "arg",
+		ConfigDir:         ".vibe",
+		HooksProvider:     "vibe",
+		HooksDir:          ".vibe",
+		HooksSettingsFile: "config.toml",
+		ReadyPromptPrefix: "❯ ",
+		ReadyDelayMs:      5000,
+		InstructionsFile:  "AGENTS.md",
 	},
 }
 
