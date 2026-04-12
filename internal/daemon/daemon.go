@@ -116,6 +116,11 @@ type Daemon struct {
 	// triggers a zombie restart, debouncing transient gaps during handoffs.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	mayorZombieCount int
+
+	// rigPool runs per-rig heartbeat operations (witness checks, refinery checks,
+	// polecat health, idle reaping, branch pruning) with bounded concurrency and
+	// per-rig context timeouts so one slow rig cannot block all others.
+	rigPool *RigWorkerPool
 }
 
 // sessionDeath records a detected session death for mass death analysis.
@@ -319,6 +324,7 @@ func New(config *Config) (*Daemon, error) {
 		restartTracker:  restartTracker,
 		otelProvider:    otelProvider,
 		metrics:         dm,
+		rigPool:         newRigWorkerPool(0, 0, logger), // defaults: 10 workers, 30s timeout
 	}, nil
 }
 
@@ -1416,9 +1422,10 @@ func (d *Daemon) checkDeaconHeartbeat() {
 // Respects the rigs filter in daemon.json patrol config.
 func (d *Daemon) ensureWitnessesRunning() {
 	rigs := d.getPatrolRigs("witness")
-	for _, rigName := range rigs {
+	d.rigPool.runPerRig(d.ctx, rigs, func(ctx context.Context, rigName string) error {
 		d.ensureWitnessRunning(rigName)
-	}
+		return nil
+	})
 }
 
 // hasPendingEvents checks if there are pending .event files in the given channel directory.
@@ -1492,9 +1499,10 @@ func (d *Daemon) ensureWitnessRunning(rigName string) {
 // Respects the rigs filter in daemon.json patrol config.
 func (d *Daemon) ensureRefineriesRunning() {
 	rigs := d.getPatrolRigs("refinery")
-	for _, rigName := range rigs {
+	d.rigPool.runPerRig(d.ctx, rigs, func(ctx context.Context, rigName string) error {
 		d.ensureRefineryRunning(rigName)
-	}
+		return nil
+	})
 }
 
 // ensureRefineryRunning ensures the refinery for a specific rig is running.
@@ -1630,7 +1638,7 @@ func (d *Daemon) killDeaconSessions() {
 // killWitnessSessions kills leftover witness tmux sessions for all rigs.
 // Called when the witness patrol is disabled. (hq-2mstj)
 func (d *Daemon) killWitnessSessions() {
-	for _, rigName := range d.getKnownRigs() {
+	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
 		name := session.WitnessSessionName(session.PrefixFor(rigName))
 		exists, _ := d.tmux.HasSession(name)
 		if exists {
@@ -1639,13 +1647,14 @@ func (d *Daemon) killWitnessSessions() {
 				d.logger.Printf("Error killing %s session: %v", name, err)
 			}
 		}
-	}
+		return nil
+	})
 }
 
 // killRefinerySessions kills leftover refinery tmux sessions for all rigs.
 // Called when the refinery patrol is disabled. (hq-2mstj)
 func (d *Daemon) killRefinerySessions() {
-	for _, rigName := range d.getKnownRigs() {
+	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
 		name := session.RefinerySessionName(session.PrefixFor(rigName))
 		exists, _ := d.tmux.HasSession(name)
 		if exists {
@@ -1654,7 +1663,8 @@ func (d *Daemon) killRefinerySessions() {
 				d.logger.Printf("Error killing %s session: %v", name, err)
 			}
 		}
-	}
+		return nil
+	})
 }
 
 // killDefaultPrefixGhosts kills tmux sessions that use the default "gt" prefix
@@ -2238,10 +2248,10 @@ func KillOrphanedDaemons(townRoot string) (int, error) {
 // When a crash is detected, the polecat is automatically restarted.
 // This provides faster recovery than waiting for GUPP timeout or Witness detection.
 func (d *Daemon) checkPolecatSessionHealth() {
-	rigs := d.getKnownRigs()
-	for _, rigName := range rigs {
+	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
 		d.checkRigPolecatHealth(rigName)
-	}
+		return nil
+	})
 }
 
 // checkRigPolecatHealth checks polecat session health for a specific rig.
@@ -2515,12 +2525,12 @@ Restart deferred to stuck-agent-dog plugin for context-aware recovery.`,
 // This reaper checks heartbeat state and kills sessions idle longer than the threshold.
 func (d *Daemon) reapIdlePolecats() {
 	opCfg := d.loadOperationalConfig().GetDaemonConfig()
-	timeout := opCfg.PolecatIdleSessionTimeoutD()
+	idleTimeout := opCfg.PolecatIdleSessionTimeoutD()
 
-	rigs := d.getKnownRigs()
-	for _, rigName := range rigs {
-		d.reapRigIdlePolecats(rigName, timeout)
-	}
+	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
+		d.reapRigIdlePolecats(rigName, idleTimeout)
+		return nil
+	})
 }
 
 // reapRigIdlePolecats checks all polecats in a rig and kills idle sessions.
@@ -2692,11 +2702,12 @@ func (d *Daemon) pruneStaleBranches() {
 		}
 	}
 
-	// Prune in each rig's git directory
-	for _, rigName := range d.getKnownRigs() {
+	// Prune in each rig's git directory (parallel — each rig is independent).
+	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
 		rigPath := filepath.Join(d.config.TownRoot, rigName)
 		pruneInDir(rigPath, rigName)
-	}
+		return nil
+	})
 
 	// Also prune in the town root itself (mayor clone)
 	pruneInDir(d.config.TownRoot, "town-root")
