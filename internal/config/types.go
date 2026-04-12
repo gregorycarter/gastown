@@ -1277,11 +1277,16 @@ type MergeQueueConfig struct {
 	IntegrationBranchAutoLand *bool `json:"integration_branch_auto_land,omitempty"`
 
 	// MergeStrategy controls how the refinery lands approved work: "direct" (default)
-	// merges directly to the base branch, "pr" creates a GitHub pull request.
+	// merges directly to the base branch, "pr" uses the VCS provider's merge API
+	// which respects branch protection/restriction rules.
 	MergeStrategy string `json:"merge_strategy,omitempty"`
 
+	// VCSProvider selects the VCS platform for PR operations when
+	// MergeStrategy="pr". Valid values: "github" (default), "bitbucket".
+	VCSProvider string `json:"vcs_provider,omitempty"`
+
 	// RequireReview controls whether the refinery requires at least one approving
-	// GitHub review before merging a PR. Only meaningful when merge_strategy="pr".
+	// review before merging a PR. Only meaningful when merge_strategy="pr".
 	// Nil defaults to false (no review required).
 	RequireReview *bool `json:"require_review,omitempty"`
 
