@@ -209,19 +209,23 @@ func createSlingContext(t *testing.T, hqPath string, fields *capacity.SlingConte
 	return ctxBead.ID
 }
 
-// findSlingContext finds an open sling context for a work bead in the HQ beads DB.
+// findSlingContext finds an open sling context for a work bead by scanning all
+// rig beads dirs under townRoot. Mirrors production's listAllSlingContexts since
+// sling contexts now live in the target rig's beads dir, not HQ (see dee628d3).
 // Returns nil if none found.
 func findSlingContext(t *testing.T, hqPath, workBeadID string) *capacity.SlingContextFields {
 	t.Helper()
-	townBeads := beads.NewWithBeadsDir(hqPath, filepath.Join(hqPath, ".beads"))
-	_, fields, err := townBeads.FindOpenSlingContext(workBeadID)
-	if err != nil {
-		t.Fatalf("FindOpenSlingContext(%s) failed: %v", workBeadID, err)
+	for _, ctx := range listAllSlingContexts(hqPath) {
+		fields := beads.ParseSlingContextFields(ctx.Description)
+		if fields != nil && fields.WorkBeadID == workBeadID {
+			return fields
+		}
 	}
-	return fields
+	return nil
 }
 
-// hasSlingContext checks if a work bead has an open sling context in HQ.
+// hasSlingContext checks if a work bead has an open sling context anywhere
+// under townRoot (HQ or any rig beads dir).
 func hasSlingContext(t *testing.T, hqPath, workBeadID string) bool {
 	t.Helper()
 	return findSlingContext(t, hqPath, workBeadID) != nil
@@ -456,14 +460,10 @@ func TestSchedulerSlingContextIdempotency(t *testing.T) {
 	slingToScheduler(t, gtBinary, hqPath, env, beadID, "testrig")
 	slingToScheduler(t, gtBinary, hqPath, env, beadID, "testrig")
 
-	// Verify: only one sling context exists
-	townBeads := beads.NewWithBeadsDir(hqPath, filepath.Join(hqPath, ".beads"))
-	contexts, err := townBeads.ListOpenSlingContexts()
-	if err != nil {
-		t.Fatalf("ListOpenSlingContexts failed: %v", err)
-	}
+	// Verify: only one sling context exists across all rig dirs
+	// (sling contexts live in the target rig's beads dir per dee628d3).
 	count := 0
-	for _, ctx := range contexts {
+	for _, ctx := range listAllSlingContexts(hqPath) {
 		fields := beads.ParseSlingContextFields(ctx.Description)
 		if fields != nil && fields.WorkBeadID == beadID {
 			count++
