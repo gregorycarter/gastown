@@ -140,6 +140,10 @@ func setupSchedulerIntegrationTown(t *testing.T) (hqPath, rigPath, gtBinary stri
 	routes := []beads.Route{
 		{Prefix: hqPrefix + "-", Path: "."},
 		{Prefix: rigPrefix + "-", Path: "testrig/mayor/rig"},
+		// Convoy beads use a literal "hq-cv-" prefix (see install.go — registered
+		// on real towns during `gt install`). Route them to HQ so tests that
+		// look up auto-convoys via `bd show` resolve correctly.
+		{Prefix: "hq-cv-", Path: "."},
 	}
 	if err := beads.WriteRoutes(townBeadsDir, routes); err != nil {
 		t.Fatalf("write routes: %v", err)
@@ -298,12 +302,14 @@ func TestSchedulerAutoConvoyCreation(t *testing.T) {
 		t.Fatalf("convoy ID not stored in sling context")
 	}
 
-	// Verify: convoy is resolvable via bd show from hq
-	cmd := exec.Command("bd", "show", fields.Convoy, "--json", "--allow-stale")
+	// Verify: convoy is resolvable via bd show from hq.
+	// --allow-stale is a global flag: must come before the subcommand.
+	showArgs := beads.MaybePrependAllowStale([]string{"show", fields.Convoy, "--json"})
+	cmd := exec.Command("bd", showArgs...)
 	cmd.Dir = hqPath
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("bd show convoy %s failed: %v", fields.Convoy, err)
+		t.Fatalf("bd show convoy %s failed: %v\noutput: %s", fields.Convoy, err, out)
 	}
 	var convoys []struct {
 		ID        string `json:"id"`
@@ -579,6 +585,8 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 		{Prefix: hqPrefix + "-", Path: "."},
 		{Prefix: rig1Prefix + "-", Path: "rig1/mayor/rig"},
 		{Prefix: rig2Prefix + "-", Path: "rig2/mayor/rig"},
+		// Convoy beads use a literal "hq-cv-" prefix (see install.go).
+		{Prefix: "hq-cv-", Path: "."},
 	}
 	if err := beads.WriteRoutes(townBeadsDir, routes); err != nil {
 		t.Fatalf("write routes: %v", err)
