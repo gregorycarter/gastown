@@ -224,6 +224,56 @@ func TestFormatSpikeReport(t *testing.T) {
 	}
 }
 
+func TestResolveJSONLGitRepoPathPrefersTownRoot(t *testing.T) {
+	tmp := t.TempDir()
+	homeDir := filepath.Join(tmp, "home")
+	townRoot := filepath.Join(tmp, "town")
+	t.Setenv("HOME", homeDir)
+
+	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-archive", "git", ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir town repo: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(homeDir, "gt", ".dolt-archive", "git", ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir legacy repo: %v", err)
+	}
+
+	got := resolveJSONLGitRepoPath(townRoot)
+	want := filepath.Join(townRoot, ".dolt-archive", "git")
+	if got != want {
+		t.Fatalf("resolveJSONLGitRepoPath() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveJSONLGitRepoPathFallsBackToLegacyRepo(t *testing.T) {
+	tmp := t.TempDir()
+	homeDir := filepath.Join(tmp, "home")
+	townRoot := filepath.Join(tmp, "town")
+	t.Setenv("HOME", homeDir)
+
+	if err := os.MkdirAll(filepath.Join(homeDir, "gt", ".dolt-archive", "git", ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir legacy repo: %v", err)
+	}
+
+	got := resolveJSONLGitRepoPath(townRoot)
+	want := filepath.Join(homeDir, "gt", ".dolt-archive", "git")
+	if got != want {
+		t.Fatalf("resolveJSONLGitRepoPath() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveJSONLGitRepoPathDefaultsToTownRoot(t *testing.T) {
+	tmp := t.TempDir()
+	homeDir := filepath.Join(tmp, "home")
+	townRoot := filepath.Join(tmp, "town")
+	t.Setenv("HOME", homeDir)
+
+	got := resolveJSONLGitRepoPath(townRoot)
+	want := filepath.Join(townRoot, ".dolt-archive", "git")
+	if got != want {
+		t.Fatalf("resolveJSONLGitRepoPath() = %q, want %q", got, want)
+	}
+}
+
 func TestVerifyExportCounts_FirstExport(t *testing.T) {
 	// Set up a git repo with no prior commits containing our file.
 	gitRepo := t.TempDir()
