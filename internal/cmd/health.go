@@ -284,22 +284,15 @@ func checkBackupHealth(townRoot string) *BackupHealth {
 		}
 	}
 
-	// JSONL git backup freshness. Prefer the workspace town root, but keep
-	// legacy fallback locations readable so older installs still report health.
-	if gitRepo := findExistingJSONLGitRepo(townRoot); gitRepo != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "git", "-C", gitRepo, "log", "-1", "--format=%ci")
-		output, err := cmd.Output()
-		if err == nil {
-			commitTimeStr := strings.TrimSpace(string(output))
-			if commitTime, err := time.Parse("2006-01-02 15:04:05 -0700", commitTimeStr); err == nil {
-				age := time.Since(commitTime)
-				bh.JSONLAgeSeconds = int(age.Seconds())
-				bh.JSONLFreshness = age.Round(time.Second).String()
-				bh.JSONLStale = age > 30*time.Minute
-			}
-		}
+	// JSONL git backup freshness. Prefer the newest successful backup signal
+	// across the workspace root and legacy fallback locations. A backup cycle
+	// can be healthy even when there was nothing new to commit, so consult both
+	// the latest git commit time and an explicit success marker.
+	if lastSuccess := latestJSONLBackupSuccess(townRoot); !lastSuccess.IsZero() {
+		age := time.Since(lastSuccess)
+		bh.JSONLAgeSeconds = int(age.Seconds())
+		bh.JSONLFreshness = age.Round(time.Second).String()
+		bh.JSONLStale = age > 30*time.Minute
 	}
 
 	return bh
@@ -335,6 +328,47 @@ func findExistingJSONLGitRepo(townRoot string) string {
 		}
 	}
 	return ""
+}
+
+const jsonlBackupSuccessMarker = ".last-success"
+
+func latestJSONLBackupSuccess(townRoot string) time.Time {
+	var latest time.Time
+	for _, gitRepo := range jsonlGitRepoCandidates(townRoot) {
+		if markerTime := jsonlBackupMarkerTime(gitRepo); markerTime.After(latest) {
+			latest = markerTime
+		}
+		if commitTime := jsonlGitCommitTime(gitRepo); commitTime.After(latest) {
+			latest = commitTime
+		}
+	}
+	return latest
+}
+
+func jsonlBackupMarkerTime(gitRepo string) time.Time {
+	info, err := os.Stat(filepath.Join(filepath.Dir(gitRepo), jsonlBackupSuccessMarker))
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
+func jsonlGitCommitTime(gitRepo string) time.Time {
+	if _, err := os.Stat(filepath.Join(gitRepo, ".git")); err != nil {
+		return time.Time{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", gitRepo, "log", "-1", "--format=%ci")
+	output, err := cmd.Output()
+	if err != nil {
+		return time.Time{}
+	}
+	commitTime, err := time.Parse("2006-01-02 15:04:05 -0700", strings.TrimSpace(string(output)))
+	if err != nil {
+		return time.Time{}
+	}
+	return commitTime
 }
 
 // checkProcessHealth finds zombie Dolt servers (not on the expected port).

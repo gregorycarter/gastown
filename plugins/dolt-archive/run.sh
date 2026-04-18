@@ -17,6 +17,7 @@ DOLT_USER="${DOLT_USER:-root}"
 DOLT_DATA_DIR="${DOLT_DATA_DIR:-$TOWN_ROOT/.dolt-data}"
 JSONL_EXPORT_DIR="${JSONL_EXPORT_DIR:-$TOWN_ROOT/.dolt-archive/jsonl}"
 BACKUP_REPO="${BACKUP_REPO:-$TOWN_ROOT/.dolt-archive/git}"
+ARCHIVE_ROOT="$(dirname "$BACKUP_REPO")"
 DEFAULT_DBS="auto"
 SKIP_GIT=false
 SKIP_DOLT_PUSH=false
@@ -127,6 +128,7 @@ log "JSONL export: $EXPORTED succeeded, $EXPORT_FAILED failed"
 # --- Step 2: Git commit and push ---------------------------------------------
 
 GIT_PUSHED=false
+GIT_OK=false
 
 if ! $SKIP_GIT && [[ -d "$BACKUP_REPO/.git" ]]; then
   log ""
@@ -149,10 +151,12 @@ if ! $SKIP_GIT && [[ -d "$BACKUP_REPO/.git" ]]; then
 
   if git diff --quiet && git diff --staged --quiet; then
     log "No changes to commit"
+    GIT_OK=true
   else
     git add *.jsonl 2>/dev/null || true
     git commit -m "Archive snapshot $(date +%Y-%m-%d-%H%M)" \
       --author="Gas Town Archive <archive@gastown.local>" 2>/dev/null || true
+    GIT_OK=true
 
     if git remote get-url origin > /dev/null 2>&1; then
       if git push origin main 2>/dev/null; then
@@ -167,6 +171,11 @@ if ! $SKIP_GIT && [[ -d "$BACKUP_REPO/.git" ]]; then
   fi
 elif ! $SKIP_GIT; then
   log "No git backup repo at $BACKUP_REPO — skipping git push"
+fi
+
+if $GIT_OK; then
+  mkdir -p "$ARCHIVE_ROOT"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$ARCHIVE_ROOT/.last-success"
 fi
 
 # --- Step 3: Dolt native push ------------------------------------------------

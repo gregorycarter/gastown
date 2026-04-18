@@ -193,11 +193,23 @@ func (d *Daemon) syncJsonlGitBackup() {
 		}
 	} else {
 		d.jsonlPushFailures = 0
+		if err := markJSONLGitBackupSuccess(gitRepo); err != nil {
+			d.logger.Printf("jsonl_git_backup: warning: failed to write success marker: %v", err)
+		}
 		mol.closeStep("push")
 	}
 
 	d.logger.Printf("jsonl_git_backup: exported %d/%d database(s), push=%s", exported, len(databases), pushStatus)
 	mol.closeStep("report")
+}
+
+func markJSONLGitBackupSuccess(gitRepo string) error {
+	archiveRoot := filepath.Dir(gitRepo)
+	if err := os.MkdirAll(archiveRoot, 0o755); err != nil {
+		return err
+	}
+	timestamp := time.Now().UTC().Format(time.RFC3339) + "\n"
+	return os.WriteFile(filepath.Join(archiveRoot, ".last-success"), []byte(timestamp), 0o644)
 }
 
 func resolveJSONLGitRepoPath(townRoot string) string {
