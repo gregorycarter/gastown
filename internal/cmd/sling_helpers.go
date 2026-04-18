@@ -262,18 +262,18 @@ func getBeadInfo(beadID string) (*beadInfo, error) {
 // This enables a single read-modify-write cycle instead of sequential independent updates,
 // eliminating the race condition where concurrent writers could overwrite each other's fields.
 type beadFieldUpdates struct {
-	Dispatcher       string // Agent that dispatched the work
-	Args             string // Natural language instructions
+	Dispatcher       string   // Agent that dispatched the work
+	Args             string   // Natural language instructions
 	Vars             []string // Formula variables (key=value pairs)
-	AttachedMolecule string // Wisp root ID
-	AttachedFormula  string // Formula name (e.g., "mol-polecat-work") for inline step display
-	NoMerge          bool   // Skip merge queue on completion
-	ReviewOnly       bool   // Review-only mode: assignee must not merge/commit/push
-	Mode             string // Execution mode: "" (normal) or "ralph"
-	ConvoyID         string // Convoy bead ID (e.g., "hq-cv-abc")
-	MergeStrategy    string // Convoy merge strategy: "direct", "mr", "local"
-	ConvoyOwned      bool   // Convoy has gt:owned label (caller-managed lifecycle)
-	FormulaVars      string // Newline-separated key=value pairs for formula template substitution
+	AttachedMolecule string   // Wisp root ID
+	AttachedFormula  string   // Formula name (e.g., "mol-polecat-work") for inline step display
+	NoMerge          bool     // Skip merge queue on completion
+	ReviewOnly       bool     // Review-only mode: assignee must not merge/commit/push
+	Mode             string   // Execution mode: "" (normal) or "ralph"
+	ConvoyID         string   // Convoy bead ID (e.g., "hq-cv-abc")
+	MergeStrategy    string   // Convoy merge strategy: "direct", "mr", "local"
+	ConvoyOwned      bool     // Convoy has gt:owned label (caller-managed lifecycle)
+	FormulaVars      string   // Newline-separated key=value pairs for formula template substitution
 }
 
 // storeFieldsInBead performs a single read-modify-write to update all attachment fields
@@ -372,6 +372,20 @@ func storeFieldsInBead(beadID string, updates beadFieldUpdates) error {
 	return nil
 }
 
+func buildStartPrompt(beadID, subject, args string) string {
+	finishInstruction := "Complete the bead and run `" + cli.Name() + " done` immediately when finished. Do not stop at submit-ready."
+	if args != "" {
+		if subject != "" {
+			return fmt.Sprintf("Work slung: %s (%s). Args: %s. Start working now and use these args to guide your execution. %s", beadID, subject, args, finishInstruction)
+		}
+		return fmt.Sprintf("Work slung: %s. Args: %s. Start working now and use these args to guide your execution. %s", beadID, args, finishInstruction)
+	}
+	if subject != "" {
+		return fmt.Sprintf("Work slung: %s (%s). Start working on it now - no questions, just begin. %s", beadID, subject, finishInstruction)
+	}
+	return fmt.Sprintf("Work slung: %s. Start working on it now - run `"+cli.Name()+" hook` to see the hook, then begin. %s", beadID, finishInstruction)
+}
+
 // injectStartPrompt sends a prompt to the target pane to start working.
 // Uses the reliable nudge pattern: literal mode + 500ms debounce + separate Enter.
 func injectStartPrompt(pane, beadID, subject, args string) error {
@@ -384,24 +398,9 @@ func injectStartPrompt(pane, beadID, subject, args string) error {
 		return nil
 	}
 
-	// Build the prompt to inject
-	var prompt string
-	if args != "" {
-		// Args provided - include them prominently in the prompt
-		if subject != "" {
-			prompt = fmt.Sprintf("Work slung: %s (%s). Args: %s. Start working now - use these args to guide your execution.", beadID, subject, args)
-		} else {
-			prompt = fmt.Sprintf("Work slung: %s. Args: %s. Start working now - use these args to guide your execution.", beadID, args)
-		}
-	} else if subject != "" {
-		prompt = fmt.Sprintf("Work slung: %s (%s). Start working on it now - no questions, just begin.", beadID, subject)
-	} else {
-		prompt = fmt.Sprintf("Work slung: %s. Start working on it now - run `"+cli.Name()+" hook` to see the hook, then begin.", beadID)
-	}
-
 	// Use the reliable nudge pattern (same as gt nudge / tmux.NudgeSession)
 	t := tmux.NewTmux()
-	return t.NudgePane(pane, prompt)
+	return t.NudgePane(pane, buildStartPrompt(beadID, subject, args))
 }
 
 // getSessionFromPane extracts session name from a pane target.
@@ -711,7 +710,7 @@ func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, h
 		if err := BdCmd("cook", formulaName).
 			Dir(formulaWorkDir).
 			WithGTRoot(townRoot).
-				Run(); err != nil {
+			Run(); err != nil {
 			// Retry with embedded formula
 			resolvedFormula, formulaCleanup = resolveFormulaToTempFile(formulaName)
 			if formulaCleanup != nil {

@@ -1381,6 +1381,75 @@ func TestFindAgentPane_MultiPaneWithNode(t *testing.T) {
 	}
 }
 
+func TestQualifyPaneTarget_UsesTmuxValidPaneSyntax(t *testing.T) {
+	tm := newTestTmux(t)
+	sessionName := "gt-test-qualifypane-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSession(sessionName, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	_, err := tm.run("split-window", "-t", sessionName, "-d", "sleep", "10")
+	if err != nil {
+		t.Fatalf("split-window: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	out, err := tm.run("list-panes", "-t", sessionName, "-F", "#{pane_id}")
+	if err != nil {
+		t.Fatalf("list-panes: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 2 {
+		t.Skipf("expected 2 panes, got %d", len(lines))
+	}
+	paneID := strings.TrimSpace(lines[1])
+	if paneID == "" {
+		t.Fatal("second pane ID is empty")
+	}
+
+	// The previous "session:%pane" form is invalid in tmux and caused the
+	// bridge-facing nudge failure.
+	if _, err := tm.run("send-keys", "-t", sessionName+":"+paneID, "-l", "broken"); err == nil {
+		t.Fatalf("expected invalid target syntax for %s:%s", sessionName, paneID)
+	}
+
+	qualified := qualifyPaneTarget(sessionName, paneID)
+	if want := sessionName + ":." + paneID; qualified != want {
+		t.Fatalf("qualifyPaneTarget() = %q, want %q", qualified, want)
+	}
+
+	if _, err := tm.run("send-keys", "-t", qualified, "-l", "works"); err != nil {
+		t.Fatalf("send-keys with qualified pane target %q: %v", qualified, err)
+	}
+}
+
+func TestPaneShowsBufferedPromptInput(t *testing.T) {
+	t.Run("codex buffered input stays on prompt line", func(t *testing.T) {
+		snapshot := "some prior output\n› gt prime && gt mail check --inject\n"
+		if !paneShowsBufferedPromptInput(snapshot, "codex", "gt prime && gt mail check --inject") {
+			t.Fatal("expected codex prompt line to be detected as buffered input")
+		}
+	})
+
+	t.Run("submitted codex input no longer on prompt line", func(t *testing.T) {
+		snapshot := "some prior output\nSubmitted work slung prompt\nWorking (30s • esc to interrupt)\n"
+		if paneShowsBufferedPromptInput(snapshot, "codex", "Work slung: bt-123. Start working now.") {
+			t.Fatal("did not expect submitted codex transcript to look buffered")
+		}
+	})
+
+	t.Run("non-codex runtimes skip buffered-input detection", func(t *testing.T) {
+		snapshot := "› gt prime && gt mail check --inject\n"
+		if paneShowsBufferedPromptInput(snapshot, "claude", "gt prime && gt mail check --inject") {
+			t.Fatal("non-codex runtimes should not trigger codex buffered-input detection")
+		}
+	})
+}
+
 func TestNudgeLockTimeout(t *testing.T) {
 	// Test that acquireNudgeLock returns false after timeout when lock is held.
 	session := "test-nudge-timeout-session"

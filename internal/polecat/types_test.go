@@ -12,6 +12,7 @@ func TestState_IsWorking(t *testing.T) {
 	}{
 		{StateWorking, true},
 		{StateDone, false},
+		{StateStalled, false},
 		{StateStuck, false},
 		{StateStalled, false},
 		{StateZombie, false},

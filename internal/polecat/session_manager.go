@@ -287,6 +287,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// Get fallback info to determine beacon content based on agent capabilities.
 	// Non-hook agents need "Run gt prime" in beacon; work instructions come as delayed nudge.
 	fallbackInfo := runtime.GetStartupFallbackInfo(runtimeConfig)
+	useStartupCommandFallbackOnly := shouldUseStartupCommandFallbackOnly("polecat", runtimeConfig)
 
 	// Build startup command with beacon for predecessor discovery.
 	// Configure beacon based on agent's hook/prompt capabilities.
@@ -460,41 +461,49 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// falling back to ReadyDelayMs sleep for agents without prompt detection.
 	debugSession("WaitForRuntimeReady", m.tmux.WaitForRuntimeReady(sessionID, runtimeConfig, constants.ClaudeStartTimeout))
 
-	// Handle fallback nudges for non-hook agents.
-	// See StartupFallbackInfo in runtime package for the fallback matrix.
-	if fallbackInfo.SendBeaconNudge {
-		// Promptless runtimes need the full startup prompt delivered via nudge so
-		// the agent sees both the beacon and the initial work instructions.
-		debugSession("DeliverStartupPromptFallback",
-			runtime.DeliverStartupPromptFallback(m.tmux, sessionID, startupPromptFallback, runtimeConfig, constants.ClaudeStartTimeout))
+	// For no-prompt runtimes that need command fallback (for example Codex),
+	// use a single startup path instead of layering beacon/startup nudges on top
+	// of `gt prime && gt mail check --inject`. The overlapping inputs were causing
+	// dead-starts where the polecat exited before beginning real work.
+	if useStartupCommandFallbackOnly {
+		_ = runtime.RunStartupFallback(m.tmux, sessionID, "polecat", runtimeConfig)
 	} else {
-		if fallbackInfo.StartupNudgeDelayMs > 0 {
-			// Wait for agent to finish processing the beacon + gt prime before sending
-			// work instructions. Prompt-capable runtimes already got the beacon as the
-			// initial CLI prompt, so they only need the delayed startup nudge here.
-			primeWaitRC := runtime.RuntimeConfigWithMinDelay(runtimeConfig, fallbackInfo.StartupNudgeDelayMs)
-			debugSession("WaitForPrimeReady", m.tmux.WaitForRuntimeReady(sessionID, primeWaitRC, constants.ClaudeStartTimeout))
-		}
-
-		if fallbackInfo.SendStartupNudge {
-			// Send work instructions via nudge
-			debugSession("SendStartupNudge", m.tmux.NudgeSession(sessionID, startupNudgeContent))
-		}
-	}
-
-	// Verify startup nudge was delivered: poll for idle prompt and retry if lost.
-	// This fixes the Mode B race where the nudge arrives before Claude Code is ready,
-	// causing the polecat to sit idle at an empty prompt. See GH#1379.
-	if fallbackInfo.SendStartupNudge {
-		verifyContent := startupNudgeContent
+		// Handle fallback nudges for non-hook agents.
+		// See StartupFallbackInfo in runtime package for the fallback matrix.
 		if fallbackInfo.SendBeaconNudge {
-			verifyContent = startupPromptFallback
-		}
-		m.verifyStartupNudgeDelivery(sessionID, runtimeConfig, verifyContent)
-	}
+			// Promptless runtimes need the full startup prompt delivered via nudge so
+			// the agent sees both the beacon and the initial work instructions.
+			debugSession("DeliverStartupPromptFallback",
+				runtime.DeliverStartupPromptFallback(m.tmux, sessionID, startupPromptFallback, runtimeConfig, constants.ClaudeStartTimeout))
+		} else {
+			if fallbackInfo.StartupNudgeDelayMs > 0 {
+				// Wait for agent to finish processing the beacon + gt prime before sending
+				// work instructions. Prompt-capable runtimes already got the beacon as the
+				// initial CLI prompt, so they only need the delayed startup nudge here.
+				primeWaitRC := runtime.RuntimeConfigWithMinDelay(runtimeConfig, fallbackInfo.StartupNudgeDelayMs)
+				debugSession("WaitForPrimeReady", m.tmux.WaitForRuntimeReady(sessionID, primeWaitRC, constants.ClaudeStartTimeout))
+			}
 
-	// Legacy fallback for other startup paths (non-fatal)
-	_ = runtime.RunStartupFallback(m.tmux, sessionID, "polecat", runtimeConfig)
+			if fallbackInfo.SendStartupNudge {
+				// Send work instructions via nudge
+				debugSession("SendStartupNudge", m.tmux.NudgeSession(sessionID, startupNudgeContent))
+			}
+		}
+
+		// Verify startup nudge was delivered: poll for idle prompt and retry if lost.
+		// This fixes the Mode B race where the nudge arrives before Claude Code is ready,
+		// causing the polecat to sit idle at an empty prompt. See GH#1379.
+		if fallbackInfo.SendStartupNudge {
+			verifyContent := startupNudgeContent
+			if fallbackInfo.SendBeaconNudge {
+				verifyContent = startupPromptFallback
+			}
+			m.verifyStartupNudgeDelivery(sessionID, runtimeConfig, verifyContent)
+		}
+
+		// Legacy fallback for other startup paths (non-fatal)
+		_ = runtime.RunStartupFallback(m.tmux, sessionID, "polecat", runtimeConfig)
+	}
 
 	// Verify session survived startup - if the command crashed, the session may have died.
 	// Without this check, Start() would return success even if the pane died during initialization.
@@ -804,6 +813,15 @@ func (m *SessionManager) validateIssue(issueID, workDir string) error {
 		return fmt.Errorf("%w: %s has terminal status %s", ErrIssueInvalid, issueID, issues[0].Status)
 	}
 	return nil
+}
+
+// shouldUseStartupCommandFallbackOnly returns true for no-prompt runtimes that
+// need command fallback startup. In that mode, layering beacon/startup nudges
+// on top of `gt prime && gt mail check --inject` is less reliable than sending
+// the command fallback alone.
+func shouldUseStartupCommandFallbackOnly(role string, rc *config.RuntimeConfig) bool {
+	info := runtime.GetStartupFallbackInfo(rc)
+	return info.SendBeaconNudge && len(runtime.StartupFallbackCommands(role, rc)) > 0
 }
 
 // verifyStartupNudgeDelivery checks if the polecat started working after the

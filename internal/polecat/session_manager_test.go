@@ -300,6 +300,47 @@ func TestPolecatStartInjectsFallbackEnvVars(t *testing.T) {
 	}
 }
 
+func TestShouldUseStartupCommandFallbackOnly(t *testing.T) {
+	t.Run("no hooks and no prompt uses command fallback only", func(t *testing.T) {
+		rc := &config.RuntimeConfig{
+			PromptMode: "none",
+			Hooks: &config.RuntimeHooksConfig{
+				Provider: "none",
+			},
+		}
+
+		if !shouldUseStartupCommandFallbackOnly("polecat", rc) {
+			t.Fatal("expected no-hook, no-prompt polecat startup to use command fallback only")
+		}
+	})
+
+	t.Run("no hooks with prompt keeps existing prompt path", func(t *testing.T) {
+		rc := &config.RuntimeConfig{
+			PromptMode: "arg",
+			Hooks: &config.RuntimeHooksConfig{
+				Provider: "none",
+			},
+		}
+
+		if shouldUseStartupCommandFallbackOnly("polecat", rc) {
+			t.Fatal("expected prompt-capable startup to keep prompt/nudge path")
+		}
+	})
+
+	t.Run("hooks without prompt keeps combined nudge path", func(t *testing.T) {
+		rc := &config.RuntimeConfig{
+			PromptMode: "none",
+			Hooks: &config.RuntimeHooksConfig{
+				Provider: "claude",
+			},
+		}
+
+		if shouldUseStartupCommandFallbackOnly("polecat", rc) {
+			t.Fatal("expected hook-capable startup to keep combined nudge path")
+		}
+	})
+}
+
 // TestSessionManager_resolveBeadsDir verifies that SessionManager correctly
 // resolves the beads directory for cross-rig issues via routes.jsonl.
 // This is a regression test for GitHub issue #1056.

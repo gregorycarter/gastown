@@ -1484,6 +1484,92 @@ func (t *Tmux) sendEnterVerified(target string) error {
 	return fmt.Errorf("nudge Enter not processed after %d retries: pane content unchanged", maxRetries)
 }
 
+func normalizeNudgeVerificationText(s string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+}
+
+func bufferedPromptMarkers(message string) []string {
+	normalized := normalizeNudgeVerificationText(message)
+	if normalized == "" {
+		return nil
+	}
+	if len(normalized) <= 64 {
+		return []string{normalized}
+	}
+	return []string{normalized[:64], normalized[len(normalized)-64:]}
+}
+
+func paneShowsBufferedPromptInput(snapshot, agentType, message string) bool {
+	if agentType != "codex" {
+		return false
+	}
+
+	markers := bufferedPromptMarkers(message)
+	if len(markers) == 0 {
+		return false
+	}
+
+	lines := strings.Split(snapshot, "\n")
+	start := max(0, len(lines)-6)
+	for _, line := range lines[start:] {
+		normalizedLine := normalizeNudgeVerificationText(line)
+		if normalizedLine == "" || !strings.HasPrefix(normalizedLine, "› ") {
+			continue
+		}
+		for _, marker := range markers {
+			if strings.Contains(normalizedLine, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (t *Tmux) sessionNameForTarget(target string) string {
+	out, err := t.run("display-message", "-p", "-t", target, "#{session_name}")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+func (t *Tmux) agentTypeForTarget(target string) string {
+	sessionName := t.sessionNameForTarget(target)
+	if sessionName == "" {
+		return ""
+	}
+	agentType, _ := t.GetEnvironment(sessionName, "GT_AGENT")
+	return strings.TrimSpace(agentType)
+}
+
+func (t *Tmux) ensurePromptSubmitted(target, agentType, message string) error {
+	if agentType != "codex" {
+		return nil
+	}
+
+	const maxSubmitRetries = 2
+
+	for attempt := 0; attempt < maxSubmitRetries; attempt++ {
+		snapshot, err := t.CapturePane(target, 12)
+		if err != nil {
+			return nil
+		}
+		if !paneShowsBufferedPromptInput(snapshot, agentType, message) {
+			return nil
+		}
+		if err := t.sendEnterVerified(target); err != nil {
+			return fmt.Errorf("submit buffered prompt: %w", err)
+		}
+		time.Sleep(350 * time.Millisecond)
+	}
+
+	snapshot, err := t.CapturePane(target, 12)
+	if err == nil && paneShowsBufferedPromptInput(snapshot, agentType, message) {
+		return fmt.Errorf("prompt remained buffered after submit retries")
+	}
+	return nil
+}
+
 // adaptiveTextDelay returns the post-text-delivery delay for a message.
 // Base 500ms + 25ms per chunk beyond the first, capped at 2s.
 // Longer messages need more time for tmux to process all chunks under load.
@@ -1695,11 +1781,13 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	// enough time to process all chunks under load. (GH#gt-0b5)
 	time.Sleep(adaptiveTextDelay(len(sanitized)))
 
+	agentType, _ := t.GetEnvironment(session, "GT_AGENT")
+	agentType = strings.TrimSpace(agentType)
+
 	if !opts.SkipEscape {
 		// Auto-skip Escape for Copilot CLI sessions. Escape cancels in-flight
 		// generation in Copilot CLI (like Gemini), leaving the nudge text
 		// stranded in the input field without Enter being processed. (hq-isz)
-		agentType, _ := t.GetEnvironment(session, "GT_AGENT")
 		if agentType == "copilot" {
 			opts.SkipEscape = true
 		}
@@ -1735,10 +1823,27 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	if err := t.sendEnterVerified(target); err != nil {
 		return fmt.Errorf("nudge to session %q: %w", session, err)
 	}
+	if err := t.ensurePromptSubmitted(target, agentType, sanitized); err != nil {
+		return fmt.Errorf("nudge to session %q: %w", session, err)
+	}
 
 	// 8. Wake the pane to trigger SIGWINCH for detached sessions
 	t.WakePaneIfDetached(session)
 	return nil
+}
+
+// qualifyPaneTarget returns a tmux target string that addresses a specific pane
+// within a session. Pane IDs like "%2" cannot be appended directly as
+// "session:%2" because tmux parses that as a window spec and fails with
+// "can't find window". The valid qualified form is "session:.%2".
+func qualifyPaneTarget(session, pane string) string {
+	if pane == "" {
+		return session
+	}
+	if strings.HasPrefix(pane, "%") {
+		return session + ":." + pane
+	}
+	return session + ":" + pane
 }
 
 // NudgePane sends a message to a specific pane reliably.
@@ -1777,23 +1882,30 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	// 4. Adaptive post-text delay: scales with message length. (GH#gt-0b5)
 	time.Sleep(adaptiveTextDelay(len(sanitized)))
 
+	agentType := t.agentTypeForTarget(pane)
+
 	// 5. Send Escape to exit vim INSERT mode if enabled (harmless in normal mode)
 	// See: https://github.com/anthropics/gastown/issues/307
-	_, _ = t.run("send-keys", "-t", pane, "Escape")
+	if agentType != "copilot" {
+		_, _ = t.run("send-keys", "-t", pane, "Escape")
 
-	// 6. Wait 600ms — must exceed bash readline's keyseq-timeout (500ms default)
-	time.Sleep(600 * time.Millisecond)
+		// 6. Wait 600ms — must exceed bash readline's keyseq-timeout (500ms default)
+		time.Sleep(600 * time.Millisecond)
 
-	// 6.5. Post-Escape: check if our Escape triggered Rewind mode. (GH#gt-8el)
-	if t.isInRewindMode(pane) {
-		t.dismissRewindMode(pane)
-		_ = t.sendMessageToTarget(pane, sanitized)
-		time.Sleep(adaptiveTextDelay(len(sanitized)))
+		// 6.5. Post-Escape: check if our Escape triggered Rewind mode. (GH#gt-8el)
+		if t.isInRewindMode(pane) {
+			t.dismissRewindMode(pane)
+			_ = t.sendMessageToTarget(pane, sanitized)
+			time.Sleep(adaptiveTextDelay(len(sanitized)))
+		}
 	}
 
 	// 7. Send Enter with verification — polls pane content to confirm Enter
 	// was processed, retrying with exponential backoff under load. (GH#gt-0b5)
 	if err := t.sendEnterVerified(pane); err != nil {
+		return fmt.Errorf("nudge to pane %q: %w", pane, err)
+	}
+	if err := t.ensurePromptSubmitted(pane, agentType, sanitized); err != nil {
 		return fmt.Errorf("nudge to pane %q: %w", pane, err)
 	}
 

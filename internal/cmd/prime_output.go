@@ -1,9 +1,9 @@
 package cmd
 
 import (
-	"github.com/steveyegge/gastown/internal/cli"
 	"encoding/json"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/cli"
 	"io"
 	"os"
 	"path/filepath"
@@ -505,12 +505,15 @@ func outputStartupDirective(ctx RoleContext) {
 		fmt.Println("**STARTUP PROTOCOL**: You are a polecat with NO WORK on your hook.")
 		fmt.Println()
 		fmt.Println("1. Run `" + cli.Name() + " prime` (loads full context, mail, and pending work)")
-		fmt.Println("2. Check if any mail was injected above in this output")
-		fmt.Println("3. If you have mail with work instructions → execute that work")
-		fmt.Println("4. If NO mail → run `" + cli.Name() + " done` IMMEDIATELY")
+		fmt.Println("2. Check whether attached work or injected mail appeared above")
+		fmt.Println("3. If you have attached work or mail with instructions → execute that work")
+		fmt.Println("4. If nothing appeared → wait 10 seconds (dispatch may still be finishing setup)")
+		fmt.Println("5. Re-check `" + cli.Name() + " hook` and `" + cli.Name() + " mail inbox`")
+		fmt.Println("6. If both are still empty → run `" + cli.Name() + " done`")
 		fmt.Println()
-		fmt.Println("Polecat sessions are ephemeral. No work on hook + no mail = terminate.")
-		fmt.Println("DO NOT wait. DO NOT escalate. DO NOT send idle alerts.")
+		fmt.Println("Polecat sessions are ephemeral, but do NOT terminate on the first empty read.")
+		fmt.Println("Give hook/mail one short recovery pass, then exit cleanly if still empty.")
+		fmt.Println("DO NOT escalate. DO NOT send idle alerts.")
 		fmt.Println("Just run `" + cli.Name() + " done` and exit.")
 	case RoleRefinery:
 		if stopped, reason := IsRigParkedOrDocked(ctx.TownRoot, ctx.Rig); stopped {

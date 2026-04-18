@@ -180,3 +180,19 @@ func TestOutputRoleDirectives(t *testing.T) {
 		}
 	})
 }
+
+func TestOutputStartupDirective_PolecatWaitsBeforeDone(t *testing.T) {
+	output := captureStdout(t, func() {
+		outputStartupDirective(RoleContext{Role: RolePolecat})
+	})
+
+	if strings.Contains(output, "done` IMMEDIATELY") {
+		t.Fatalf("polecat startup directive should not terminate immediately on first empty read, got:\n%s", output)
+	}
+	if !strings.Contains(output, "wait 10 seconds") {
+		t.Fatalf("expected startup grace-period guidance, got:\n%s", output)
+	}
+	if !strings.Contains(output, "`gt hook`") || !strings.Contains(output, "`gt mail inbox`") {
+		t.Fatalf("expected recovery re-check instructions, got:\n%s", output)
+	}
+}

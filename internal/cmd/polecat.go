@@ -390,7 +390,7 @@ type PolecatListItem struct {
 }
 
 // effectivePolecatState returns the observable state used by polecat list output.
-// Session liveness is ground truth for working/idle/done transitions. Zombie entries
+// Session liveness is ground truth for working/stalled transitions. Zombie entries
 // are never auto-rewritten.
 func effectivePolecatState(item PolecatListItem) polecat.State {
 	state := item.State

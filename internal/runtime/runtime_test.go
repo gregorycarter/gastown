@@ -407,6 +407,9 @@ func TestStartupNudgeContent(t *testing.T) {
 	if !contains(content, "gt hook") {
 		t.Error("StartupNudgeContent should mention gt hook")
 	}
+	if !contains(content, "gt done") {
+		t.Error("StartupNudgeContent should remind polecats to run gt done on completion")
+	}
 }
 
 func TestGetStartupPromptFallback_NoHooksNoPrompt(t *testing.T) {

@@ -236,3 +236,20 @@ func TestIsSlingConfigError(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildStartPrompt_RequiresGtDone(t *testing.T) {
+	prompt := buildStartPrompt("bt-123", "test subject", "")
+	if !strings.Contains(prompt, "gt done") {
+		t.Fatalf("expected gt done reminder in start prompt, got: %s", prompt)
+	}
+	if !strings.Contains(prompt, "Do not stop at submit-ready") {
+		t.Fatalf("expected explicit submit-ready instruction, got: %s", prompt)
+	}
+}
+
+func TestBuildStartPrompt_PreservesArgs(t *testing.T) {
+	prompt := buildStartPrompt("bt-456", "", "use the API contract in docs")
+	if !strings.Contains(prompt, "Args: use the API contract in docs") {
+		t.Fatalf("expected args in start prompt, got: %s", prompt)
+	}
+}

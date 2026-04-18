@@ -80,4 +80,3 @@ func TestEffectivePolecatState(t *testing.T) {
 		})
 	}
 }
-

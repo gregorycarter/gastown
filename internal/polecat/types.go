@@ -10,7 +10,7 @@ import "time"
 //
 //   - Working: Session active, doing assigned work (normal operation)
 //   - Idle: Work completed, session killed, sandbox preserved for reuse
-//   - Stalled: Session stopped unexpectedly, was never nudged back to life
+//   - Stalled: Session stopped unexpectedly before completion
 //   - Zombie: Session called 'gt done' but cleanup failed - tried to die but couldn't
 //
 // The distinction matters: idle polecats completed their work successfully and
@@ -43,18 +43,16 @@ const (
 	// the cleanup failed and the session is stuck.
 	StateDone State = "done"
 
+	// StateStalled means the polecat had assigned work but the session is no
+	// longer running. This is the honest operator-facing state for a dead session
+	// that did not successfully finish `gt done`.
+	StateStalled State = "stalled"
+
 	// StateStuck means the polecat has explicitly signaled it needs assistance.
 	// This is an intentional request for help from the polecat itself.
-	// Different from "stalled" (detected externally when session stops working).
+	// Different from StateStalled, which is detected externally when the session
+	// stops before completion.
 	StateStuck State = "stuck"
-
-	// StateStalled means the polecat's tmux session has died while work was still
-	// assigned. This is a detected condition: beads report the polecat as working
-	// (hooked bead, assigned issue) but the tmux session is gone or the agent
-	// process is dead. This typically happens after disk space exhaustion, OOM,
-	// or other system failures that kill sessions without cleanup.
-	// Unlike "stuck" (polecat self-reports), stalled is detected externally.
-	StateStalled State = "stalled"
 
 	// StateZombie means a tmux session exists but has no corresponding worktree directory.
 	// This is a detected condition: the polecat was incompletely nuked or has a
