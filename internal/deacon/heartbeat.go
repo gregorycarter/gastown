@@ -163,3 +163,18 @@ func TouchWithAction(townRoot, action string, healthy, unhealthy int) error {
 		UnhealthyAgents: unhealthy,
 	})
 }
+
+// Refresh updates the timestamp on the current Deacon heartbeat without
+// incrementing the patrol cycle or changing the recorded action metadata.
+//
+// If no heartbeat exists yet, Refresh is a no-op so the first patrol cycle
+// still establishes it explicitly via gt deacon heartbeat.
+func Refresh(townRoot string) error {
+	existing := ReadHeartbeat(townRoot)
+	if existing == nil {
+		return nil
+	}
+
+	existing.Timestamp = time.Now().UTC()
+	return WriteHeartbeat(townRoot, existing)
+}

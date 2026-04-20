@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -23,10 +24,10 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:     "gt", // Updated in init() based on GT_COMMAND
-	Short:   "Gas Town - Multi-agent workspace manager",
-	Version: Version,
-	Long:    "", // Updated in init() based on GT_COMMAND
+	Use:               "gt", // Updated in init() based on GT_COMMAND
+	Short:             "Gas Town - Multi-agent workspace manager",
+	Version:           Version,
+	Long:              "", // Updated in init() based on GT_COMMAND
 	PersistentPreRunE: persistentPreRun,
 }
 
@@ -43,38 +44,38 @@ across distributed teams of AI agents working on shared codebases.`, cmdName)
 // Commands that don't require beads to be installed/checked.
 // These commands should work even when bd is missing or outdated.
 var beadsExemptCommands = map[string]bool{
-	"version":    true,
-	"help":       true,
-	"completion": true,
-	"crew":       true,
-	"polecat":    true,
-	"witness":    true,
-	"refinery":   true,
-	"status":     true,
-	"mail":       true,
-	"hook":       true,
-	"prime":      true,
-	"nudge":      true,
-	"seance":     true,
-	"doctor":     true,
-	"dolt":       true,
-	"handoff":    true,
-	"costs":      true,
-	"feed":       true,
-	"rig":        true,
-	"config":     true,
-	"install":    true,
-	"tap":        true,
-	"dnd":        true,
-	"estop":      true, // E-stop must work when Dolt is down
-	"thaw":       true, // Thaw must work when Dolt is down
+	"version":       true,
+	"help":          true,
+	"completion":    true,
+	"crew":          true,
+	"polecat":       true,
+	"witness":       true,
+	"refinery":      true,
+	"status":        true,
+	"mail":          true,
+	"hook":          true,
+	"prime":         true,
+	"nudge":         true,
+	"seance":        true,
+	"doctor":        true,
+	"dolt":          true,
+	"handoff":       true,
+	"costs":         true,
+	"feed":          true,
+	"rig":           true,
+	"config":        true,
+	"install":       true,
+	"tap":           true,
+	"dnd":           true,
+	"estop":         true, // E-stop must work when Dolt is down
+	"thaw":          true, // Thaw must work when Dolt is down
 	"signal":        true, // Hook signal handlers must be fast, handle beads internally
 	"metrics":       true, // Metrics reads local JSONL, no beads needed
 	"krc":           true, // KRC doesn't require beads
-	"run-migration":       true, // Migration orchestrator handles its own beads checks
-	"health":              true, // Health check doesn't require beads
-	"upgrade":             true, // Post-install migration orchestrator
-	"heartbeat":           true, // Heartbeat state update — must be fast and dependency-free
+	"run-migration": true, // Migration orchestrator handles its own beads checks
+	"health":        true, // Health check doesn't require beads
+	"upgrade":       true, // Post-install migration orchestrator
+	"heartbeat":     true, // Heartbeat state update — must be fast and dependency-free
 }
 
 // Commands exempt from the town root branch warning.
@@ -137,11 +138,10 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 		warnIfTownRootOffMain()
 	}
 
-	// Touch polecat session heartbeat on every gt command (gt-qjtq: ZFC liveness fix).
-	// This is best-effort and non-blocking — the heartbeat file signals that the agent
-	// is alive and actively running gt commands. Used by isSessionProcessDead to
-	// determine liveness without PID signal probing.
-	touchPolecatHeartbeat()
+	// Touch session heartbeats on every gt command when the caller is an agent.
+	// This is best-effort and non-blocking — it keeps liveness files fresh during
+	// normal gt-driven work without turning each subcommand into a new patrol cycle.
+	touchAgentHeartbeat()
 
 	// Skip beads check for exempt commands
 	if beadsExemptCommands[cmdName] || isRoleCommand(cmd) {
@@ -185,32 +185,34 @@ func initCLITheme() {
 	ui.ApplyThemeMode()
 }
 
-// touchPolecatHeartbeat touches the session heartbeat file for polecat agents.
-// Called from persistentPreRun on every gt command. The heartbeat signals that
-// the agent process is alive and actively running gt commands. Used by
-// isSessionProcessDead to determine liveness without PID signal probing (gt-qjtq).
+// touchAgentHeartbeat refreshes session heartbeats for agent roles that rely on
+// on-disk liveness files.
 //
-// This is best-effort: errors are silently ignored. Non-polecat sessions and
-// sessions without GT_SESSION are skipped silently.
-func touchPolecatHeartbeat() {
+// Polecats, crew, and dogs use per-session heartbeats under .runtime/heartbeats.
+// The Deacon uses deacon/heartbeat.json and only explicit patrol steps should
+// advance its cycle counter, so generic gt commands refresh the existing heartbeat
+// timestamp in place rather than creating a new cycle.
+//
+// This is best-effort: errors are silently ignored. Sessions without GT_SESSION
+// or a detectable town root are skipped silently.
+func touchAgentHeartbeat() {
 	sessionName := os.Getenv("GT_SESSION")
 	if sessionName == "" {
 		return
 	}
 
-	// Only polecats, crew, and dogs need heartbeats — they're the ones checked
-	// by isSessionProcessDead for stale session detection.
 	role := os.Getenv("GT_ROLE")
-	if !strings.Contains(role, "polecat") && !strings.Contains(role, "crew") && !strings.Contains(role, "dog") {
-		return
-	}
-
 	townRoot := detectTownRootFromCwd()
 	if townRoot == "" {
 		return
 	}
 
-	polecat.TouchSessionHeartbeat(townRoot, sessionName)
+	switch {
+	case strings.Contains(role, "polecat"), strings.Contains(role, "crew"), strings.Contains(role, "dog"):
+		polecat.TouchSessionHeartbeat(townRoot, sessionName)
+	case strings.Contains(role, "deacon"):
+		_ = deacon.Refresh(townRoot)
+	}
 }
 
 // warnIfTownRootOffMain prints a warning if the town root is not on main branch.

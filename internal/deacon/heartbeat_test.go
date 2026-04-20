@@ -63,6 +63,69 @@ func TestWriteReadHeartbeat(t *testing.T) {
 	}
 }
 
+func TestRefreshPreservesCycleAndAction(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "deacon-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	original := &Heartbeat{
+		Timestamp:       time.Now().Add(-10 * time.Minute).UTC(),
+		Cycle:           42,
+		LastAction:      "mid-cycle checkpoint",
+		HealthyAgents:   3,
+		UnhealthyAgents: 1,
+	}
+	if err := WriteHeartbeat(tmpDir, original); err != nil {
+		t.Fatalf("WriteHeartbeat error: %v", err)
+	}
+
+	before := ReadHeartbeat(tmpDir)
+	if before == nil {
+		t.Fatal("ReadHeartbeat returned nil before refresh")
+	}
+
+	if err := Refresh(tmpDir); err != nil {
+		t.Fatalf("Refresh error: %v", err)
+	}
+
+	after := ReadHeartbeat(tmpDir)
+	if after == nil {
+		t.Fatal("ReadHeartbeat returned nil after refresh")
+	}
+	if after.Cycle != before.Cycle {
+		t.Errorf("Cycle = %d, want %d", after.Cycle, before.Cycle)
+	}
+	if after.LastAction != before.LastAction {
+		t.Errorf("LastAction = %q, want %q", after.LastAction, before.LastAction)
+	}
+	if after.HealthyAgents != before.HealthyAgents {
+		t.Errorf("HealthyAgents = %d, want %d", after.HealthyAgents, before.HealthyAgents)
+	}
+	if after.UnhealthyAgents != before.UnhealthyAgents {
+		t.Errorf("UnhealthyAgents = %d, want %d", after.UnhealthyAgents, before.UnhealthyAgents)
+	}
+	if !after.Timestamp.After(before.Timestamp) {
+		t.Errorf("Timestamp = %v, want later than %v", after.Timestamp, before.Timestamp)
+	}
+}
+
+func TestRefreshNoOpWithoutExistingHeartbeat(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "deacon-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	if err := Refresh(tmpDir); err != nil {
+		t.Fatalf("Refresh error: %v", err)
+	}
+	if hb := ReadHeartbeat(tmpDir); hb != nil {
+		t.Fatal("expected no heartbeat file to be created")
+	}
+}
+
 func TestReadHeartbeat_NonExistent(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "deacon-test-*")
 	if err != nil {

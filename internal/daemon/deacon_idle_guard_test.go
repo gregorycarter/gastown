@@ -53,11 +53,76 @@ if [[ "$cmd" == "has-session" ]]; then
   exit 0
 fi
 
+if [[ "$cmd" == "display-message" ]]; then
+  echo "${TMUX_SESSION_ACTIVITY:-0}"
+  exit 0
+fi
+
 exit 0
 `
 	path := filepath.Join(dir, "tmux")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
+	}
+}
+
+func TestCheckDeaconHeartbeat_RecentActivitySuppressesIntervention(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows — fake tmux requires bash")
+	}
+
+	tests := []struct {
+		name         string
+		heartbeatAge time.Duration
+	}{
+		{
+			name:         "stale heartbeat with recent activity",
+			heartbeatAge: 10 * time.Minute,
+		},
+		{
+			name:         "very stale heartbeat with recent activity",
+			heartbeatAge: 21 * time.Minute,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			fakeBinDir := t.TempDir()
+			tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
+			if err := os.WriteFile(tmuxLog, []byte{}, 0o644); err != nil {
+				t.Fatalf("create tmux log: %v", err)
+			}
+
+			writeFakeTmuxWithSession(t, fakeBinDir)
+			t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("TMUX_LOG", tmuxLog)
+			t.Setenv("TMUX_SESSION_ACTIVITY", fmt.Sprintf("%d", time.Now().Add(-30*time.Second).Unix()))
+
+			writeDeaconHeartbeat(t, townRoot, tc.heartbeatAge)
+
+			d := newTestDaemonWithStores(t, townRoot, map[string]beadsdk.Storage{
+				"hq": &searchStorage{results: map[string][]*beadsdk.Issue{
+					"in_progress": {{ID: "hq-active"}},
+				}},
+			})
+
+			logBuf := &strings.Builder{}
+			d.logger = log.New(logBuf, "", 0)
+
+			d.checkDeaconHeartbeat()
+
+			logOutput := logBuf.String()
+			if !strings.Contains(logOutput, "session activity is recent") {
+				t.Fatalf("expected recent-activity log, got:\n%s", logOutput)
+			}
+			if strings.Contains(logOutput, "nudging session") {
+				t.Fatalf("unexpected nudge with recent activity:\n%s", logOutput)
+			}
+			if strings.Contains(logOutput, "needs restart") {
+				t.Fatalf("unexpected restart path with recent activity:\n%s", logOutput)
+			}
+		})
 	}
 }
 

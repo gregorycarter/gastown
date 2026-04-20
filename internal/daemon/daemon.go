@@ -1467,6 +1467,19 @@ func (d *Daemon) checkDeaconHeartbeat() {
 		return
 	}
 
+	// Recent tmux activity proves the session is still making progress even if
+	// the explicit heartbeat file has not been refreshed yet. This catches long
+	// investigation / patrol turns that spend time in bd, rg, git, or other
+	// commands outside explicit "gt deacon heartbeat" checkpoints.
+	if lastActivity, err := d.tmux.GetSessionActivity(sessionName); err == nil && !lastActivity.IsZero() {
+		idleFor := time.Since(lastActivity)
+		if idleFor < deacon.HeartbeatStaleThreshold {
+			d.logger.Printf("Deacon heartbeat is stale (%s old), but session activity is recent (%s ago); skipping intervention",
+				age.Round(time.Minute), idleFor.Round(time.Second))
+			return
+		}
+	}
+
 	// Session exists but heartbeat is stale - Deacon may be stuck.
 	// Two-tier response: nudge for stale (5-20 min), kill and restart
 	// only for very stale (>= 20 min). Kill threshold must be > backoff-max
@@ -1498,7 +1511,6 @@ func (d *Daemon) checkDeaconHeartbeat() {
 		}
 	}
 }
-
 
 // restartStuckDeacon kills a stuck Deacon session and respawns it.
 // Uses RestartTracker for exponential backoff and crash-loop prevention.
@@ -2659,7 +2671,7 @@ Restart deferred to stuck-agent-dog plugin for context-aware recovery.`,
 	cmd := exec.Command(d.gtPath, "mail", "send", witnessAddr, "-s", subject, "-m", body) //nolint:gosec // G204: args are constructed internally
 	setSysProcAttr(cmd)
 	cmd.Dir = d.config.TownRoot
-	cmd.Env = append(os.Environ(), "BD_ACTOR=daemon")// Identify as daemon, not overseer
+	cmd.Env = append(os.Environ(), "BD_ACTOR=daemon") // Identify as daemon, not overseer
 	if err := cmd.Run(); err != nil {
 		d.logger.Printf("Warning: failed to notify witness of crashed polecat: %v", err)
 	}

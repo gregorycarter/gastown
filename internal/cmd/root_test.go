@@ -5,9 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/deacon"
 )
 
 func TestCheckHelpFlag(t *testing.T) {
@@ -246,5 +248,61 @@ func TestPersistentPreRunMalformedAgentRegistry(t *testing.T) {
 	got := config.GetProcessNames("claude")
 	if len(got) < 2 || got[0] != "node" || got[1] != "claude" {
 		t.Fatalf("GetProcessNames(claude) after malformed registry = %v, want builtin [node claude ...]", got)
+	}
+}
+
+func TestPersistentPreRunRefreshesExistingDeaconHeartbeat(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	original := &deacon.Heartbeat{
+		Timestamp:       time.Now().Add(-10 * time.Minute).UTC(),
+		Cycle:           7,
+		LastAction:      "mid-cycle checkpoint",
+		HealthyAgents:   2,
+		UnhealthyAgents: 1,
+	}
+	if err := deacon.WriteHeartbeat(townRoot, original); err != nil {
+		t.Fatalf("WriteHeartbeat: %v", err)
+	}
+	before := deacon.ReadHeartbeat(townRoot)
+	if before == nil {
+		t.Fatal("expected heartbeat before persistentPreRun")
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+
+	t.Setenv("GT_ROLE", "deacon")
+	t.Setenv("GT_SESSION", "hq-deacon")
+
+	cmd := &cobra.Command{Use: "version"}
+	if err := persistentPreRun(cmd, nil); err != nil {
+		t.Fatalf("persistentPreRun: %v", err)
+	}
+
+	after := deacon.ReadHeartbeat(townRoot)
+	if after == nil {
+		t.Fatal("expected heartbeat after persistentPreRun")
+	}
+	if after.Cycle != before.Cycle {
+		t.Errorf("Cycle = %d, want %d", after.Cycle, before.Cycle)
+	}
+	if after.LastAction != before.LastAction {
+		t.Errorf("LastAction = %q, want %q", after.LastAction, before.LastAction)
+	}
+	if !after.Timestamp.After(before.Timestamp) {
+		t.Errorf("Timestamp = %v, want later than %v", after.Timestamp, before.Timestamp)
 	}
 }

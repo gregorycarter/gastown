@@ -114,8 +114,19 @@ else
     HEARTBEAT_AGE=$(( NOW - HEARTBEAT_TIME ))
 
     if [ "$HEARTBEAT_AGE" -gt 1200 ]; then
-      log "  STUCK: Deacon heartbeat stale (${HEARTBEAT_AGE}s old, >20m threshold)"
-      DEACON_ISSUE="stuck_heartbeat_${HEARTBEAT_AGE}s"
+      SESSION_ACTIVITY=$(tmux display-message -t "$DEACON_SESSION" -p '#{session_activity}' 2>/dev/null || true)
+      if [[ "$SESSION_ACTIVITY" =~ ^[0-9]+$ ]]; then
+        ACTIVITY_AGE=$(( NOW - SESSION_ACTIVITY ))
+        if [ "$ACTIVITY_AGE" -le 300 ]; then
+          log "  OK: Deacon heartbeat stale (${HEARTBEAT_AGE}s old) but tmux activity is recent (${ACTIVITY_AGE}s ago)"
+        else
+          log "  STUCK: Deacon heartbeat stale (${HEARTBEAT_AGE}s old, >20m threshold)"
+          DEACON_ISSUE="stuck_heartbeat_${HEARTBEAT_AGE}s"
+        fi
+      else
+        log "  STUCK: Deacon heartbeat stale (${HEARTBEAT_AGE}s old, >20m threshold)"
+        DEACON_ISSUE="stuck_heartbeat_${HEARTBEAT_AGE}s"
+      fi
     else
       log "  OK: Deacon heartbeat ${HEARTBEAT_AGE}s old"
     fi
