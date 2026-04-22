@@ -120,9 +120,9 @@ while IFS='|' read -r RIG PREFIX; do
 
     # Check if session exists
     if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-      # Session dead — check if it has hooked work
-      HOOK_BEAD=$(bd show "$RIG/polecats/$PCAT_NAME" --json 2>/dev/null \
-        | jq -r '.hook_bead // empty' 2>/dev/null)
+      # Session dead — query the polecat hook directly
+      HOOK_BEAD=$(gt hook show "$RIG/polecats/$PCAT_NAME" --json 2>/dev/null \
+        | jq -r '.bead_id // empty' 2>/dev/null)
 
       if [ -n "$HOOK_BEAD" ]; then
         # Check agent_state to avoid false alerts for intentional shutdowns
@@ -151,8 +151,8 @@ while IFS='|' read -r RIG PREFIX; do
         AGENT_ALIVE=$(pgrep -P "$PANE_PID" -f 'claude|node|anthropic' 2>/dev/null | head -1)
         if [ -z "$AGENT_ALIVE" ]; then
           # Agent process dead but session alive — zombie session
-          HOOK_BEAD=$(bd show "$RIG/polecats/$PCAT_NAME" --json 2>/dev/null \
-            | jq -r '.hook_bead // empty' 2>/dev/null)
+          HOOK_BEAD=$(gt hook show "$RIG/polecats/$PCAT_NAME" --json 2>/dev/null \
+            | jq -r '.bead_id // empty' 2>/dev/null)
           if [ -n "$HOOK_BEAD" ]; then
             STUCK+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD|agent_dead")
             echo "  ZOMBIE: $SESSION_NAME (agent dead, session alive, hook=$HOOK_BEAD)"
