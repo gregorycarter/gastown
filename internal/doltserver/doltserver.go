@@ -3421,9 +3421,9 @@ type HealthMetrics struct {
 	DiskUsageHuman string `json:"disk_usage_human"`
 
 	// QueryLatency is the time taken for a SELECT active_branch() round-trip.
-	// TODO: json tag says "ms" but json.Marshal on time.Duration emits nanoseconds.
-	// Consumers extract via .Milliseconds() — the tag is aspirational, not accurate.
-	QueryLatency time.Duration `json:"query_latency_ms"`
+	// Note: json.Marshal emits nanoseconds for time.Duration. Consumers should use
+	// ServerHealth.LatencyMs (int64 milliseconds) for JSON output instead.
+	QueryLatency time.Duration `json:"query_latency_ns"`
 
 	// ReadOnly indicates whether the server is in read-only mode.
 	// When true, the server accepts reads but rejects all writes.
