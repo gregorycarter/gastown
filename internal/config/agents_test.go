@@ -422,6 +422,33 @@ func TestResolveProcessNames(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("wrapper command resolves exec target process names", func(t *testing.T) {
+		wrapperPath := filepath.Join(t.TempDir(), "claude-zai")
+		script := "#!/usr/bin/env bash\nset -euo pipefail\nexec claude \"$@\"\n"
+		if err := os.WriteFile(wrapperPath, []byte(script), 0755); err != nil {
+			t.Fatalf("write wrapper: %v", err)
+		}
+
+		RegisterAgentForTesting("claude-kimi-k26-thinking", AgentPresetInfo{
+			Name:    "claude-kimi-k26-thinking",
+			Command: wrapperPath,
+		})
+		t.Cleanup(func() {
+			ResetRegistryForTesting()
+		})
+
+		got := ResolveProcessNames("claude-kimi-k26-thinking", wrapperPath)
+		want := []string{"node", "claude"}
+		if len(got) != len(want) {
+			t.Fatalf("ResolveProcessNames wrapper = %v, want %v", got, want)
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
 }
 
 func TestAgentPresetApprovalFlags(t *testing.T) {

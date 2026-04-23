@@ -2,8 +2,10 @@
 package config
 
 import (
+	"bufio"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -761,6 +763,14 @@ func ResolveProcessNames(agentName, command string) []string {
 	initRegistryLocked()
 	defer registryMu.Unlock()
 
+	return resolveProcessNamesLocked(agentName, command, make(map[string]struct{}))
+}
+
+func resolveProcessNamesLocked(agentName, command string, seen map[string]struct{}) []string {
+	if seen == nil {
+		seen = make(map[string]struct{})
+	}
+
 	// Normalize command to basename for comparison. Commands may be
 	// path-resolved (e.g., "/home/user/.claude/local/claude" from
 	// resolveClaudePath), but built-in presets store bare names ("claude").
@@ -796,12 +806,90 @@ func ResolveProcessNames(agentName, command string) []string {
 				return info.ProcessNames
 			}
 		}
+		if wrappedTarget := resolveWrapperExecTargetLocked(command, seen); wrappedTarget != "" {
+			return resolveProcessNamesLocked("", wrappedTarget, seen)
+		}
 		// Unknown command — use the binary basename itself
 		return []string{cmdBase}
 	}
 
 	// No command provided, agent not in registry — Claude defaults
 	return []string{"node", "claude"}
+}
+
+func resolveWrapperExecTargetLocked(command string, seen map[string]struct{}) string {
+	if command == "" {
+		return ""
+	}
+
+	resolved := command
+	if !filepath.IsAbs(resolved) {
+		lookedUp, err := exec.LookPath(resolved)
+		if err != nil {
+			return ""
+		}
+		resolved = lookedUp
+	}
+
+	if realPath, err := filepath.EvalSymlinks(resolved); err == nil && realPath != "" {
+		resolved = realPath
+	}
+	if _, dup := seen[resolved]; dup {
+		return ""
+	}
+	seen[resolved] = struct{}{}
+
+	file, err := os.Open(resolved)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	lineCount := 0
+	for scanner.Scan() {
+		lineCount++
+		if lineCount > 200 {
+			break
+		}
+		if target := parseWrapperExecTarget(scanner.Text()); target != "" {
+			return target
+		}
+	}
+
+	return ""
+}
+
+func parseWrapperExecTarget(line string) string {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "exec ") {
+		return ""
+	}
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return ""
+	}
+
+	fields = fields[1:]
+	for len(fields) > 0 {
+		token := strings.Trim(fields[0], `"'`)
+		switch {
+		case token == "":
+			fields = fields[1:]
+		case token == "env":
+			fields = fields[1:]
+		case strings.Contains(token, "="):
+			fields = fields[1:]
+		case strings.HasPrefix(token, "-"):
+			fields = fields[1:]
+		case strings.HasPrefix(token, "$"):
+			return ""
+		default:
+			return token
+		}
+	}
+
+	return ""
 }
 
 // MergeWithPreset applies preset defaults to a RuntimeConfig.
