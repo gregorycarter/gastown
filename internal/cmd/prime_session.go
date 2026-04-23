@@ -339,22 +339,14 @@ func detectSessionState(ctx RoleContext) SessionState {
 		}
 
 		// Fallback: query by assignee
-		hookedBeads, err := b.List(beads.ListOptions{
-			Status:   beads.StatusHooked,
-			Assignee: agentID,
-			Priority: -1,
-		})
+		hookedBeads, err := listAssignedBeadsByAliases(b, beads.StatusHooked, agentID)
 		if err == nil && len(hookedBeads) > 0 {
 			state.State = "autonomous"
 			state.HookedBead = hookedBeads[0].ID
 			return state
 		}
 		// Also check in_progress beads
-		inProgressBeads, err := b.List(beads.ListOptions{
-			Status:   "in_progress",
-			Assignee: agentID,
-			Priority: -1,
-		})
+		inProgressBeads, err := listAssignedBeadsByAliases(b, "in_progress", agentID)
 		if err == nil && len(inProgressBeads) > 0 {
 			state.State = "autonomous"
 			state.HookedBead = inProgressBeads[0].ID
@@ -364,20 +356,12 @@ func detectSessionState(ctx RoleContext) SessionState {
 		// stored in townRoot/.beads. Matches prime.go and molecule_status.go. (gt-dtq7)
 		if !isTownLevelRole(agentID) && ctx.TownRoot != "" {
 			townB := beads.New(filepath.Join(ctx.TownRoot, ".beads"))
-			if townHooked, err := townB.List(beads.ListOptions{
-				Status:   beads.StatusHooked,
-				Assignee: agentID,
-				Priority: -1,
-			}); err == nil && len(townHooked) > 0 {
+			if townHooked, err := listAssignedBeadsByAliases(townB, beads.StatusHooked, agentID); err == nil && len(townHooked) > 0 {
 				state.State = "autonomous"
 				state.HookedBead = townHooked[0].ID
 				return state
 			}
-			if townIP, err := townB.List(beads.ListOptions{
-				Status:   "in_progress",
-				Assignee: agentID,
-				Priority: -1,
-			}); err == nil && len(townIP) > 0 {
+			if townIP, err := listAssignedBeadsByAliases(townB, "in_progress", agentID); err == nil && len(townIP) > 0 {
 				state.State = "autonomous"
 				state.HookedBead = townIP[0].ID
 				return state

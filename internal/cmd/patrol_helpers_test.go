@@ -343,8 +343,8 @@ func TestBuildRefineryPatrolVars_BoolFormat(t *testing.T) {
 	trueVal := true
 	falseVal2 := false
 	mq := &config.MergeQueueConfig{
-		Enabled:                         true,
-		IntegrationBranchAutoLand:       &trueVal,
+		Enabled:                          true,
+		IntegrationBranchAutoLand:        &trueVal,
 		IntegrationBranchRefineryEnabled: &trueVal,
 		RunTests:                         &trueVal,
 		SetupCommand:                     "npm ci",
@@ -696,6 +696,32 @@ func TestFindActivePatrolHooked(t *testing.T) {
 	}
 	if issue.Status != beads.StatusHooked {
 		t.Errorf("patrol status = %q, want %q", issue.Status, beads.StatusHooked)
+	}
+}
+
+func TestFindActivePatrol_TownRoleAlias(t *testing.T) {
+	requireBd(t)
+	tmpDir, b := setupPatrolTestDB(t)
+
+	molName := "mol-deacon-patrol"
+	rootID := createHookedPatrol(t, b, molName, "deacon", true /* withOpenChild */)
+
+	cfg := PatrolConfig{
+		PatrolMolName: molName,
+		BeadsDir:      tmpDir,
+		Assignee:      canonicalAgentAssignee(string(RoleDeacon)),
+		Beads:         b,
+	}
+
+	patrolID, _, found, findErr := findActivePatrol(cfg)
+	if findErr != nil {
+		t.Fatalf("findActivePatrol error: %v", findErr)
+	}
+	if !found {
+		t.Fatal("expected to find active deacon patrol via town-role alias lookup")
+	}
+	if patrolID != rootID {
+		t.Errorf("patrolID = %q, want %q", patrolID, rootID)
 	}
 }
 

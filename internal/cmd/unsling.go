@@ -122,11 +122,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	// The work bead itself is the authoritative source — no need to read
 	// the agent bead's hook_bead slot.
 	hookedBeadID := ""
-	hookedBeads, listErr := b.List(beads.ListOptions{
-		Status:   beads.StatusHooked,
-		Assignee: agentID,
-		Priority: -1,
-	})
+	hookedBeads, listErr := listAssignedBeadsByAliases(b, beads.StatusHooked, agentID)
 	if listErr == nil && len(hookedBeads) > 0 {
 		hookedBeadID = hookedBeads[0].ID
 	}
@@ -138,24 +134,8 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	if hookedBeadID == "" && !isTownLevelRole(agentID) && townRoot != "" {
 		townB := beads.New(filepath.Join(townRoot, ".beads"))
 		// Search with the exact agent ID
-		if townHooked, err := townB.List(beads.ListOptions{
-			Status:   beads.StatusHooked,
-			Assignee: agentID,
-			Priority: -1,
-		}); err == nil && len(townHooked) > 0 {
+		if townHooked, err := listAssignedBeadsByAliases(townB, beads.StatusHooked, agentID); err == nil && len(townHooked) > 0 {
 			hookedBeadID = townHooked[0].ID
-		} else {
-			// Also search with normalized identity (mail beads use normalized form)
-			normalizedID := mailNormalizedAgentID(agentID)
-			if normalizedID != agentID {
-				if townHooked, err := townB.List(beads.ListOptions{
-					Status:   beads.StatusHooked,
-					Assignee: normalizedID,
-					Priority: -1,
-				}); err == nil && len(townHooked) > 0 {
-					hookedBeadID = townHooked[0].ID
-				}
-			}
 		}
 	}
 
@@ -266,11 +246,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 // Returns true if any stale beads were cleaned up.
 func cleanStaleHookedBeads(cmd *cobra.Command, b *beads.Beads, agentID, targetBeadID, townRoot, beadsPath string, dryRun bool) bool {
 	// Collect stale beads from local rig beads
-	staleBeads, err := b.List(beads.ListOptions{
-		Status:   beads.StatusHooked,
-		Assignee: agentID,
-		Priority: -1,
-	})
+	staleBeads, err := listAssignedBeadsByAliases(b, beads.StatusHooked, agentID)
 	if err != nil {
 		staleBeads = nil
 	}
@@ -283,23 +259,8 @@ func cleanStaleHookedBeads(cmd *cobra.Command, b *beads.Beads, agentID, targetBe
 		if townBeadsPath != beadsPath {
 			townB := beads.New(townBeadsPath)
 			// Search with exact agent ID
-			if townStale, err := townB.List(beads.ListOptions{
-				Status:   beads.StatusHooked,
-				Assignee: agentID,
-				Priority: -1,
-			}); err == nil {
+			if townStale, err := listAssignedBeadsByAliases(townB, beads.StatusHooked, agentID); err == nil {
 				staleBeads = append(staleBeads, townStale...)
-			}
-			// Also search with normalized identity (mail beads use normalized form)
-			normalizedID := mailNormalizedAgentID(agentID)
-			if normalizedID != agentID {
-				if townStale, err := townB.List(beads.ListOptions{
-					Status:   beads.StatusHooked,
-					Assignee: normalizedID,
-					Priority: -1,
-				}); err == nil {
-					staleBeads = append(staleBeads, townStale...)
-				}
 			}
 		}
 	}

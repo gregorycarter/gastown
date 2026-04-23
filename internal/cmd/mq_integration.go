@@ -155,7 +155,7 @@ func branchNameExists(g *git.Git, name string) bool {
 	if exists, _ := g.BranchExists(name); exists {
 		return true
 	}
-	if exists, _ := g.RemoteBranchExists("origin", name); exists {
+	if exists, _ := g.PushRemoteBranchExists("origin", name); exists {
 		return true
 	}
 	return false
@@ -253,9 +253,18 @@ func resolveEpicBranch(epic *beads.Issue, rigPath string, checker beads.BranchCh
 
 // branchExistsAnywhere checks if a branch exists on the remote or locally.
 func branchExistsAnywhere(checker beads.BranchChecker, name string) bool {
-	exists, err := checker.RemoteBranchExists("origin", name)
-	if err == nil && exists {
-		return true
+	if pushChecker, ok := checker.(interface {
+		PushRemoteBranchExists(remote, name string) (bool, error)
+	}); ok {
+		exists, err := pushChecker.PushRemoteBranchExists("origin", name)
+		if err == nil && exists {
+			return true
+		}
+	} else {
+		exists, err := checker.RemoteBranchExists("origin", name)
+		if err == nil && exists {
+			return true
+		}
 	}
 	// Remote not found or check failed — try local
 	localExists, _ := checker.BranchExists(name)
@@ -507,7 +516,7 @@ func runMqIntegrationLand(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check remote — land uses origin/ refs throughout, so the branch must be pushed
-	remoteExists, err := g.RemoteBranchExists("origin", branchName)
+	remoteExists, err := g.PushRemoteBranchExists("origin", branchName)
 	if err != nil {
 		return fmt.Errorf("checking remote branch: %w", err)
 	}
@@ -852,7 +861,7 @@ func runMqIntegrationStatus(cmd *cobra.Command, args []string) error {
 
 	// Check if integration branch exists (locally or remotely)
 	localExists, _ := g.BranchExists(branchName)
-	remoteExists, _ := g.RemoteBranchExists("origin", branchName)
+	remoteExists, _ := g.PushRemoteBranchExists("origin", branchName)
 
 	if !localExists && !remoteExists {
 		return fmt.Errorf("integration branch '%s' does not exist", branchName)

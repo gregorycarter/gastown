@@ -305,10 +305,11 @@ func TestExtractEpicPrefix(t *testing.T) {
 
 // mockBranchChecker implements BranchChecker for testing.
 type mockBranchChecker struct {
-	localBranches  map[string]bool
-	remoteBranches map[string]bool // key: "remote/branch"
-	localErr       error           // if set, BranchExists returns this error
-	remoteErr      error           // if set, RemoteBranchExists returns this error
+	localBranches      map[string]bool
+	remoteBranches     map[string]bool // key: "remote/branch"
+	pushRemoteBranches map[string]bool // key: "remote/branch"
+	localErr           error           // if set, BranchExists returns this error
+	remoteErr          error           // if set, RemoteBranchExists returns this error
 }
 
 func (m *mockBranchChecker) BranchExists(name string) (bool, error) {
@@ -324,6 +325,17 @@ func (m *mockBranchChecker) RemoteBranchExists(remote, name string) (bool, error
 	}
 	key := remote + "/" + name
 	return m.remoteBranches[key], nil
+}
+
+func (m *mockBranchChecker) PushRemoteBranchExists(remote, name string) (bool, error) {
+	if m.remoteErr != nil {
+		return false, m.remoteErr
+	}
+	key := remote + "/" + name
+	if len(m.pushRemoteBranches) == 0 {
+		return m.remoteBranches[key], nil
+	}
+	return m.pushRemoteBranches[key], nil
 }
 
 // mockIssueShower implements IssueShower for testing DetectIntegrationBranch.
@@ -400,7 +412,7 @@ func TestDetectIntegrationBranch(t *testing.T) {
 
 	t.Run("no epic in parent chain returns empty", func(t *testing.T) {
 		shower := &mockIssueShower{issues: map[string]*Issue{
-			"gt-task": {ID: "gt-task", Type: "task", Parent: "gt-other"},
+			"gt-task":  {ID: "gt-task", Type: "task", Parent: "gt-other"},
 			"gt-other": {ID: "gt-other", Type: "task", Parent: ""},
 		}}
 		checker := &mockBranchChecker{}
@@ -593,6 +605,24 @@ func TestDetectIntegrationBranch(t *testing.T) {
 		}
 		if got != "grandparent/branch" {
 			t.Errorf("got %q, want %q", got, "grandparent/branch")
+		}
+	})
+
+	t.Run("child of epic with branch only on push remote", func(t *testing.T) {
+		shower := &mockIssueShower{issues: map[string]*Issue{
+			"gt-task": {ID: "gt-task", Type: "task", Parent: "gt-epic"},
+			"gt-epic": {ID: "gt-epic", Type: "epic", Description: "integration_branch: custom/branch"},
+		}}
+		checker := &mockBranchChecker{
+			pushRemoteBranches: map[string]bool{"origin/custom/branch": true},
+		}
+
+		got, err := DetectIntegrationBranch(shower, checker, "gt-task")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "custom/branch" {
+			t.Fatalf("DetectIntegrationBranch() = %q, want %q", got, "custom/branch")
 		}
 	})
 }

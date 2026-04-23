@@ -540,7 +540,7 @@ var memoryTypeLabels = map[string]string{
 	"feedback":  "Behavioral Rules (from user feedback)",
 	"user":      "User Context",
 	"project":   "Project Context",
-	"reference":  "Reference Links",
+	"reference": "Reference Links",
 	"general":   "General",
 }
 
@@ -735,22 +735,14 @@ func findAgentWorkOnce(ctx RoleContext, agentID string) (*beads.Issue, error) {
 	}
 
 	// Fallback: query by assignee
-	hookedBeads, err := b.List(beads.ListOptions{
-		Status:   beads.StatusHooked,
-		Assignee: agentID,
-		Priority: -1,
-	})
+	hookedBeads, err := listAssignedBeadsByAliases(b, beads.StatusHooked, agentID)
 	if err != nil {
 		return nil, fmt.Errorf("querying hooked beads: %w", err)
 	}
 
 	// Fall back to in_progress beads (session interrupted before completion)
 	if len(hookedBeads) == 0 {
-		inProgressBeads, err := b.List(beads.ListOptions{
-			Status:   "in_progress",
-			Assignee: agentID,
-			Priority: -1,
-		})
+		inProgressBeads, err := listAssignedBeadsByAliases(b, "in_progress", agentID)
 		if err != nil {
 			return nil, fmt.Errorf("querying in-progress beads: %w", err)
 		}
@@ -764,17 +756,9 @@ func findAgentWorkOnce(ctx RoleContext, agentID string) (*beads.Issue, error) {
 	// Matches the fallback in molecule_status.go and unsling.go. (gt-dtq7)
 	if len(hookedBeads) == 0 && !isTownLevelRole(agentID) && ctx.TownRoot != "" {
 		townB := beads.New(filepath.Join(ctx.TownRoot, ".beads"))
-		if townHooked, err := townB.List(beads.ListOptions{
-			Status:   beads.StatusHooked,
-			Assignee: agentID,
-			Priority: -1,
-		}); err == nil && len(townHooked) > 0 {
+		if townHooked, err := listAssignedBeadsByAliases(townB, beads.StatusHooked, agentID); err == nil && len(townHooked) > 0 {
 			hookedBeads = townHooked
-		} else if townIP, err := townB.List(beads.ListOptions{
-			Status:   "in_progress",
-			Assignee: agentID,
-			Priority: -1,
-		}); err == nil && len(townIP) > 0 {
+		} else if townIP, err := listAssignedBeadsByAliases(townB, "in_progress", agentID); err == nil && len(townIP) > 0 {
 			hookedBeads = townIP
 		}
 		// Town-level fallback errors are non-fatal — rig-level query succeeded

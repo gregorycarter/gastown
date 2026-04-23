@@ -158,7 +158,7 @@ gt hook                          # Step 2: Check your hook
 gt mail inbox                    # Step 3: Check mail
 gt mol attach-from-mail <mail-id> # Hook attached work
 # Still nothing? ↓
-{{ cmd }} patrol new                  # Step 4: Create patrol (root-only wisp)
+{{ cmd }} deacon ensure-patrol        # Step 4: Ensure patrol exists and is hooked
 ```
 
 Then print the startup banner and execute:

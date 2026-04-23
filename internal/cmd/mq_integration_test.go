@@ -136,8 +136,9 @@ func TestMockBeadsList_StatusFiltering(t *testing.T) {
 
 // mockBranchChecker implements beads.BranchChecker for testing.
 type mockBranchChecker struct {
-	localBranches  map[string]bool
-	remoteBranches map[string]bool // key: "remote/branch"
+	localBranches      map[string]bool
+	remoteBranches     map[string]bool // key: "remote/branch"
+	pushRemoteBranches map[string]bool // key: "remote/branch"
 }
 
 func (m *mockBranchChecker) BranchExists(name string) (bool, error) {
@@ -147,6 +148,26 @@ func (m *mockBranchChecker) BranchExists(name string) (bool, error) {
 func (m *mockBranchChecker) RemoteBranchExists(remote, name string) (bool, error) {
 	key := remote + "/" + name
 	return m.remoteBranches[key], nil
+}
+
+func (m *mockBranchChecker) PushRemoteBranchExists(remote, name string) (bool, error) {
+	key := remote + "/" + name
+	if len(m.pushRemoteBranches) == 0 {
+		return m.remoteBranches[key], nil
+	}
+	return m.pushRemoteBranches[key], nil
+}
+
+func TestBranchExistsAnywhere_UsesPushRemoteBranchExists(t *testing.T) {
+	checker := &mockBranchChecker{
+		pushRemoteBranches: map[string]bool{
+			"origin/integration/fix-queue-drift": true,
+		},
+	}
+
+	if !branchExistsAnywhere(checker, "integration/fix-queue-drift") {
+		t.Fatal("branchExistsAnywhere should consult the push remote when it is available")
+	}
 }
 
 // TestResolveEpicBranch_LegacyFallback verifies that when an epic has no

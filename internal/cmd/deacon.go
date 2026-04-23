@@ -119,6 +119,17 @@ Examples:
 	RunE: runDeaconHeartbeat,
 }
 
+var deaconEnsurePatrolCmd = &cobra.Command{
+	Use:   "ensure-patrol",
+	Short: "Ensure the Deacon has an active patrol hooked",
+	Long: `Find the active Deacon patrol and create one only if none is currently
+hooked.
+
+This is idempotent startup/bootstrap logic for the Deacon. It avoids repeated
+self-sling attempts by verifying an existing patrol before creating a new one.`,
+	RunE: runDeaconEnsurePatrol,
+}
+
 var deaconHealthCheckCmd = &cobra.Command{
 	Use:   "health-check <agent>",
 	Short: "Send a health check ping to an agent and track response",
@@ -400,6 +411,7 @@ func init() {
 	deaconCmd.AddCommand(deaconStatusCmd)
 	deaconCmd.AddCommand(deaconRestartCmd)
 	deaconCmd.AddCommand(deaconHeartbeatCmd)
+	deaconCmd.AddCommand(deaconEnsurePatrolCmd)
 	deaconCmd.AddCommand(deaconHealthCheckCmd)
 	deaconCmd.AddCommand(deaconForceKillCmd)
 	deaconCmd.AddCommand(deaconHealthStateCmd)
@@ -526,7 +538,7 @@ func startDeaconSession(t *tmux.Tmux, sessionName, agentOverride string) error {
 		Recipient: "deacon",
 		Sender:    "daemon",
 		Topic:     "patrol",
-	}, "I am Deacon. First run `gt deacon heartbeat`. Then check gt hook, and if it is empty run `gt sling mol-deacon-patrol deacon`, then execute the hook it creates.")
+	}, session.DeaconStartupInstructions)
 	startupCmd, err := config.BuildStartupCommandFromConfig(config.AgentEnvConfig{
 		Role:             "deacon",
 		TownRoot:         townRoot,
@@ -582,6 +594,37 @@ func startDeaconSession(t *tmux.Tmux, sessionName, agentOverride string) error {
 	runtimeCfg := config.ResolveRoleAgentConfig("deacon", deaconTownRoot, "")
 	_ = runtime.RunStartupFallback(t, sessionName, "deacon", runtimeCfg)
 
+	return nil
+}
+
+func runDeaconEnsurePatrol(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	cfg := PatrolConfig{
+		RoleName:      "deacon",
+		PatrolMolName: constants.MolDeaconPatrol,
+		BeadsDir:      townRoot,
+		Assignee:      canonicalAgentAssignee(string(RoleDeacon)),
+	}
+
+	patrolID, _, found, err := findActivePatrol(cfg)
+	if err != nil {
+		return fmt.Errorf("finding active patrol: %w", err)
+	}
+	if found {
+		fmt.Printf("%s Active deacon patrol already hooked: %s\n", style.Bold.Render("✓"), patrolID)
+		return nil
+	}
+
+	patrolID, err = autoSpawnPatrol(cfg)
+	if err != nil {
+		return fmt.Errorf("ensuring deacon patrol: %w", err)
+	}
+
+	fmt.Printf("%s Deacon patrol ensured: %s\n", style.Bold.Render("✓"), patrolID)
 	return nil
 }
 

@@ -284,11 +284,7 @@ func runHook(_ *cobra.Command, args []string) error {
 	b := beads.New(workDir)
 
 	// Check for existing hooked bead for this agent
-	existingPinned, err := b.List(beads.ListOptions{
-		Status:   beads.StatusHooked,
-		Assignee: agentID,
-		Priority: -1,
-	})
+	existingPinned, err := listAssignedBeadsByAliases(b, beads.StatusHooked, agentID)
 	if err != nil {
 		return fmt.Errorf("checking existing hooked beads: %w", err)
 	}
@@ -499,11 +495,7 @@ func runHookShow(cmd *cobra.Command, args []string) error {
 
 	b := beads.New(workDir)
 	// Query for hooked beads assigned to the target
-	hookedBeads, err := b.List(beads.ListOptions{
-		Status:   beads.StatusHooked,
-		Assignee: target,
-		Priority: -1,
-	})
+	hookedBeads, err := listAssignedBeadsByAliases(b, beads.StatusHooked, target)
 	if err != nil {
 		return fmt.Errorf("listing hooked beads: %w", err)
 	}
@@ -518,11 +510,7 @@ func runHookShow(cmd *cobra.Command, args []string) error {
 			townBeadsDir := filepath.Join(townRoot, ".beads")
 			if _, err := os.Stat(townBeadsDir); err == nil {
 				townBeads := beads.New(townBeadsDir)
-				townHooked, err := townBeads.List(beads.ListOptions{
-					Status:   beads.StatusHooked,
-					Assignee: target,
-					Priority: -1,
-				})
+				townHooked, err := listAssignedBeadsByAliases(townBeads, beads.StatusHooked, target)
 				if err == nil && len(townHooked) > 0 {
 					hookedBeads = townHooked
 				}

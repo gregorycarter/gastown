@@ -109,7 +109,7 @@ func (m *Manager) Start(agentOverride string) error {
 		Recipient: "deacon",
 		Sender:    "daemon",
 		Topic:     "patrol",
-	}, "I am Deacon. Start patrol: run gt deacon heartbeat, then check gt hook. If no hook, run gt sling mol-deacon-patrol deacon, then execute the hook it creates.")
+	}, session.DeaconStartupInstructions)
 	startupCmd, err := config.BuildStartupCommandFromConfig(config.AgentEnvConfig{
 		Role:        "deacon",
 		TownRoot:    m.townRoot,

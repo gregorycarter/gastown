@@ -52,6 +52,20 @@ type BranchChecker interface {
 	RemoteBranchExists(remote, name string) (bool, error)
 }
 
+type pushRemoteBranchChecker interface {
+	PushRemoteBranchExists(remote, name string) (bool, error)
+}
+
+func remoteBranchExistsOnPushTarget(checker BranchChecker, remote, name string) (bool, error) {
+	if checker == nil {
+		return false, nil
+	}
+	if pushChecker, ok := checker.(pushRemoteBranchChecker); ok {
+		return pushChecker.PushRemoteBranchExists(remote, name)
+	}
+	return checker.RemoteBranchExists(remote, name)
+}
+
 // GetIntegrationBranchField extracts the integration_branch field from an epic's description.
 // Returns empty string if the field is not found.
 func GetIntegrationBranchField(description string) string {
@@ -204,7 +218,7 @@ func DetectIntegrationBranch(bd IssueShower, checker BranchChecker, issueID stri
 
 			// Check remote first (authoritative -- local refs can be stale
 			// if the remote branch was deleted without pruning)
-			exists, err := checker.RemoteBranchExists("origin", integrationBranch)
+			exists, err := remoteBranchExistsOnPushTarget(checker, "origin", integrationBranch)
 			if err != nil {
 				// Remote check failed (network issue) -- fall back to local.
 				// Swallow local errors: detection is best-effort.
@@ -222,7 +236,7 @@ func DetectIntegrationBranch(bd IssueShower, checker BranchChecker, issueID stri
 			if GetIntegrationBranchField(issue.Description) == "" {
 				legacyBranch := BuildIntegrationBranchName(LegacyIntegrationBranchTemplate, issue.ID, issue.Title)
 				if legacyBranch != integrationBranch {
-					exists, err := checker.RemoteBranchExists("origin", legacyBranch)
+					exists, err := remoteBranchExistsOnPushTarget(checker, "origin", legacyBranch)
 					if err != nil {
 						localExists, _ := checker.BranchExists(legacyBranch)
 						if localExists {

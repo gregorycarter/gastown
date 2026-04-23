@@ -1664,11 +1664,7 @@ func findHookedBeadForAgent(bd *beads.Beads, agentID string) string {
 	if agentID == "" {
 		return ""
 	}
-	hookedBeads, err := bd.List(beads.ListOptions{
-		Status:   beads.StatusHooked,
-		Assignee: agentID,
-		Priority: -1,
-	})
+	hookedBeads, err := listAssignedBeadsByAliases(bd, beads.StatusHooked, agentID)
 	if err != nil || len(hookedBeads) == 0 {
 		return ""
 	}
@@ -1725,7 +1721,7 @@ func selfNukePolecat(roleInfo RoleInfo, _ string) error {
 	}
 	pushed := false
 	for _, remote := range remotes {
-		exists, err := polecatGit.RemoteBranchExists(remote, branchName)
+		exists, err := polecatGit.PushRemoteBranchExists(remote, branchName)
 		if err == nil && exists {
 			pushed = true
 			break

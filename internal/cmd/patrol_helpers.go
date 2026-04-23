@@ -52,11 +52,7 @@ func findActivePatrol(cfg PatrolConfig) (patrolID, patrolLine string, found bool
 	}
 
 	// Find hooked patrol beads for this agent
-	hookedBeads, listErr := b.List(beads.ListOptions{
-		Status:   beads.StatusHooked,
-		Assignee: cfg.Assignee,
-		Priority: -1,
-	})
+	hookedBeads, listErr := listAssignedBeadsByAliases(b, beads.StatusHooked, cfg.Assignee)
 	if listErr != nil {
 		return "", "", false, fmt.Errorf("listing hooked beads: %w", listErr)
 	}
@@ -165,11 +161,7 @@ func burnPreviousPatrolWisps(cfg PatrolConfig) {
 	}
 
 	// Find all hooked patrol beads for this agent
-	hookedBeads, err := b.List(beads.ListOptions{
-		Status:   beads.StatusHooked,
-		Assignee: cfg.Assignee,
-		Priority: -1,
-	})
+	hookedBeads, err := listAssignedBeadsByAliases(b, beads.StatusHooked, cfg.Assignee)
 	if err != nil {
 		style.PrintWarning("burn: could not list hooked beads: %v", err)
 		return
@@ -303,7 +295,18 @@ func autoSpawnPatrol(cfg PatrolConfig) (string, error) {
 		return patrolID, fmt.Errorf("created wisp %s but failed to hook", patrolID)
 	}
 
-	return patrolID, nil
+	verifyBeads := beads.New(cfg.BeadsDir)
+	hookedBeads, err := listAssignedBeadsByAliases(verifyBeads, beads.StatusHooked, cfg.Assignee)
+	if err != nil {
+		return patrolID, fmt.Errorf("created wisp %s but failed to verify hook visibility: %w", patrolID, err)
+	}
+	for _, hooked := range hookedBeads {
+		if hooked.ID == patrolID {
+			return patrolID, nil
+		}
+	}
+
+	return patrolID, fmt.Errorf("created wisp %s but hook verification failed for assignee %s", patrolID, cfg.Assignee)
 }
 
 // outputPatrolContext is the main function that handles patrol display logic.
