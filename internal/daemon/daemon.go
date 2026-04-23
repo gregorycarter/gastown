@@ -129,6 +129,11 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	knownRigsCache      []string
 	knownRigsCacheValid bool
+
+	// rigWarnTimes rate-limits "failed to check rig bead" warnings per rig.
+	// Prevents noisy warning loops when a rig's bead is missing or Dolt is
+	// temporarily unavailable. Only accessed from heartbeat loop goroutine.
+	rigWarnTimes map[string]time.Time
 }
 
 // sessionDeath records a detected session death for mass death analysis.
@@ -333,6 +338,7 @@ func New(config *Config) (*Daemon, error) {
 		otelProvider:    otelProvider,
 		metrics:         dm,
 		rigPool:         newRigWorkerPool(0, 0, logger), // defaults: 10 workers, 30s timeout
+		rigWarnTimes:    make(map[string]time.Time),
 	}, nil
 }
 
@@ -2071,11 +2077,24 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 			}
 		}
 	} else {
-		// Log when rig bead lookup fails - this helps debug transient Dolt issues
-		// FAIL-SAFE: When we can't verify docked status (Dolt down, network issue, etc.),
-		// assume the rig is NOT operational. This prevents wasting API credits starting
-		// witnesses that might be docked. Better to delay work than burn credits unnecessarily.
-		d.logger.Printf("Warning: failed to check rig bead %s for docked/parked status: %v (assuming not operational)", rigBeadID, err)
+		// Distinguish missing rig bead (no docked/parked label) from actual Dolt failures.
+		// Missing bead → rig is operational (nothing says it's docked/parked).
+		// Other errors → fail-safe, but rate-limit the warning to prevent log loops.
+		if errors.Is(err, beads.ErrNotFound) {
+			// Rig bead doesn't exist: no docked/parked status. Treat as operational.
+			// This prevents warning loops and patrol exclusion for rigs whose identity
+			// bead was never created or was lost. (gt-fex)
+			return true, ""
+		}
+		const warnCooldown = 5 * time.Minute
+		if d.rigWarnTimes == nil {
+			d.rigWarnTimes = make(map[string]time.Time)
+		}
+		lastWarned, warnedBefore := d.rigWarnTimes[rigName]
+		if !warnedBefore || time.Since(lastWarned) > warnCooldown {
+			d.logger.Printf("Warning: failed to check rig bead %s for docked/parked status: %v (assuming not operational)", rigBeadID, err)
+			d.rigWarnTimes[rigName] = time.Now()
+		}
 		return false, "cannot verify rig status (Dolt unavailable)"
 	}
 
