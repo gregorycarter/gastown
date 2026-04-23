@@ -308,13 +308,13 @@ func TestResolveProcessNames(t *testing.T) {
 			name:      "custom agent shadowing built-in with same command",
 			agentName: "codex",
 			command:   "codex",
-			want:      []string{"codex"},
+			want:      []string{"codex", "node"},
 		},
 		{
 			name:      "built-in preset through gt wrapper command",
 			agentName: "codex",
 			command:   "gt-codex",
-			want:      []string{"codex"},
+			want:      []string{"codex", "node"},
 		},
 		{
 			name:      "unknown agent with known command",
@@ -373,6 +373,29 @@ func TestResolveProcessNames(t *testing.T) {
 			}
 		})
 	}
+
+	// Regression test for gt-kda: custom agent alias wrapping a built-in preset
+	// must include the built-in preset's process names for accurate liveness detection.
+	t.Run("custom agent alias merges built-in preset process names", func(t *testing.T) {
+		ResetRegistryForTesting()
+		RegisterAgentForTesting("claude-kimi-k26-thinking", AgentPresetInfo{
+			Name:         "claude-kimi-k26-thinking",
+			Command:      "claude",
+			ProcessNames: []string{"claude-zai"},
+		})
+		t.Cleanup(ResetRegistryForTesting)
+
+		got := ResolveProcessNames("claude-kimi-k26-thinking", "claude")
+		want := []string{"claude-zai", "node", "claude"}
+		if len(got) != len(want) {
+			t.Fatalf("ResolveProcessNames custom alias = %v, want %v", got, want)
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
 
 	// Test registry preset with absolute-path command.
 	// Custom agents loaded from agents.json may store full paths in Command.
@@ -622,7 +645,7 @@ func TestGetProcessNames(t *testing.T) {
 	}{
 		{"claude", []string{"node", "claude"}},
 		{"gemini", []string{"gemini"}},
-		{"codex", []string{"codex"}},
+		{"codex", []string{"codex", "node"}},
 		{"cursor", []string{"cursor-agent", "agent"}},
 		{"auggie", []string{"auggie"}},
 		{"amp", []string{"amp"}},

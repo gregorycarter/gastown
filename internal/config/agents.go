@@ -275,7 +275,7 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		Name:                AgentCodex,
 		Command:             "codex",
 		Args:                []string{"--dangerously-bypass-approvals-and-sandbox"},
-		ProcessNames:        []string{"codex"}, // Codex CLI binary
+		ProcessNames:        []string{"codex", "node"}, // Codex CLI binary (Node.js)
 		SessionIDEnv:        "",                // Codex captures from JSONL output
 		ResumeFlag:          "resume",
 		ResumeStyle:         "subcommand",
@@ -751,11 +751,15 @@ func GetProcessNames(agentName string) []string {
 // "opencode" instead of the built-in "codex" binary).
 //
 // Resolution order:
-//  1. If agentName matches a built-in preset AND the preset's Command matches
-//     the actual command → use the preset's ProcessNames (no mismatch).
-//  2. Otherwise, find a built-in preset whose Command matches the actual command
-//     and use its ProcessNames (custom agent using a known launcher).
-//  3. Fallback: [command] (fully custom binary).
+//  1. If agentName matches a built-in/registered preset with matching command,
+//     use the preset's ProcessNames.
+//  2. Merge ProcessNames from any built-in preset whose Command matches the
+//     actual command binary. This handles wrapper scripts/aliases where the
+//     custom agent's ProcessNames don't include the actual executable name
+//     (e.g., a custom "claude-zai" alias running the "claude" binary). See gt-kda.
+//  3. Otherwise, find a registered preset whose Command matches the actual
+//     command and use its ProcessNames.
+//  4. Fallback: [command] (fully custom binary).
 func ResolveProcessNames(agentName, command string) []string {
 	registryMu.Lock()
 	initRegistryLocked()
@@ -771,7 +775,19 @@ func ResolveProcessNames(agentName, command string) []string {
 	}
 	unwrappedCmdBase := strings.TrimPrefix(cmdBase, "gt-")
 
-	// Check if agentName matches a built-in/registered preset with matching command.
+	// Helper to accumulate unique process names.
+	seen := make(map[string]bool)
+	var result []string
+	addNames := func(names []string) {
+		for _, name := range names {
+			if !seen[name] {
+				seen[name] = true
+				result = append(result, name)
+			}
+		}
+	}
+
+	// 1. Check if agentName matches a built-in/registered preset with matching command.
 	// Compare against both the raw command and basename to handle registry entries
 	// that store absolute-path commands (e.g., "/opt/bin/my-tool").
 	if info, ok := globalRegistry.Agents[agentName]; ok && len(info.ProcessNames) > 0 {
@@ -780,11 +796,35 @@ func ResolveProcessNames(agentName, command string) []string {
 			filepath.Base(info.Command) == cmdBase ||
 			(info.Command == unwrappedCmdBase && strings.HasPrefix(cmdBase, "gt-")) ||
 			cmdBase == "" {
-			return info.ProcessNames
+			addNames(info.ProcessNames)
 		}
 	}
 
-	// Agent name doesn't match or command differs — look up by command
+	// 2. Merge process names from built-in presets whose Command matches the actual
+	// command binary. This ensures wrapper scripts/aliases are detected by the
+	// underlying executable name even when the custom agent's ProcessNames are
+	// different (gt-kda).
+	for presetName, preset := range builtinPresets {
+		// Skip if this is the same preset we already matched in step 1.
+		if string(presetName) == agentName {
+			continue
+		}
+		if len(preset.ProcessNames) == 0 {
+			continue
+		}
+		if preset.Command == command ||
+			preset.Command == cmdBase ||
+			filepath.Base(preset.Command) == cmdBase ||
+			(preset.Command == unwrappedCmdBase && strings.HasPrefix(cmdBase, "gt-")) {
+			addNames(preset.ProcessNames)
+		}
+	}
+
+	if len(result) > 0 {
+		return result
+	}
+
+	// 3. Agent name doesn't match or command differs — look up by command in full registry
 	if cmdBase != "" {
 		for _, info := range globalRegistry.Agents {
 			if len(info.ProcessNames) == 0 {

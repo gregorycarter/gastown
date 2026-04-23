@@ -190,8 +190,8 @@ func TestMergeRuntimeLivenessEnv_UsesEffectiveAgentForProcessNames(t *testing.T)
 	if got["GT_AGENT"] != "codex" {
 		t.Fatalf("GT_AGENT = %q, want %q", got["GT_AGENT"], "codex")
 	}
-	if got["GT_PROCESS_NAMES"] != "codex" {
-		t.Fatalf("GT_PROCESS_NAMES = %q, want %q (should resolve from effective agent, not runtimeConfig)", got["GT_PROCESS_NAMES"], "codex")
+	if got["GT_PROCESS_NAMES"] != "codex,node" {
+		t.Fatalf("GT_PROCESS_NAMES = %q, want %q (should resolve from effective agent, not runtimeConfig)", got["GT_PROCESS_NAMES"], "codex,node")
 	}
 }
 
