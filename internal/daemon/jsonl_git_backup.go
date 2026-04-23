@@ -92,12 +92,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	// Resolve git repo path.
 	gitRepo := config.GitRepo
 	if gitRepo == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			d.logger.Printf("jsonl_git_backup: cannot determine home dir: %v", err)
-			return
-		}
-		gitRepo = filepath.Join(homeDir, ".dolt-archive", "git")
+		gitRepo = filepath.Join(d.config.TownRoot, ".dolt-archive", "git")
 	}
 
 	// Verify git repo exists.

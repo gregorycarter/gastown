@@ -285,10 +285,8 @@ func checkBackupHealth(townRoot string) *BackupHealth {
 	}
 
 	// JSONL git backup freshness.
-	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		gitRepo := filepath.Join(homeDir, ".dolt-archive", "git")
-		if _, err := os.Stat(filepath.Join(gitRepo, ".git")); err == nil {
+	gitRepo := filepath.Join(townRoot, ".dolt-archive", "git")
+	if _, err := os.Stat(filepath.Join(gitRepo, ".git")); err == nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, "git", "-C", gitRepo, "log", "-1", "--format=%ci")
@@ -303,7 +301,6 @@ func checkBackupHealth(townRoot string) *BackupHealth {
 				}
 			}
 		}
-	}
 
 	return bh
 }
