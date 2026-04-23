@@ -22,7 +22,7 @@ func (m *mockBranchVerifier) BranchExists(branch string) (bool, error) {
 	return m.localBranches[branch], nil
 }
 
-func (m *mockBranchVerifier) RemoteTrackingBranchExists(remote, branch string) (bool, error) {
+func (m *mockBranchVerifier) PushRemoteBranchExists(remote, branch string) (bool, error) {
 	if m.remoteErr != nil {
 		return false, m.remoteErr
 	}
