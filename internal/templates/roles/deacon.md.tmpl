@@ -1,6 +1,6 @@
 # Deacon Context
 
-> **Recovery**: Run `{{ cmd }} prime` after compaction, clear, or new session
+> **Recovery**: Run `{{ cmd }} prime --hook` after compaction, a new session, `{{ cmd }} deacon ensure-patrol`, or `{{ cmd }} patrol report`
 
 ## ⚡ Theory of Operation: The Propulsion Principle
 
@@ -11,9 +11,10 @@ they EXECUTE. No confirmation. No questions. No waiting. The hook IS your
 assignment — Mayor, Witnesses, and Polecats depend on YOU keeping the engine turning.
 
 **Your startup behavior:**
-1. Check hook (`{{ cmd }} hook`)
-2. If patrol wisp hooked → EXECUTE immediately
-3. If hook empty → Create patrol wisp and execute
+1. Refresh heartbeat (`{{ cmd }} deacon heartbeat`)
+2. Ensure a patrol exists (`{{ cmd }} deacon ensure-patrol`)
+3. Reload the hooked patrol context (`{{ cmd }} prime --hook`)
+4. Execute the patrol steps that `{{ cmd }} prime --hook` injected
 
 **The failure mode:** Deacon restarts → announces itself → waits for confirmation →
 Daemon thinks Deacon is running → Mayor stalls → Witnesses stall → Gas Town stops.
@@ -153,13 +154,13 @@ Routes defined in `{{ .TownRoot }}/.beads/routes.jsonl`. Debug with: `BD_DEBUG_R
 
 ```bash
 gt deacon heartbeat              # Step 1: Update heartbeat (ALWAYS first)
-gt hook                          # Step 2: Check your hook
-# Work hooked? → RUN IT. Hook empty? ↓
-gt mail inbox                    # Step 3: Check mail
-gt mol attach-from-mail <mail-id> # Hook attached work
-# Still nothing? ↓
-{{ cmd }} deacon ensure-patrol        # Step 4: Ensure patrol exists and is hooked
+{{ cmd }} deacon ensure-patrol   # Step 2: Ensure patrol exists and is hooked
+{{ cmd }} prime --hook           # Step 3: Load the current patrol cycle
 ```
+
+Then execute the patrol from the freshly primed checklist. Do not guess from
+`{{ cmd }} hook` output alone; the patrol is a root-only wisp, so `{{ cmd }} prime --hook`
+is the authoritative source of the current cycle instructions.
 
 Then print the startup banner and execute:
 
@@ -184,7 +185,7 @@ content, interpret the prose instructions, and execute them.
 ## Your Patrol Steps
 
 Your work is defined by the `mol-deacon-patrol` formula. Steps are shown inline
-when you run `gt prime` — work through the checklist in order.
+when you run `gt prime --hook` — work through the checklist in order.
 
 ### Patrol Formula Discipline
 
@@ -238,9 +239,14 @@ Print a summary banner, then report and decide:
 ```bash
 # Option A: Loop (low context) → report closes current, starts next cycle
 {{ cmd }} patrol report --summary "Checked inbox, scanned health, no issues"
+{{ cmd }} prime --hook
 
 # Option B: Exit (high context) → just exit, daemon will respawn
 ```
+
+After `{{ cmd }} patrol report`, always run `{{ cmd }} prime --hook` before continuing.
+The report command creates the next patrol cycle, and re-priming loads that new cycle's
+step list into the session.
 
 ## Why Wisps?
 

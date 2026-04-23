@@ -51,7 +51,7 @@ Abbreviated patrol rules:
 - **resolve-external-deps**: SKIP.
 - **fire-notifications**: SKIP.
 - **heartbeat-mid**: SKIP (short cycle doesn't need mid-cycle refresh).
-- **health-scan**: Quick `gt witness status` / `gt refinery status` only. Skip nudges.
+- **health-scan**: Quick `gt rig list --json`, then `gt witness status <rig>` / `gt refinery status <rig>` only. Skip nudges.
 - **dolt-health**: SKIP.
 - **zombie-scan**: SKIP.
 - **plugin-run**: SKIP.
@@ -72,7 +72,7 @@ When `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mod
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-deacon-patrol"
-version = 14
+version = 15
 
 [vars]
 [vars.wisp_type]
@@ -1222,7 +1222,7 @@ After await-signal returns, check the EFFORT directive in the output:
 - inbox-check: Quick drain only, skip individual messages unless HELP/RECOVERED_BEAD
 - orphan-process-cleanup through fire-notifications: SKIP all
 - heartbeat-mid: SKIP
-- health-scan: Quick status checks only, skip nudges
+- health-scan: Quick `gt rig list --json`, then `gt witness status <rig>` / `gt refinery status <rig>` only, skip nudges
 - dolt-health through session-gc: SKIP all
 - wisp-compact through log-maintenance: SKIP all
 - patrol-cleanup: Quick inbox check only
@@ -1244,7 +1244,11 @@ gt patrol report --summary "<brief summary>" \
 The --steps flag is REQUIRED. List ALL 26 steps with their actual status.
 Steps you executed get OK, steps you skipped get SKIP.
 This closes the current patrol wisp and automatically creates a new one.
-4. Continue executing from the first step of the new patrol cycle
+4. Reload the new patrol cycle:
+```bash
+gt prime --hook
+```
+5. Continue executing from the first step of the newly primed patrol cycle
 
 **If context HIGH** (approaching limit):
 1. Write handoff mail with notable observations:

@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/style"
@@ -134,6 +135,7 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%s Started new patrol: %s\n", style.Success.Render("✓"), newPatrolID)
+	fmt.Printf("%s Run `%s prime --hook` to load the next patrol cycle before continuing.\n", style.Dim.Render("→"), cli.Name())
 	return nil
 }
 

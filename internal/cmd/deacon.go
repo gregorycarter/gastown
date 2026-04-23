@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
@@ -616,6 +617,7 @@ func runDeaconEnsurePatrol(cmd *cobra.Command, args []string) error {
 	}
 	if found {
 		fmt.Printf("%s Active deacon patrol already hooked: %s\n", style.Bold.Render("✓"), patrolID)
+		fmt.Printf("%s Run `%s prime --hook` to load the current patrol cycle.\n", style.Dim.Render("→"), cli.Name())
 		return nil
 	}
 
@@ -625,6 +627,7 @@ func runDeaconEnsurePatrol(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%s Deacon patrol ensured: %s\n", style.Bold.Render("✓"), patrolID)
+	fmt.Printf("%s Run `%s prime --hook` to load the current patrol cycle.\n", style.Dim.Render("→"), cli.Name())
 	return nil
 }
 
