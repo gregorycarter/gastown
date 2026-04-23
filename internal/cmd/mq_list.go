@@ -406,10 +406,10 @@ func calculateMRScore(issue *beads.Issue, fields *beads.MRFields, now time.Time)
 // branchVerifier abstracts git branch existence checks for testability.
 type branchVerifier interface {
 	BranchExists(branch string) (bool, error)
-	RemoteTrackingBranchExists(remote, branch string) (bool, error)
+	PushRemoteBranchExists(remote, branch string) (bool, error)
 }
 
-// verifyBranch checks if a branch exists locally or as a remote-tracking ref.
+// verifyBranch checks if a branch exists locally or on the configured push target.
 // Returns (missing, verifyErr).
 func verifyBranch(verify bool, client branchVerifier, fields *beads.MRFields) (bool, bool) {
 	if !verify || client == nil || fields == nil || fields.Branch == "" {
@@ -422,8 +422,7 @@ func verifyBranch(verify bool, client branchVerifier, fields *beads.MRFields) (b
 	if localExists {
 		return false, false
 	}
-	// Also check remote-tracking ref (polecats often only have origin refs)
-	remoteExists, rerr := client.RemoteTrackingBranchExists("origin", fields.Branch)
+	remoteExists, rerr := client.PushRemoteBranchExists("origin", fields.Branch)
 	if rerr != nil {
 		return false, true
 	}
