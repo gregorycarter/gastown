@@ -107,7 +107,7 @@ echo "=== Git Push ==="
 GIT_PUSHED=false
 
 # Check if we have a git backup repo configured
-BACKUP_REPO="$HOME/gt/.dolt-archive/git"
+BACKUP_REPO="$GT_TOWN_ROOT/.dolt-archive/git"
 
 if [ -d "$BACKUP_REPO/.git" ]; then
   cd "$BACKUP_REPO"

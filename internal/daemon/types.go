@@ -181,7 +181,7 @@ type JsonlGitBackupConfig struct {
 	Databases []string `json:"databases,omitempty"`
 
 	// GitRepo is the path to the git repository for backup.
-	// Default: ~/.dolt-archive/git
+	// Default: <town_root>/.dolt-archive/git
 	GitRepo string `json:"git_repo,omitempty"`
 
 	// Scrub controls whether ephemeral data is filtered out.
