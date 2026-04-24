@@ -238,7 +238,7 @@ type MRInfo struct {
 	UpdatedAt          time.Time // When the MR was last updated
 	Assignee           string    // Who claimed this MR (empty = unclaimed)
 	BranchExistsLocal  bool      // Whether the MR branch exists locally
-	BranchExistsRemote bool      // Whether the MR branch exists in remote tracking refs
+	BranchExistsRemote bool      // Whether the MR branch exists on the configured push target
 }
 
 // MRAnomaly represents an MR queue health problem that can stall processing.
@@ -1742,9 +1742,9 @@ func (e *Engineer) ListAllOpenMRs() ([]*MRInfo, error) {
 
 		mr := issueToMRInfo(issue, fields)
 
-		// Check branch existence (local + remote tracking refs)
+		// Check branch existence (local + push target)
 		mr.BranchExistsLocal, _ = e.git.BranchExists(fields.Branch)
-		mr.BranchExistsRemote, _ = e.git.RemoteTrackingBranchExists("origin", fields.Branch)
+		mr.BranchExistsRemote, _ = e.git.PushRemoteBranchExists("origin", fields.Branch)
 		mr.BlockedBy = e.firstOpenBlocker(issue)
 
 		mrs = append(mrs, mr)
@@ -1780,11 +1780,11 @@ func (e *Engineer) ListQueueAnomalies(now time.Time) ([]*MRAnomaly, error) {
 		if err != nil {
 			return false, false, err
 		}
-		remoteTrackingExists, err := e.git.RemoteTrackingBranchExists("origin", branch)
+		remoteExists, err := e.git.PushRemoteBranchExists("origin", branch)
 		if err != nil {
 			return false, false, err
 		}
-		return localExists, remoteTrackingExists, nil
+		return localExists, remoteExists, nil
 	}), nil
 }
 
@@ -2097,8 +2097,9 @@ func (e *Engineer) landConvoySwarm(townRoot string, convoy convoyInfo) {
 	integrationBranch := fmt.Sprintf("swarm/%s", moleculeID)
 	branchExists, err := e.git.BranchExists(integrationBranch)
 	if err != nil || !branchExists {
-		// Also check remote
-		remoteExists, _ := e.git.RemoteTrackingBranchExists("origin", integrationBranch)
+		// Also check the push target. In fork workflows, the branch may exist
+		// only on the push URL, not in origin's fetch-tracking refs.
+		remoteExists, _ := e.git.PushRemoteBranchExists("origin", integrationBranch)
 		if !remoteExists {
 			return // No integration branch to land
 		}
