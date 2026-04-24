@@ -1292,6 +1292,24 @@ func (d *Daemon) hasActiveWork() bool {
 	return false
 }
 
+// deaconNeedsRecoveryNudge returns true when the live deacon pane shows the
+// startup/hook state where a handoff bead exists but no molecule is attached,
+// or where startup was interrupted before patrol actually began. In this state
+// the normal idle guard is unsafe: there may be no town work in flight, but the
+// deacon is still broken and will not naturally refresh its heartbeat.
+func (d *Daemon) deaconNeedsRecoveryNudge(sessionName string) bool {
+	content, err := d.tmux.CapturePane(sessionName, 80)
+	if err != nil || content == "" {
+		return false
+	}
+
+	return strings.Contains(content, "naked - awaiting work assignment") ||
+		strings.Contains(content, "No molecule attached") ||
+		strings.Contains(content, "no handoff bead found for deacon/") ||
+		strings.Contains(content, "is not pinned") ||
+		(strings.Contains(content, "Interrupted") && strings.Contains(content, "gt sling mol-deacon-patrol"))
+}
+
 // runDegradedBootTriage performs mechanical Boot logic without AI reasoning.
 // This is for degraded mode when tmux is unavailable.
 func (d *Daemon) runDegradedBootTriage(b *boot.Boot) {
@@ -1501,6 +1519,14 @@ func (d *Daemon) checkDeaconHeartbeat() {
 		// See also: runtime/runtime.go:99-101 — session-started nudge was removed
 		// for the same reason (it interrupted the deacon's await-signal backoff).
 		if !d.hasActiveWork() {
+			if d.deaconNeedsRecoveryNudge(sessionName) {
+				d.logger.Println("Deacon idle guard bypassed: stale naked/interrupt state requires recovery nudge")
+				if err := d.tmux.NudgeSession(sessionName, "RECOVER: deacon patrol startup is incomplete. Run `gt hook` and `gt mol current`. If the hook is empty, or `gt mol current` says `naked - awaiting work assignment` / no molecule attached, run `gt sling mol-deacon-patrol .`. Then run `gt prime --hook` and follow the inline patrol steps. Do NOT use `gt mol attach` for deacon patrol recovery."); err != nil {
+					d.logger.Printf("Error nudging stuck Deacon: %v", err)
+				}
+				return
+			}
+
 			d.logger.Println("Deacon nudge skipped: no active work in flight, await-signal will fire naturally")
 			return
 		}

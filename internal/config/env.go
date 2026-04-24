@@ -356,6 +356,7 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		// Anthropic API (direct)
 		"ANTHROPIC_API_KEY",
 		"ANTHROPIC_AUTH_TOKEN",
+		"MOONSHOT_API_KEY",
 		"ANTHROPIC_BASE_URL",
 		"ANTHROPIC_CUSTOM_HEADERS",
 

@@ -427,11 +427,11 @@ gt convoy add <convoy-id> <issue-id...>  # Add issues to convoy
 
 ```bash
 # Set custom agent command
-gt config agent set claude-glm "claude-glm --model glm-4"
+gt config agent set claude-kimi "/Users/gregcarter/gastown-workspace/bin/claude-kimi --model kimi-k2.6"
 gt config agent set codex-low "codex --thinking low"
 
 # Set default agent
-gt config default-agent claude-glm
+gt config default-agent claude-kimi
 ```
 
 ### Monitoring & Health

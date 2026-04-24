@@ -771,6 +771,13 @@ func ResolveProcessNames(agentName, command string) []string {
 	}
 	unwrappedCmdBase := strings.TrimPrefix(cmdBase, "gt-")
 
+	// Claude-compatible wrappers exec the real claude binary, so liveness
+	// detection must look for "claude" rather than the wrapper basename.
+	switch cmdBase {
+	case "claude-kimi", "claude-zai":
+		return []string{"claude"}
+	}
+
 	// Check if agentName matches a built-in/registered preset with matching command.
 	// Compare against both the raw command and basename to handle registry entries
 	// that store absolute-path commands (e.g., "/opt/bin/my-tool").

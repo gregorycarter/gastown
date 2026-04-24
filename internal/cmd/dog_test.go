@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/wisp"
 )
 
 // =============================================================================
@@ -228,6 +229,58 @@ func TestDogDone_AlreadyIdle(t *testing.T) {
 	d, _ = m.Get("alpha")
 	if d.State != dog.StateIdle {
 		t.Errorf("After ClearWork: State = %q, want %q", d.State, dog.StateIdle)
+	}
+}
+
+func TestResolveDogDispatchRigNames_FiltersBlockedRigs(t *testing.T) {
+	townRoot := t.TempDir()
+	rigsConfig := &config.RigsConfig{
+		Version: 1,
+		Rigs: map[string]config.RigEntry{
+			"alpha": {},
+			"beta":  {},
+			"gamma": {},
+		},
+	}
+
+	if err := wisp.NewConfig(townRoot, "beta").Set(RigStatusKey, RigStatusParked); err != nil {
+		t.Fatalf("set beta parked: %v", err)
+	}
+
+	rigNames, err := resolveDogDispatchRigNames(townRoot, rigsConfig, "")
+	if err != nil {
+		t.Fatalf("resolveDogDispatchRigNames() error = %v", err)
+	}
+
+	if len(rigNames) != 2 {
+		t.Fatalf("resolveDogDispatchRigNames() len = %d, want 2 (%v)", len(rigNames), rigNames)
+	}
+	for _, blocked := range rigNames {
+		if blocked == "beta" {
+			t.Fatalf("resolveDogDispatchRigNames() included parked rig beta: %v", rigNames)
+		}
+	}
+}
+
+func TestResolveDogDispatchRigNames_RejectsBlockedRequestedRig(t *testing.T) {
+	townRoot := t.TempDir()
+	rigsConfig := &config.RigsConfig{
+		Version: 1,
+		Rigs: map[string]config.RigEntry{
+			"beta": {},
+		},
+	}
+
+	if err := wisp.NewConfig(townRoot, "beta").Set(RigStatusKey, RigStatusParked); err != nil {
+		t.Fatalf("set beta parked: %v", err)
+	}
+
+	_, err := resolveDogDispatchRigNames(townRoot, rigsConfig, "beta")
+	if err == nil {
+		t.Fatal("resolveDogDispatchRigNames() error = nil, want blocked rig error")
+	}
+	if got := err.Error(); got != "rig beta is not operational: parked" {
+		t.Fatalf("resolveDogDispatchRigNames() error = %q, want parked rig error", got)
 	}
 }
 

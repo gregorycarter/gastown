@@ -466,9 +466,9 @@ gt config default-agent [name]    # Get or set town default agent
 
 **Custom agents**: Define per-town via CLI or JSON:
 ```bash
-gt config agent set claude-glm "claude-glm --model glm-4"
+gt config agent set claude-kimi "/Users/gregcarter/gastown-workspace/bin/claude-kimi --model kimi-k2.6"
 gt config agent set claude "claude-opus"  # Override built-in
-gt config default-agent claude-glm       # Set default
+gt config default-agent claude-kimi      # Set default
 ```
 
 **Advanced agent config** (`settings/agents.json`):

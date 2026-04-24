@@ -353,6 +353,18 @@ func TestResolveProcessNames(t *testing.T) {
 			want:      []string{"my-binary"},
 		},
 		{
+			name:      "claude kimi wrapper resolves to claude runtime",
+			agentName: "claude-kimi-k26-thinking",
+			command:   "/Users/test/bin/claude-kimi",
+			want:      []string{"claude"},
+		},
+		{
+			name:      "legacy claude zai wrapper resolves to claude runtime",
+			agentName: "claude-glm-5",
+			command:   "/Users/test/bin/claude-zai",
+			want:      []string{"claude"},
+		},
+		{
 			name:      "empty agent and command",
 			agentName: "",
 			command:   "",

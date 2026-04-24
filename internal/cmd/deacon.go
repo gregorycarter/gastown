@@ -526,7 +526,7 @@ func startDeaconSession(t *tmux.Tmux, sessionName, agentOverride string) error {
 		Recipient: "deacon",
 		Sender:    "daemon",
 		Topic:     "patrol",
-	}, "I am Deacon. First run `gt deacon heartbeat`. Then check gt hook, and if it is empty run `gt sling mol-deacon-patrol .`, then execute the hook it creates.")
+	}, "I am Deacon. First run `gt deacon heartbeat`. Then check `gt hook` and `gt mol current`. If the hook is empty, or if `gt mol current` says `naked - awaiting work assignment` / no molecule attached, run `gt sling mol-deacon-patrol .`. After work is on the hook, execute it with `gt prime --hook` and follow the inline patrol steps. Do NOT use `gt mol attach` for deacon patrol recovery.")
 	startupCmd, err := config.BuildStartupCommandFromConfig(config.AgentEnvConfig{
 		Role:             "deacon",
 		TownRoot:         townRoot,

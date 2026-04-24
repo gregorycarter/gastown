@@ -79,9 +79,9 @@ set it explicitly for custom binary names. The provider controls
 session handling, tmux detection, hooks, and other runtime defaults.
 
 Examples:
-  gt config agent set claude-glm \"claude-glm --model glm-4\"
+  gt config agent set claude-kimi \"/Users/gregcarter/gastown-workspace/bin/claude-kimi --model kimi-k2.6\"
   gt config agent set gemini-custom gemini --approval-mode yolo
-  gt config agent set claude \"claude-glm\"  # Override built-in claude
+  gt config agent set claude \"claude-kimi\"  # Override built-in claude
   gt config agent set my-bot my-bot-cli --provider claude  # Use Claude defaults`,
 	Args: cobra.ExactArgs(2),
 	RunE: runConfigAgentSet,
@@ -1243,7 +1243,7 @@ This removes a custom agent from your town settings. Built-in agents
 (%s) cannot be removed.
 
 Examples:
-  gt config agent remove claude-glm`, presets)
+  gt config agent remove claude-kimi`, presets)
 
 	configDefaultAgentCmd.Long = fmt.Sprintf(`Get or set the default agent for the town.
 

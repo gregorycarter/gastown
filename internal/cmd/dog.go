@@ -1029,14 +1029,9 @@ func runDogDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading rigs config: %w", err)
 	}
 
-	var rigNames []string
-	for rigName := range rigsConfig.Rigs {
-		rigNames = append(rigNames, rigName)
-	}
-
-	// If --rig specified, search only that rig
-	if dogDispatchRig != "" {
-		rigNames = []string{dogDispatchRig}
+	rigNames, err := resolveDogDispatchRigNames(townRoot, rigsConfig, dogDispatchRig)
+	if err != nil {
+		return err
 	}
 
 	// Find the plugin using scanner
@@ -1250,6 +1245,25 @@ func runDogDispatch(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Work: %s\n", workDesc)
 
 	return nil
+}
+
+func resolveDogDispatchRigNames(townRoot string, rigsConfig *config.RigsConfig, requestedRig string) ([]string, error) {
+	if requestedRig != "" {
+		if blocked, reason := IsRigParkedOrDocked(townRoot, requestedRig); blocked {
+			return nil, fmt.Errorf("rig %s is not operational: %s", requestedRig, reason)
+		}
+		return []string{requestedRig}, nil
+	}
+
+	var rigNames []string
+	for rigName := range rigsConfig.Rigs {
+		if blocked, _ := IsRigParkedOrDocked(townRoot, rigName); blocked {
+			continue
+		}
+		rigNames = append(rigNames, rigName)
+	}
+
+	return rigNames, nil
 }
 
 // dogDispatchResult is the JSON output for gt dog dispatch.

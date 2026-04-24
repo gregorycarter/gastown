@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/wisp"
 )
 
 // testHandlerDaemon creates a minimal Daemon with a logger for handler tests.
@@ -108,6 +109,31 @@ func TestDetectStaleWorkingDogs_ClearsStaleWorkers(t *testing.T) {
 	}
 	if dg.Work != "" {
 		t.Errorf("stale dog work = %q, want empty", dg.Work)
+	}
+}
+
+func TestGetDogDispatchRigs_FiltersBlockedRigs(t *testing.T) {
+	townRoot := t.TempDir()
+	d := testHandlerDaemon(t, townRoot)
+
+	rigsConfig := &config.RigsConfig{
+		Version: 1,
+		Rigs: map[string]config.RigEntry{
+			"beta":  {},
+			"gamma": {},
+		},
+	}
+
+	if err := wisp.NewConfig(townRoot, "beta").Set("status", "parked"); err != nil {
+		t.Fatalf("set beta parked: %v", err)
+	}
+	if err := wisp.NewConfig(townRoot, "gamma").Set("status", "docked"); err != nil {
+		t.Fatalf("set gamma docked: %v", err)
+	}
+
+	got := d.getDogDispatchRigs(rigsConfig)
+	if len(got) != 0 {
+		t.Fatalf("getDogDispatchRigs() = %v, want no blocked rigs", got)
 	}
 }
 

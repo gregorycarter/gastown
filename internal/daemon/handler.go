@@ -216,13 +216,7 @@ func (d *Daemon) reapIdleDogs(mgr *dog.Manager, sm *dog.SessionManager, daemonCf
 // dispatchPlugins scans for plugins, evaluates cooldown gates, and dispatches
 // eligible plugins to idle dogs.
 func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsConfig *config.RigsConfig) {
-	// Get rig names for scanner
-	var rigNames []string
-	if rigsConfig != nil {
-		for name := range rigsConfig.Rigs {
-			rigNames = append(rigNames, name)
-		}
-	}
+	rigNames := d.getDogDispatchRigs(rigsConfig)
 
 	scanner := plugin.NewScanner(d.config.TownRoot, rigNames)
 	plugins, err := scanner.DiscoverAll()
@@ -318,6 +312,26 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm *dog.SessionManager, rigsC
 			d.logger.Printf("Handler: failed to record dispatch for plugin %s: %v", p.Name, err)
 		}
 	}
+}
+
+// getDogDispatchRigs returns the rig names whose rig-local plugins are eligible
+// for dog dispatch. Parked and docked rigs are excluded so daemon plugin scans
+// do not enqueue work against intentionally offline rigs.
+func (d *Daemon) getDogDispatchRigs(rigsConfig *config.RigsConfig) []string {
+	var rigNames []string
+	if rigsConfig == nil {
+		return rigNames
+	}
+
+	for rigName := range rigsConfig.Rigs {
+		if ok, reason := d.isRigOperational(rigName); ok {
+			rigNames = append(rigNames, rigName)
+		} else {
+			d.logger.Printf("Excluding %s from dog dispatch plugin scan: %s", rigName, reason)
+		}
+	}
+
+	return rigNames
 }
 
 // loadRigsConfig loads the rigs configuration from mayor/rigs.json.
