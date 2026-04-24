@@ -122,8 +122,13 @@ func EnsureCustomTypes(beadsDir string) error {
 	sentinelPath := filepath.Join(beadsDir, typesSentinel)
 	if data, err := os.ReadFile(sentinelPath); err == nil {
 		if strings.TrimSpace(string(data)) == typesList {
-			ensuredDirs[beadsDir] = true
-			return nil
+			if customTypesPersisted(beadsDir, typesList) {
+				ensuredDirs[beadsDir] = true
+				return nil
+			}
+			// The sentinel can outlive the DB config it was meant to prove
+			// (for example after Dolt DB recreation). Treat that as stale and
+			// fall through to reconfigure the persisted database value.
 		}
 		// Sentinel exists but is stale — fall through to re-configure
 	}
@@ -176,6 +181,48 @@ func EnsureCustomTypes(beadsDir string) error {
 
 	ensuredDirs[beadsDir] = true
 	return nil
+}
+
+func customTypesPersisted(beadsDir, typesList string) bool {
+	cmd := exec.Command("bd", "config", "get", "types.custom")
+	cmd.Dir = beadsDir
+	cmd.Env = beadsCommandEnv(beadsDir)
+	util.SetDetachedProcessGroup(cmd)
+
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return containsCSVItems(string(output), typesList)
+}
+
+func beadsCommandEnv(beadsDir string) []string {
+	env := append(stripEnvPrefixes(os.Environ(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="), "BEADS_DIR="+beadsDir)
+	if dbEnv := DatabaseEnv(beadsDir); dbEnv != "" {
+		env = append(env, dbEnv)
+	}
+	return env
+}
+
+func containsCSVItems(have, want string) bool {
+	haveSet := make(map[string]struct{})
+	for _, item := range strings.Split(have, ",") {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			haveSet[item] = struct{}{}
+		}
+	}
+
+	for _, item := range strings.Split(want, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := haveSet[item]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // EnsureCustomStatuses ensures the target beads directory has custom statuses configured.

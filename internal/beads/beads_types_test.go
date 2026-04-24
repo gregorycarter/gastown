@@ -306,6 +306,7 @@ func TestEnsureCustomTypes(t *testing.T) {
 	})
 
 	t.Run("sentinel file triggers cache hit", func(t *testing.T) {
+		logPath := installMockBDRecorder(t)
 		tmpDir := t.TempDir()
 		beadsDir := filepath.Join(tmpDir, ".beads")
 		if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -326,6 +327,14 @@ func TestEnsureCustomTypes(t *testing.T) {
 		err := EnsureCustomTypes(beadsDir)
 		if err != nil {
 			t.Errorf("expected success with sentinel file, got: %v", err)
+		}
+
+		logOutput := readMockBDLog(t, logPath)
+		if !strings.Contains(logOutput, "config get types.custom") {
+			t.Fatalf("mock bd log %q missing persisted config verification", logOutput)
+		}
+		if strings.Contains(logOutput, "config set types.custom") {
+			t.Fatalf("mock bd log %q unexpectedly reconfigured matching persisted types", logOutput)
 		}
 	})
 
@@ -363,6 +372,7 @@ func TestEnsureCustomTypes(t *testing.T) {
 	})
 
 	t.Run("in-memory cache prevents repeated calls", func(t *testing.T) {
+		logPath := installMockBDRecorder(t)
 		tmpDir := t.TempDir()
 		beadsDir := filepath.Join(tmpDir, ".beads")
 		if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -389,10 +399,88 @@ func TestEnsureCustomTypes(t *testing.T) {
 		if err := EnsureCustomTypes(beadsDir); err != nil {
 			t.Errorf("expected cache hit, got: %v", err)
 		}
+
+		logOutput := readMockBDLog(t, logPath)
+		if got := strings.Count(logOutput, "config get types.custom"); got != 1 {
+			t.Fatalf("config get types.custom count = %d, want 1 log=%q", got, logOutput)
+		}
 	})
 }
 
 func TestEnsureCustomTypes_VerifyPersistence(t *testing.T) {
+	t.Run("matching sentinel reconfigures when db config is missing", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("test uses Unix shell script mock for bd")
+		}
+
+		binDir := t.TempDir()
+		logPath := filepath.Join(binDir, "bd.log")
+		statePath := filepath.Join(binDir, "types.persisted")
+		typesList := strings.Join(constants.BeadsCustomTypesList(), ",")
+		script := `#!/bin/sh
+LOG_FILE='` + logPath + `'
+STATE_FILE='` + statePath + `'
+TYPES='` + typesList + `'
+printf '%s\n' "$*" >> "$LOG_FILE"
+cmd=""
+for arg in "$@"; do
+  case "$arg" in --*) ;; *) cmd="$arg"; break ;; esac
+done
+case "$cmd" in
+  init)
+    target="${BEADS_DIR:-$(pwd)/.beads}"
+    mkdir -p "$target/dolt"
+    printf 'prefix: gt\nissue-prefix: gt-\n' > "$target/config.yaml"
+    exit 0
+    ;;
+  config)
+    if echo "$*" | grep -q "get types.custom"; then
+      if [ -f "$STATE_FILE" ]; then
+        echo "$TYPES"
+      else
+        echo ""
+      fi
+      exit 0
+    fi
+    if echo "$*" | grep -q "set types.custom"; then
+      touch "$STATE_FILE"
+      exit 0
+    fi
+    exit 0
+    ;;
+  migrate) exit 0 ;;
+  *) exit 0 ;;
+esac
+`
+		if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+			t.Fatalf("write mock bd: %v", err)
+		}
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		sentinelPath := filepath.Join(beadsDir, typesSentinel)
+		if err := os.WriteFile(sentinelPath, []byte(typesList+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		ResetEnsuredDirs()
+
+		if err := EnsureCustomTypes(beadsDir); err != nil {
+			t.Fatalf("EnsureCustomTypes: %v", err)
+		}
+
+		logOutput := readMockBDLog(t, logPath)
+		for _, want := range []string{"config get types.custom", "config set types.custom"} {
+			if !strings.Contains(logOutput, want) {
+				t.Fatalf("mock bd log %q missing %q", logOutput, want)
+			}
+		}
+	})
+
 	t.Run("sentinel not written when db verify fails", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
 			t.Skip("test uses Unix shell script mock for bd")
