@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dog"
+	"github.com/steveyegge/gastown/internal/mail"
 )
 
 // =============================================================================
@@ -270,6 +271,74 @@ func TestDogDone_WorkingToIdle(t *testing.T) {
 	}
 	if d.Work != "" {
 		t.Errorf("After ClearWork: Work = %q, want empty", d.Work)
+	}
+}
+
+func TestShouldArchivePluginMail(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  *mail.Message
+		want bool
+	}{
+		{
+			name: "daemon plugin task unread",
+			msg: &mail.Message{
+				From:    "daemon",
+				Subject: "Plugin: stuck-agent-dog",
+				Type:    mail.TypeTask,
+			},
+			want: true,
+		},
+		{
+			name: "daemon plugin task read still archived",
+			msg: &mail.Message{
+				From:    "daemon",
+				Subject: "Plugin: stuck-agent-dog",
+				Type:    mail.TypeTask,
+				Read:    true,
+			},
+			want: true,
+		},
+		{
+			name: "non-daemon plugin mail ignored",
+			msg: &mail.Message{
+				From:    "mayor/",
+				Subject: "Plugin: stuck-agent-dog",
+				Type:    mail.TypeTask,
+			},
+			want: false,
+		},
+		{
+			name: "daemon non-plugin task ignored",
+			msg: &mail.Message{
+				From:    "daemon",
+				Subject: "HANDOFF: check kennel",
+				Type:    mail.TypeTask,
+			},
+			want: false,
+		},
+		{
+			name: "daemon plugin notification ignored",
+			msg: &mail.Message{
+				From:    "daemon",
+				Subject: "Plugin: stuck-agent-dog",
+				Type:    mail.TypeNotification,
+			},
+			want: false,
+		},
+		{
+			name: "nil message",
+			msg:  nil,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldArchivePluginMail(tt.msg); got != tt.want {
+				t.Fatalf("shouldArchivePluginMail() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

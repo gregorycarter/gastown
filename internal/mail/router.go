@@ -1834,6 +1834,13 @@ func AddressToSessionIDs(address string) []string {
 		return []string{session.OverseerSessionName()}
 	}
 
+	// Dog address: "deacon/dogs/<name>".
+	// Must be checked before the generic deacon prefix, otherwise
+	// deacon/dogs/alpha incorrectly routes to hq-deacon.
+	if identity, err := session.ParseAddress(address); err == nil && identity.Role == session.RoleDog {
+		return []string{identity.SessionName()}
+	}
+
 	// Mayor address: "mayor/" or "mayor"
 	if strings.HasPrefix(address, constants.RoleMayor) {
 		return []string{session.MayorSessionName()}

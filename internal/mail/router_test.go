@@ -183,6 +183,7 @@ func TestAddressToSessionIDs(t *testing.T) {
 		{"mayor", []string{"hq-mayor"}},
 		{"mayor/", []string{"hq-mayor"}},
 		{"deacon", []string{"hq-deacon"}},
+		{"deacon/dogs/alpha", []string{"hq-dog-alpha"}},
 
 		// Rig singletons - single session (no crew/polecat ambiguity)
 		{"gastown/refinery", []string{"gt-refinery"}},

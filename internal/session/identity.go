@@ -51,6 +51,14 @@ func ParseAddress(address string) (*AgentIdentity, error) {
 		return nil, fmt.Errorf("invalid address %q", address)
 	}
 
+	if len(parts) == 3 && parts[0] == string(RoleDeacon) && parts[1] == "dogs" {
+		name := parts[2]
+		if name == "" {
+			return nil, fmt.Errorf("invalid address %q", address)
+		}
+		return &AgentIdentity{Role: RoleDog, Name: name}, nil
+	}
+
 	rig := parts[0]
 	prefix := PrefixFor(rig)
 	switch len(parts) {

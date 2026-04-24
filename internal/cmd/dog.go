@@ -725,10 +725,9 @@ func splitPathComponents(path string) []string {
 	})
 }
 
-// closePluginMails archives all open "Plugin: " dispatch mails from a dog's inbox.
-// Plugin dispatch mails sent by the daemon accumulate because gt dog done never
-// closed them. On every UserPromptSubmit hook, gt mail check --inject re-injects
-// ALL open mails, causing context to balloon. This function cleans up eagerly.
+// closePluginMails archives daemon-issued plugin dispatch mails from a dog's inbox.
+// These task beads are usually already marked read/acked by the time a dog calls
+// gt dog done, so cleanup must not be limited to unread messages.
 // It is best-effort: failures are logged but do not prevent dog from going idle.
 func closePluginMails(dogName string) {
 	townRoot, err := workspace.FindFromCwd()
@@ -750,20 +749,32 @@ func closePluginMails(dogName string) {
 
 	closed := 0
 	for _, msg := range messages {
-		if msg.Read {
-			continue
-		}
-		if !strings.HasPrefix(msg.Subject, "Plugin: ") {
-			continue
-		}
-		if archErr := mailbox.Archive(msg.ID); archErr == nil {
-			closed++
+		if shouldArchivePluginMail(msg) {
+			if archErr := mailbox.Archive(msg.ID); archErr == nil {
+				closed++
+			}
 		}
 	}
 
 	if closed > 0 {
 		fmt.Printf("  Closed %d stale plugin mail(s) from inbox\n", closed)
 	}
+}
+
+func shouldArchivePluginMail(msg *mail.Message) bool {
+	if msg == nil {
+		return false
+	}
+	if msg.From != "daemon" {
+		return false
+	}
+	if msg.Type != mail.TypeTask {
+		return false
+	}
+	if !strings.HasPrefix(msg.Subject, "Plugin: ") {
+		return false
+	}
+	return true
 }
 
 func runDogStatus(cmd *cobra.Command, args []string) error {
@@ -1268,4 +1279,3 @@ func ifStr(cond bool, ifTrue, ifFalse string) string {
 	}
 	return ifFalse
 }
-
