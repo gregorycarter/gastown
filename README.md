@@ -136,7 +136,7 @@ Federated work coordination network linking Gas Towns through DoltHub. Rigs post
 
 ```bash
 # Install Gas Town
-$ brew install gastown                                    # Homebrew (recommended)
+$ brew install gastownhall/gastown/gastown                # Homebrew (recommended)
 $ npm install -g @gastown/gt                              # npm
 $ go install github.com/steveyegge/gastown/cmd/gt@latest  # From source (Linux only)
 

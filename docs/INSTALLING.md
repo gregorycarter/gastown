@@ -85,20 +85,20 @@ tmux -V           # (Optional) Should show 3.0 or higher
 
 ```bash
 # Install Gas Town CLI
-go install github.com/steveyegge/gastown/cmd/gt@latest
-
-# Install Beads (issue tracker)
-go install github.com/steveyegge/beads/cmd/bd@latest
+brew install gastownhall/gastown/gastown
 
 # Verify installation
 gt version
 bd version
 ```
 
-If `gt` is not found, ensure `$GOPATH/bin` (usually `~/go/bin`) is in your PATH:
+Homebrew installs the runtime dependencies declared by the formula. If you build
+from source instead, install `gt` and `bd` with Go and ensure `$GOPATH/bin`
+(usually `~/go/bin`) is in your PATH:
 
 ```bash
-# Add to ~/.bashrc, ~/.zshrc, or equivalent
+go install github.com/steveyegge/gastown/cmd/gt@latest
+go install github.com/steveyegge/beads/cmd/bd@latest
 export PATH="$PATH:$HOME/go/bin"
 ```
 
