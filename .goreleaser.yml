@@ -165,7 +165,7 @@ release:
 
     **Homebrew (macOS/Linux):**
     ```bash
-    brew install gastownhall/gastown/gastown
+    brew install gastown
     ```
 
     **npm (Node.js):**

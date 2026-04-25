@@ -84,6 +84,12 @@ The tap formula installs prebuilt release assets:
 brew install gastownhall/gastown/gastown
 ```
 
+The normal user-facing Homebrew path remains homebrew-core:
+
+```bash
+brew install gastown
+```
+
 ## Homebrew core
 
 If Gastown is listed in **homebrew-core**, the formula lives at:

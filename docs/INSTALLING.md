@@ -85,16 +85,17 @@ tmux -V           # (Optional) Should show 3.0 or higher
 
 ```bash
 # Install Gas Town CLI
-brew install gastownhall/gastown/gastown
+brew install gastown
 
 # Verify installation
 gt version
 bd version
 ```
 
-Homebrew installs the runtime dependencies declared by the formula. If you build
-from source instead, install `gt` and `bd` with Go and ensure `$GOPATH/bin`
-(usually `~/go/bin`) is in your PATH:
+Homebrew installs the runtime dependencies declared by the core formula. The
+`gastownhall/gastown` tap is reserved for emergency updates. If you build from
+source instead, install `gt` and `bd` with Go and ensure `$GOPATH/bin` (usually
+`~/go/bin`) is in your PATH:
 
 ```bash
 go install github.com/steveyegge/gastown/cmd/gt@latest
