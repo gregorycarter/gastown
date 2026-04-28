@@ -1676,9 +1676,10 @@ func checkAndCloseCompletedConvoys(townBeads string, dryRun bool) ([]struct{ ID,
 	return closed, nil
 }
 
-// notifyConvoyCompletion sends notifications to owner and any notify addresses.
+// notifyConvoyCompletion sends notifications to owner and any notify addresses,
+// plus a detailed completion notification to the Overseer (mayor/).
 func notifyConvoyCompletion(townBeads, convoyID, title string) {
-	// Get convoy description to find owner and notify addresses
+	// Get convoy details including description, created_at, and closed_at
 	showArgs := []string{"show", convoyID, "--json"}
 	showCmd := exec.Command("bd", showArgs...)
 	showCmd.Dir = townBeads
@@ -1691,13 +1692,16 @@ func notifyConvoyCompletion(townBeads, convoyID, title string) {
 
 	var convoys []struct {
 		Description string `json:"description"`
+		CreatedAt   string `json:"created_at"`
+		ClosedAt    string `json:"closed_at"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &convoys); err != nil || len(convoys) == 0 {
 		return
 	}
+	convoy := convoys[0]
 
 	// ZFC: Use typed accessor instead of parsing description text
-	fields := beads.ParseConvoyFields(&beads.Issue{Description: convoys[0].Description})
+	fields := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description})
 	for _, addr := range fields.NotificationAddresses() {
 		mailArgs := []string{"mail", "send", addr,
 			"-s", fmt.Sprintf("🚚 Convoy landed: %s", title),
@@ -1717,8 +1721,76 @@ func notifyConvoyCompletion(townBeads, convoyID, title string) {
 		}
 	}
 
+	// Get tracked issues count for mayor notification
+	trackedIDs := getConvoyTrackedIDsForNotify(townBeads, convoyID)
+	issueCount := len(trackedIDs)
+
+	// Compute duration
+	durationStr := ""
+	if convoy.CreatedAt != "" && convoy.ClosedAt != "" {
+		if start, err := time.Parse(time.RFC3339, convoy.CreatedAt); err == nil {
+			if end, err := time.Parse(time.RFC3339, convoy.ClosedAt); err == nil {
+				durationStr = formatNotifyDuration(end.Sub(start))
+			}
+		}
+	}
+
+	// Send detailed completion notification to mayor
+	var bodyParts []string
+	bodyParts = append(bodyParts, fmt.Sprintf("Convoy %s has completed. All tracked issues closed.", convoyID))
+	if durationStr != "" {
+		bodyParts = append(bodyParts, fmt.Sprintf("Duration: %s", durationStr))
+	}
+	bodyParts = append(bodyParts, fmt.Sprintf("Issues: %d", issueCount))
+	bodyParts = append(bodyParts, "")
+	bodyParts = append(bodyParts, fmt.Sprintf("Summary: %s", title))
+
+	subject := fmt.Sprintf("Convoy complete: %s", title)
+	body := strings.Join(bodyParts, "\n")
+
+	mailCmd := exec.Command("gt", "mail", "send", "mayor/", "-s", subject, "-m", body)
+	mailCmd.Dir = townBeads
+	if err := mailCmd.Run(); err != nil {
+		style.PrintWarning("could not notify mayor: %v", err)
+	}
+
 	// Push notification to active Mayor session if configured
 	notifyMayorSession(townBeads, convoyID, title)
+}
+
+// getConvoyTrackedIDsForNotify returns the IDs of issues tracked by a convoy.
+// Lightweight variant for notification purposes.
+func getConvoyTrackedIDsForNotify(townBeads, convoyID string) []string {
+	trackedIDs, err := bdDepListRawIDs(townBeads, convoyID, "down", "tracks")
+	if err != nil {
+		trackedIDs, err = bdDepListTracked(townBeads, convoyID)
+		if err != nil {
+			return nil
+		}
+	}
+	if len(trackedIDs) == 0 {
+		trackedIDs, _ = bdShowTrackedDeps(townBeads, convoyID)
+	}
+	return trackedIDs
+}
+
+// formatNotifyDuration formats a duration as a human-readable string.
+func formatNotifyDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	days := int(d.Hours() / 24)
+	hours := int(d.Hours()) % 24
+	if hours == 0 {
+		return fmt.Sprintf("%dd", days)
+	}
+	return fmt.Sprintf("%dd%dh", days, hours)
 }
 
 // notifyMayorSession pushes a convoy completion notification into the active

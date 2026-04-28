@@ -269,7 +269,7 @@ type Engineer struct {
 	beads                 *beads.Beads
 	git                   *git.Git
 	config                *MergeQueueConfig
-	prProvider            PRProvider   // VCS-specific PR operations (nil when MergeStrategy != "pr")
+	prProvider            PRProvider // VCS-specific PR operations (nil when MergeStrategy != "pr")
 	workDir               string
 	output                io.Writer    // Output destination for user-facing messages
 	router                *mail.Router // Mail router for sending protocol messages
@@ -349,21 +349,21 @@ func (e *Engineer) LoadConfig() error {
 	// Parse merge_queue section into our config struct
 	// We need special handling for poll_interval (string -> Duration)
 	var mqRaw struct {
-		Enabled              *bool                      `json:"enabled"`
-		OnConflict           *string                    `json:"on_conflict"`
-		RunTests             *bool                      `json:"run_tests"`
-		TestCommand          *string                    `json:"test_command"`
-		DeleteMergedBranches *bool                      `json:"delete_merged_branches"`
-		RetryFlakyTests      *int                       `json:"retry_flaky_tests"`
-		PollInterval         *string                    `json:"poll_interval"`
-		MaxConcurrent        *int                       `json:"max_concurrent"`
-		StaleClaimTimeout    *string                    `json:"stale_claim_timeout"`
-		Gates                map[string]*gateConfigRaw  `json:"gates"`
-		GatesParallel        *bool                      `json:"gates_parallel"`
-		AutoPush             *bool                      `json:"auto_push"`
-		MergeStrategy        *string                    `json:"merge_strategy"`
-		VCSProvider          *string                    `json:"vcs_provider"`
-		RequireReview        *bool                      `json:"require_review"`
+		Enabled              *bool                     `json:"enabled"`
+		OnConflict           *string                   `json:"on_conflict"`
+		RunTests             *bool                     `json:"run_tests"`
+		TestCommand          *string                   `json:"test_command"`
+		DeleteMergedBranches *bool                     `json:"delete_merged_branches"`
+		RetryFlakyTests      *int                      `json:"retry_flaky_tests"`
+		PollInterval         *string                   `json:"poll_interval"`
+		MaxConcurrent        *int                      `json:"max_concurrent"`
+		StaleClaimTimeout    *string                   `json:"stale_claim_timeout"`
+		Gates                map[string]*gateConfigRaw `json:"gates"`
+		GatesParallel        *bool                     `json:"gates_parallel"`
+		AutoPush             *bool                     `json:"auto_push"`
+		MergeStrategy        *string                   `json:"merge_strategy"`
+		VCSProvider          *string                   `json:"vcs_provider"`
+		RequireReview        *bool                     `json:"require_review"`
 	}
 
 	if err := json.Unmarshal(rawConfig.MergeQueue, &mqRaw); err != nil {
@@ -836,7 +836,6 @@ func (e *Engineer) doMergePR(ctx context.Context, branch, target string) Process
 		MergeCommit: mergeCommit,
 	}
 }
-
 
 func (e *Engineer) acquireMainPushSlot(ctx context.Context) (string, error) {
 	slotID, err := e.mergeSlotEnsureExists()
@@ -2062,7 +2061,8 @@ func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []c
 	return closed
 }
 
-// notifyConvoyCompletion sends notifications to convoy owner and notify addresses.
+// notifyConvoyCompletion sends notifications to convoy owner and notify addresses,
+// plus a completion notification to the Overseer (mayor/).
 func (e *Engineer) notifyConvoyCompletion(townRoot, convoyID, title, description string) {
 	// ZFC: Use typed accessor instead of parsing description text
 	fields := beads.ParseConvoyFields(&beads.Issue{Description: description})
@@ -2076,6 +2076,14 @@ func (e *Engineer) notifyConvoyCompletion(townRoot, convoyID, title, description
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not notify %s: %v\n", addr, err)
 		}
 	}
+
+	// Notify mayor of convoy completion
+	subject := fmt.Sprintf("Convoy complete: %s", title)
+	body := fmt.Sprintf("Convoy %s has completed. All tracked issues closed.\n\nSummary: %s\n\nClosed by: %s/refinery", convoyID, title, e.rig.Name)
+	mailCmd := exec.Command("gt", "mail", "send", "mayor/", "-s", subject, "-m", body)
+	util.SetDetachedProcessGroup(mailCmd)
+	mailCmd.Dir = townRoot
+	_ = mailCmd.Run() // Best effort
 }
 
 // landConvoySwarm checks if a completed convoy has an associated swarm with an

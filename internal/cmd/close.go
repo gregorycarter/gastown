@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/workspace"
 
@@ -102,6 +104,7 @@ func runClose(cmd *cobra.Command, args []string) error {
 	beadIDs := extractBeadIDs(filteredArgs)
 	if len(beadIDs) > 0 {
 		checkConvoyCompletion(beadIDs)
+		notifyCrossRigDependents(beadIDs)
 	}
 
 	return nil
@@ -208,9 +211,9 @@ func extractBeadIDs(args []string) []string {
 	// Flags that consume a following argument (value flags without = form)
 	valueFlags := map[string]bool{
 		"--reason": true, "-r": true,
-		"--session": true,
-		"--actor": true,
-		"--db": true,
+		"--session":          true,
+		"--actor":            true,
+		"--db":               true,
 		"--dolt-auto-commit": true,
 		// Also handle the --comment alias (before conversion)
 		"--comment": true,
@@ -271,5 +274,77 @@ func checkConvoyCompletion(beadIDs []string) {
 
 	for _, beadID := range beadIDs {
 		convoy.CheckConvoysForIssue(ctx, store, townRoot, beadID, "Close", nil, gtPath, nil)
+	}
+}
+
+// notifyCrossRigDependents checks for cross-rig dependents of closed issues
+// and notifies the affected rig witnesses. Best-effort: errors are silently
+// ignored since the daemon's event polling serves as a backup mechanism.
+func notifyCrossRigDependents(beadIDs []string) {
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil || townRoot == "" {
+		return
+	}
+
+	for _, beadID := range beadIDs {
+		closedPrefix := beads.ExtractPrefix(beadID)
+
+		// Get issue details including dependents
+		showCmd := exec.Command("bd", "show", beadID, "--json")
+		showCmd.Dir = townRoot
+		showCmd.Env = filterEnvKey(os.Environ(), "BEADS_DIR")
+		var stdout bytes.Buffer
+		showCmd.Stdout = &stdout
+
+		if err := showCmd.Run(); err != nil {
+			continue
+		}
+
+		var issues []struct {
+			ID         string `json:"id"`
+			Title      string `json:"title"`
+			Dependents []struct {
+				ID             string `json:"id"`
+				Title          string `json:"title"`
+				DependencyType string `json:"dependency_type"`
+			} `json:"dependents"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil || len(issues) == 0 {
+			continue
+		}
+
+		// Group cross-rig blocked dependents by rig
+		dependentsByRig := make(map[string][]struct{ id, title string })
+		for _, dep := range issues[0].Dependents {
+			if dep.DependencyType != "blocks" {
+				continue
+			}
+			depPrefix := beads.ExtractPrefix(dep.ID)
+			if depPrefix == "" || depPrefix == closedPrefix {
+				continue // same rig or no prefix
+			}
+			rig := beads.GetRigNameForPrefix(townRoot, depPrefix)
+			if rig == "" {
+				continue
+			}
+			dependentsByRig[rig] = append(dependentsByRig[rig], struct{ id, title string }{dep.ID, dep.Title})
+		}
+
+		// Notify each affected rig's witness
+		for rig, deps := range dependentsByRig {
+			var bodyParts []string
+			bodyParts = append(bodyParts, fmt.Sprintf("External dependency %s has closed.", beadID))
+			for _, dep := range deps {
+				bodyParts = append(bodyParts, fmt.Sprintf("Unblocked: %s (%s)", dep.id, dep.title))
+			}
+			bodyParts = append(bodyParts, "This issue may now proceed.")
+
+			subject := fmt.Sprintf("Dependency resolved: %s", beadID)
+			body := strings.Join(bodyParts, "\n")
+
+			mailCmd := exec.Command("gt", "mail", "send", rig+"/witness", "-s", subject, "-m", body)
+			mailCmd.Dir = townRoot
+			_ = mailCmd.Run() // Best effort
+		}
 	}
 }
