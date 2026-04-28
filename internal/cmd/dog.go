@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -40,6 +41,11 @@ var (
 	dogHealthJSON          bool
 	dogHealthAutoClear     bool
 	dogHealthMaxInactivity time.Duration
+
+	// Maintain flags
+	dogMaintainDryRun bool
+	dogMaintainJSON   bool
+	dogMaintainMaxAge time.Duration
 )
 
 var dogCmd = &cobra.Command{
@@ -253,6 +259,29 @@ Examples:
 	RunE: runDogHealthCheck,
 }
 
+var dogMaintainCmd = &cobra.Command{
+	Use:   "maintain",
+	Short: "Maintain dog pool size and retire stale dogs",
+	Long: `Automated dog pool maintenance.
+
+Checks pool status and takes corrective action:
+  1. If no idle dogs and pool is under capacity, auto-creates one
+  2. Removes idle dogs that have been inactive longer than --max-age
+
+Pool sizing respects operational config (default max 4, min 1 idle).
+
+Exit codes:
+  0 = pool has at least 1 idle dog
+  1 = error or pool still has 0 idle dogs after maintenance
+
+Examples:
+  gt dog maintain              # Run maintenance
+  gt dog maintain --dry-run    # Preview actions without executing
+  gt dog maintain --json       # Output JSON report
+  gt dog maintain --max-age 4h # Retire dogs idle longer than 4 hours`,
+	RunE: runDogMaintain,
+}
+
 func init() {
 	// List flags
 	dogListCmd.Flags().BoolVar(&dogListJSON, "json", false, "Output as JSON")
@@ -284,6 +313,11 @@ func init() {
 	dogHealthCheckCmd.Flags().BoolVar(&dogHealthAutoClear, "auto-clear", false, "Auto-clear zombie dogs")
 	dogHealthCheckCmd.Flags().DurationVar(&dogHealthMaxInactivity, "max-inactivity", 10*time.Minute, "Max inactivity before considering hung")
 
+	// Maintain flags
+	dogMaintainCmd.Flags().BoolVar(&dogMaintainDryRun, "dry-run", false, "Preview actions without executing")
+	dogMaintainCmd.Flags().BoolVar(&dogMaintainJSON, "json", false, "Output as JSON")
+	dogMaintainCmd.Flags().DurationVar(&dogMaintainMaxAge, "max-age", 24*time.Hour, "Max idle age before retiring a dog")
+
 	// Add subcommands
 	dogCmd.AddCommand(dogAddCmd)
 	dogCmd.AddCommand(dogRemoveCmd)
@@ -294,6 +328,7 @@ func init() {
 	dogCmd.AddCommand(dogStatusCmd)
 	dogCmd.AddCommand(dogDispatchCmd)
 	dogCmd.AddCommand(dogHealthCheckCmd)
+	dogCmd.AddCommand(dogMaintainCmd)
 
 	rootCmd.AddCommand(dogCmd)
 }
@@ -1004,6 +1039,157 @@ func runDogHealthCheck(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// runDogMaintain automates dog pool maintenance: add dogs when pool is empty,
+// retire stale idle dogs, and ensure at least 1 idle dog remains.
+func runDogMaintain(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil {
+		return fmt.Errorf("finding town root: %w", err)
+	}
+
+	mgr, err := getDogManager()
+	if err != nil {
+		return err
+	}
+
+	// Load max pool size from operational config
+	maxPoolSize := config.DefaultMaxDogPoolSize
+	if opCfg := config.LoadOperationalConfig(townRoot); opCfg != nil {
+		maxPoolSize = opCfg.GetDaemonConfig().MaxDogPoolSizeV()
+	}
+
+	dogs, err := mgr.List()
+	if err != nil {
+		return fmt.Errorf("listing dogs: %w", err)
+	}
+
+	var idleCount, workingCount int
+	var idleDogs []*dog.Dog
+	for _, d := range dogs {
+		if d.State == dog.StateIdle {
+			idleCount++
+			idleDogs = append(idleDogs, d)
+		} else {
+			workingCount++
+		}
+	}
+	totalCount := len(dogs)
+
+	var added []string
+	var retired []string
+
+	// Step 1: Ensure minimum idle dogs
+	if idleCount == 0 && totalCount < maxPoolSize {
+		newName := generateDogName(mgr)
+		if dogMaintainDryRun {
+			added = append(added, newName)
+		} else {
+			if _, err := mgr.Add(newName); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to add dog %s: %v\n", newName, err)
+			} else {
+				added = append(added, newName)
+				idleCount++
+				totalCount++
+			}
+		}
+	}
+
+	// Step 2: Retire stale idle dogs (keep at least 1 idle)
+	// Sort by LastActive ascending (oldest first)
+	sort.Slice(idleDogs, func(i, j int) bool {
+		return idleDogs[i].LastActive.Before(idleDogs[j].LastActive)
+	})
+
+	for _, d := range idleDogs {
+		if idleCount <= 1 {
+			break // Must keep at least 1 idle dog
+		}
+		if time.Since(d.LastActive) > dogMaintainMaxAge {
+			if dogMaintainDryRun {
+				retired = append(retired, d.Name)
+				idleCount--
+			} else {
+				if err := mgr.Remove(d.Name); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to remove dog %s: %v\n", d.Name, err)
+				} else {
+					retired = append(retired, d.Name)
+					idleCount--
+				}
+			}
+		}
+	}
+
+	// Output
+	if dogMaintainJSON {
+		type MaintainReport struct {
+			Total   int      `json:"total"`
+			Idle    int      `json:"idle"`
+			Working int      `json:"working"`
+			Max     int      `json:"max"`
+			Added   []string `json:"added,omitempty"`
+			Retired []string `json:"retired,omitempty"`
+			OK      bool     `json:"ok"`
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(MaintainReport{
+			Total:   totalCount,
+			Idle:    idleCount,
+			Working: workingCount,
+			Max:     maxPoolSize,
+			Added:   added,
+			Retired: retired,
+			OK:      idleCount >= 1,
+		})
+	}
+
+	fmt.Println(style.Bold.Render("Dog Pool Maintenance"))
+	fmt.Println()
+	fmt.Printf("  Pool: %d/%d (%d idle, %d working)\n", totalCount, maxPoolSize, idleCount, workingCount)
+
+	if len(added) > 0 {
+		fmt.Println()
+		for _, name := range added {
+			if dogMaintainDryRun {
+				fmt.Printf("  %s Would add dog %s (pool empty)\n", style.Dim.Render("→"), name)
+			} else {
+				fmt.Printf("  %s Added dog %s (pool was empty)\n", style.Bold.Render("✓"), name)
+			}
+		}
+	}
+
+	if len(retired) > 0 {
+		fmt.Println()
+		for _, name := range retired {
+			if dogMaintainDryRun {
+				fmt.Printf("  %s Would retire stale dog %s\n", style.Dim.Render("→"), name)
+			} else {
+				fmt.Printf("  %s Retired stale dog %s\n", style.Bold.Render("✓"), name)
+			}
+		}
+	}
+
+	if len(added) == 0 && len(retired) == 0 {
+		fmt.Println()
+		fmt.Println(style.Dim.Render("  No action needed."))
+	}
+
+	fmt.Println()
+	if idleCount >= 1 {
+		fmt.Println(style.Dim.Render("  Exit criteria met: at least 1 idle dog available."))
+		return nil
+	}
+
+	if dogMaintainDryRun && len(added) > 0 {
+		fmt.Println(style.Dim.Render("  Dry run: pool would have at least 1 idle dog after maintenance."))
+		return nil
+	}
+
+	msg := "pool has 0 idle dogs (all working and at capacity)"
+	fmt.Println(style.Bold.Render("  ⚠ " + msg))
+	return fmt.Errorf("%s", msg)
+}
+
 // runDogDispatch dispatches plugin execution to a dog worker.
 func runDogDispatch(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwd()
@@ -1268,4 +1454,3 @@ func ifStr(cond bool, ifTrue, ifFalse string) string {
 	}
 	return ifFalse
 }
-

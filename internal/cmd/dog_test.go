@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dog"
@@ -461,5 +463,198 @@ func TestDogFormatTimeAgo_ZeroTime(t *testing.T) {
 	got := dogFormatTimeAgo(time.Time{})
 	if got != "(unknown)" {
 		t.Errorf("dogFormatTimeAgo(zero) = %q, want '(unknown)'", got)
+	}
+}
+
+// =============================================================================
+// Dog Maintain Tests
+// =============================================================================
+
+// setupTestWorkspace creates a minimal Gas Town workspace for testing commands
+// that rely on workspace discovery.
+func setupTestWorkspace(t *testing.T) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatalf("creating mayor dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"name":"test-town"}`), 0644); err != nil {
+		t.Fatalf("writing town.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(`{"version":1,"rigs":{"gastown":{"git_url":"git@github.com:test/gastown.git"}}}`), 0644); err != nil {
+		t.Fatalf("writing rigs.json: %v", err)
+	}
+
+	return tmpDir
+}
+
+func TestDogMaintain_DryRunDoesNotModify(t *testing.T) {
+	tmpDir := setupTestWorkspace(t)
+
+	origWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(origWd)
+
+	cmd := &cobra.Command{}
+	dogMaintainDryRun = true
+	dogMaintainJSON = false
+	dogMaintainMaxAge = 24 * time.Hour
+
+	err := runDogMaintain(cmd, nil)
+	if err != nil {
+		t.Fatalf("runDogMaintain error = %v", err)
+	}
+
+	m := dog.NewManager(tmpDir, &config.RigsConfig{Rigs: map[string]config.RigEntry{"gastown": {}}})
+	dogs, err := m.List()
+	if err != nil {
+		t.Fatalf("List error = %v", err)
+	}
+	if len(dogs) != 0 {
+		t.Fatalf("Expected 0 dogs in dry-run, got %d", len(dogs))
+	}
+}
+
+func TestDogMaintain_RetiresStaleDogs(t *testing.T) {
+	tmpDir := setupTestWorkspace(t)
+
+	origWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(origWd)
+
+	now := time.Now()
+
+	// Create two idle dogs; one is stale (>24h), one is fresh
+	m := dog.NewManager(tmpDir, &config.RigsConfig{Rigs: map[string]config.RigEntry{"gastown": {}}})
+	setupTestDog(t, m, tmpDir, "alpha", &dog.DogState{
+		Name:       "alpha",
+		State:      dog.StateIdle,
+		LastActive: now.Add(-25 * time.Hour),
+		CreatedAt:  now.Add(-25 * time.Hour),
+		UpdatedAt:  now.Add(-25 * time.Hour),
+	})
+	setupTestDog(t, m, tmpDir, "bravo", &dog.DogState{
+		Name:       "bravo",
+		State:      dog.StateIdle,
+		LastActive: now,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	})
+
+	cmd := &cobra.Command{}
+	dogMaintainDryRun = false
+	dogMaintainJSON = false
+	dogMaintainMaxAge = 24 * time.Hour
+
+	err := runDogMaintain(cmd, nil)
+	if err != nil {
+		t.Fatalf("runDogMaintain error = %v", err)
+	}
+
+	dogs, err := m.List()
+	if err != nil {
+		t.Fatalf("List error = %v", err)
+	}
+	if len(dogs) != 1 {
+		t.Fatalf("Expected 1 dog after retiring stale, got %d", len(dogs))
+	}
+	if dogs[0].Name != "bravo" {
+		t.Errorf("Expected bravo to remain, got %s", dogs[0].Name)
+	}
+}
+
+func TestDogMaintain_KeepsOneIdleMinimum(t *testing.T) {
+	tmpDir := setupTestWorkspace(t)
+
+	origWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(origWd)
+
+	now := time.Now()
+
+	// Create one stale idle dog — it should NOT be removed because we must keep 1 idle
+	m := dog.NewManager(tmpDir, &config.RigsConfig{Rigs: map[string]config.RigEntry{"gastown": {}}})
+	setupTestDog(t, m, tmpDir, "alpha", &dog.DogState{
+		Name:       "alpha",
+		State:      dog.StateIdle,
+		LastActive: now.Add(-25 * time.Hour),
+		CreatedAt:  now.Add(-25 * time.Hour),
+		UpdatedAt:  now.Add(-25 * time.Hour),
+	})
+
+	cmd := &cobra.Command{}
+	dogMaintainDryRun = false
+	dogMaintainJSON = false
+	dogMaintainMaxAge = 24 * time.Hour
+
+	err := runDogMaintain(cmd, nil)
+	if err != nil {
+		t.Fatalf("runDogMaintain error = %v", err)
+	}
+
+	dogs, err := m.List()
+	if err != nil {
+		t.Fatalf("List error = %v", err)
+	}
+	if len(dogs) != 1 {
+		t.Fatalf("Expected 1 dog (minimum idle kept), got %d", len(dogs))
+	}
+	if dogs[0].Name != "alpha" {
+		t.Errorf("Expected alpha to remain, got %s", dogs[0].Name)
+	}
+}
+
+func TestDogMaintain_JSONOutput(t *testing.T) {
+	tmpDir := setupTestWorkspace(t)
+
+	origWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(origWd)
+
+	cmd := &cobra.Command{}
+	dogMaintainDryRun = true
+	dogMaintainJSON = true
+	dogMaintainMaxAge = 24 * time.Hour
+
+	// Capture stdout
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runDogMaintain(cmd, nil)
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("runDogMaintain error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	var report struct {
+		Total   int      `json:"total"`
+		Idle    int      `json:"idle"`
+		Working int      `json:"working"`
+		Max     int      `json:"max"`
+		Added   []string `json:"added,omitempty"`
+		OK      bool     `json:"ok"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
+		t.Fatalf("Failed to unmarshal JSON: %v\nOutput: %s", err, buf.String())
+	}
+	if report.Total != 0 {
+		t.Errorf("Expected total=0 in dry-run, got %d", report.Total)
+	}
+	if report.Idle != 0 {
+		t.Errorf("Expected idle=0 in dry-run, got %d", report.Idle)
+	}
+	if report.OK {
+		t.Errorf("Expected ok=false (no idle dogs), got true")
+	}
+	if len(report.Added) != 1 || report.Added[0] != "alpha" {
+		t.Errorf("Expected added=[alpha] in dry-run preview, got %v", report.Added)
 	}
 }
