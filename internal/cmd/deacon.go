@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
+	"github.com/steveyegge/gastown/internal/pollution"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -250,6 +251,40 @@ Example:
 	RunE: runDeaconCleanupOrphans,
 }
 
+var deaconTestPollutionCleanupCmd = &cobra.Command{
+	Use:     "test-pollution-cleanup",
+	Aliases: []string{"cleanup-pollution"},
+	Short:   "Detect and clean runtime test pollution",
+	Long: `Detect and clean runtime test pollution left by tests and dead processes.
+
+This is the Go implementation of the test-pollution-cleanup step of the Deacon's
+patrol. Each category is best-effort and only removes resources whose owning
+process is confirmed dead — never kills or removes resources owned by live
+processes.
+
+Categories:
+  1. Rogue dolt servers   — sql-server processes holding this workspace's port
+                            but using a different data directory (delegates to
+                            'gt dolt kill-imposters').
+  2. Stale test temp dirs — beads-test-dolt-* and beads-bd-tests-* in TMPDIR
+                            where no process holds open file handles.
+  3. Stale PID/lock files — /tmp/dolt-test-server-*.pid and
+                            /tmp/beads-test-dolt-*.pid where the recorded PID
+                            is dead.
+  4. Dead dog worktrees   — git worktrees under ~/gt/deacon/dogs/<name>/
+                            when the dog's tmux session no longer exists.
+
+Output: a single summary line suitable for the patrol digest, e.g.:
+  Test pollution cleanup: rogue_dolt=0 stale_dirs=2 stale_pids=1 dead_worktrees=0
+  Test pollution cleanup: clean
+
+Examples:
+  gt deacon test-pollution-cleanup            # Clean dead-process pollution
+  gt deacon test-pollution-cleanup --dry-run  # Preview only
+  gt deacon test-pollution-cleanup --json     # Emit machine-readable result`,
+	RunE: runDeaconTestPollutionCleanup,
+}
+
 var deaconZombieScanCmd = &cobra.Command{
 	Use:        "zombie-scan",
 	SuggestFor: []string{"orphan-scan", "orphan_scan", "orphan"},
@@ -382,6 +417,10 @@ var (
 	// Zombie scan flags
 	zombieScanDryRun bool
 
+	// Test-pollution flags
+	testPollutionDryRun bool
+	testPollutionJSON   bool
+
 	// Redispatch flags
 	redispatchRig         string
 	redispatchMaxAttempts int
@@ -407,6 +446,7 @@ func init() {
 	deaconCmd.AddCommand(deaconPauseCmd)
 	deaconCmd.AddCommand(deaconResumeCmd)
 	deaconCmd.AddCommand(deaconCleanupOrphansCmd)
+	deaconCmd.AddCommand(deaconTestPollutionCleanupCmd)
 	deaconCmd.AddCommand(deaconZombieScanCmd)
 	deaconCmd.AddCommand(deaconRedispatchCmd)
 	deaconCmd.AddCommand(deaconRedispatchStateCmd)
@@ -443,6 +483,12 @@ func init() {
 	// Flags for zombie-scan
 	deaconZombieScanCmd.Flags().BoolVar(&zombieScanDryRun, "dry-run", false,
 		"List zombies without killing them")
+
+	// Flags for test-pollution-cleanup
+	deaconTestPollutionCleanupCmd.Flags().BoolVar(&testPollutionDryRun, "dry-run", false,
+		"Preview what would be cleaned without making changes")
+	deaconTestPollutionCleanupCmd.Flags().BoolVar(&testPollutionJSON, "json", false,
+		"Output the result as JSON")
 
 	// Flags for redispatch
 	deaconRedispatchCmd.Flags().StringVar(&redispatchRig, "rig", "",
@@ -1407,6 +1453,53 @@ func runDeaconCleanupOrphans(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s %s\n", style.Bold.Render("✓"), summary)
 	}
 
+	return nil
+}
+
+// runDeaconTestPollutionCleanup detects and cleans runtime test pollution.
+// It is the Go implementation of the test-pollution-cleanup patrol step.
+func runDeaconTestPollutionCleanup(cmd *cobra.Command, args []string) error {
+	opts := pollution.Options{
+		DryRun: testPollutionDryRun,
+	}
+
+	// Resolve TownRoot for the rogue-dolt sweep. A missing town root is
+	// non-fatal — the other categories still run; we only skip imposter
+	// detection because we have nothing to compare data-dir against.
+	if townRoot, err := workspace.FindFromCwdOrError(); err == nil {
+		opts.TownRoot = townRoot
+	}
+
+	res, err := pollution.Clean(opts)
+	if err != nil {
+		return fmt.Errorf("test pollution cleanup: %w", err)
+	}
+
+	if testPollutionJSON {
+		out, mErr := json.MarshalIndent(res, "", "  ")
+		if mErr != nil {
+			return fmt.Errorf("marshal result: %w", mErr)
+		}
+		fmt.Println(string(out))
+		return nil
+	}
+
+	// Human-readable output: per-item details + summary line.
+	for _, item := range res.Cleaned {
+		fmt.Printf("  %s %s: %s (%s)\n", style.Bold.Render("✓"), item.Category, item.Path, item.Reason)
+	}
+	for _, item := range res.Skipped {
+		fmt.Printf("  %s %s: %s (%s)\n", style.Dim.Render("○"), item.Category, item.Path, item.Reason)
+	}
+	for _, e := range res.Errors {
+		style.PrintWarning("%s", e)
+	}
+
+	if res.Total() == 0 {
+		fmt.Printf("%s %s\n", style.Dim.Render("○"), res.Summary())
+	} else {
+		fmt.Printf("%s %s\n", style.Bold.Render("✓"), res.Summary())
+	}
 	return nil
 }
 

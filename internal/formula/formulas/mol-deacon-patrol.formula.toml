@@ -72,7 +72,7 @@ When `await-signal` outputs `EFFORT: full`, run all steps thoroughly (normal mod
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-deacon-patrol"
-version = 14
+version = 15
 
 [vars]
 [vars.wisp_type]
@@ -242,6 +242,25 @@ title = "Detect and clean runtime test pollution"
 needs = ["inbox-check"]
 description = """
 Detect and clean runtime pollution left by tests and dead processes.
+
+**Preferred: run the Go command** — it implements all four categories below
+with the same dead-process safety semantics, returns a single summary line
+suitable for the digest, and has unit-test coverage.
+
+```bash
+gt deacon test-pollution-cleanup            # Clean all four categories
+gt deacon test-pollution-cleanup --dry-run  # Preview only
+gt deacon test-pollution-cleanup --json     # Machine-readable result
+```
+
+Output examples:
+```
+✓ Test pollution cleanup: rogue_dolt=0 stale_dirs=2 stale_pids=1 dead_worktrees=0
+○ Test pollution cleanup: clean
+```
+
+The bash snippets below describe what the command does and remain available
+as a manual fallback when the gt binary is unavailable.
 
 This step cleans up four categories of pollution. **Only clean items where the
 owning process is confirmed dead** — never kill or remove resources owned by
