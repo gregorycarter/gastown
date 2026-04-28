@@ -1928,9 +1928,11 @@ func (e *Engineer) notifyDeaconConvoyFeeding(mr *MRInfo) {
 
 // convoyInfo holds minimal info about a closed convoy for post-merge processing.
 type convoyInfo struct {
-	ID          string
-	Title       string
-	Description string
+	ID           string
+	Title        string
+	Description  string
+	CreatedAt    string
+	TrackedCount int
 }
 
 // checkAndCloseCompletedConvoys finds and closes convoys where all tracked issues
@@ -1957,6 +1959,7 @@ func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []c
 		Title       string `json:"title"`
 		Status      string `json:"status"`
 		Description string `json:"description"`
+		CreatedAt   string `json:"created_at"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &convoys); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to parse convoy list: %v\n", err)
@@ -2051,20 +2054,41 @@ func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []c
 
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Auto-closed convoy %s: %s\n", convoy.ID, convoy.Title)
 		closed = append(closed, convoyInfo{
-			ID:          convoy.ID,
-			Title:       convoy.Title,
-			Description: convoy.Description,
+			ID:           convoy.ID,
+			Title:        convoy.Title,
+			Description:  convoy.Description,
+			CreatedAt:    convoy.CreatedAt,
+			TrackedCount: len(deps),
 		})
 
-		// Send convoy completion notifications (owner + notify addresses)
-		e.notifyConvoyCompletion(townRoot, convoy.ID, convoy.Title, convoy.Description)
+		// Send convoy completion notifications (owner + notify addresses + mayor)
+		e.notifyConvoyCompletion(townRoot, convoy.ID, convoy.Title, convoy.Description, convoy.CreatedAt, len(deps))
 	}
 
 	return closed
 }
 
-// notifyConvoyCompletion sends notifications to convoy owner and notify addresses.
-func (e *Engineer) notifyConvoyCompletion(townRoot, convoyID, title, description string) {
+// notifyConvoyCompletion sends notifications to convoy owner, notify addresses,
+// and the Mayor for strategic visibility.
+func (e *Engineer) notifyConvoyCompletion(townRoot, convoyID, title, description, createdAt string, trackedCount int) {
+	// Notify mayor/ for strategic visibility (always sent on convoy completion)
+	durationStr := ""
+	if createdAt != "" {
+		start, err := time.Parse(time.RFC3339, createdAt)
+		if err == nil {
+			durationStr = formatDuration(time.Since(start))
+		}
+	}
+
+	mayorSubject := fmt.Sprintf("Convoy complete: %s", title)
+	mayorBody := fmt.Sprintf("Convoy %s has completed. All tracked issues closed.\n\nDuration: %s\nIssues: %d\n\nSummary: %s", convoyID, durationStr, trackedCount, title)
+	mayorCmd := exec.Command("gt", "mail", "send", "mayor/", "-s", mayorSubject, "-m", mayorBody)
+	util.SetDetachedProcessGroup(mayorCmd)
+	mayorCmd.Dir = townRoot
+	if err := mayorCmd.Run(); err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not notify mayor/: %v\n", err)
+	}
+
 	// ZFC: Use typed accessor instead of parsing description text
 	fields := beads.ParseConvoyFields(&beads.Issue{Description: description})
 	for _, addr := range fields.NotificationAddresses() {
@@ -2077,6 +2101,32 @@ func (e *Engineer) notifyConvoyCompletion(townRoot, convoyID, title, description
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not notify %s: %v\n", addr, err)
 		}
 	}
+}
+
+// formatDuration formats a duration as a human-readable string.
+// Examples: "45m", "2h 15m", "1d 3h".
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return "less than a minute"
+	}
+	days := int(d.Hours() / 24)
+	hours := int(d.Hours()) % 24
+	mins := int(d.Minutes()) % 60
+
+	var parts []string
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", days))
+	}
+	if hours > 0 {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+	}
+	if mins > 0 && days == 0 {
+		parts = append(parts, fmt.Sprintf("%dm", mins))
+	}
+	if len(parts) == 0 {
+		return "less than a minute"
+	}
+	return strings.Join(parts, " ")
 }
 
 // landConvoySwarm checks if a completed convoy has an associated swarm with an

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,8 +9,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/workspace"
 
@@ -102,6 +105,7 @@ func runClose(cmd *cobra.Command, args []string) error {
 	beadIDs := extractBeadIDs(filteredArgs)
 	if len(beadIDs) > 0 {
 		checkConvoyCompletion(beadIDs)
+		checkCrossRigDependents(beadIDs)
 	}
 
 	return nil
@@ -239,6 +243,12 @@ func extractBeadIDs(args []string) []string {
 	return ids
 }
 
+// depResult holds a dependent issue ID and optional title.
+type depResult struct {
+	id    string
+	title string
+}
+
 // checkConvoyCompletion checks if any closed issues are tracked by convoys
 // and triggers convoy completion checks. This implements the ZFC principle:
 // the closure event propagates at the source (bd close) rather than relying
@@ -272,4 +282,140 @@ func checkConvoyCompletion(beadIDs []string) {
 	for _, beadID := range beadIDs {
 		convoy.CheckConvoysForIssue(ctx, store, townRoot, beadID, "Close", nil, gtPath, nil)
 	}
+}
+
+// checkCrossRigDependents checks if any closed issues were blocking issues in
+// other rigs, and notifies the affected rig's witness. This is best-effort:
+// failures are silently ignored.
+func checkCrossRigDependents(beadIDs []string) {
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil || townRoot == "" {
+		return
+	}
+
+	// Discover all database paths (town + rigs) from routes.
+	var dbPaths []string
+	hqBeadsDir := filepath.Join(townRoot, ".beads")
+	if routes, err := beads.LoadRoutes(hqBeadsDir); err == nil {
+		for _, r := range routes {
+			if r.Path == "." {
+				dbPaths = append(dbPaths, townRoot)
+			} else {
+				dbPaths = append(dbPaths, filepath.Join(townRoot, r.Path))
+			}
+		}
+	}
+	if len(dbPaths) == 0 {
+		// Fallback: at least try town root
+		dbPaths = append(dbPaths, townRoot)
+	}
+
+	for _, closedID := range beadIDs {
+		closedPrefix := beads.ExtractPrefix(closedID)
+
+		// Query all databases in parallel for issues blocked by closedID.
+		resultChan := make(chan []depResult, len(dbPaths))
+		var wg sync.WaitGroup
+
+		for _, dbPath := range dbPaths {
+			wg.Add(1)
+			go func(path string) {
+				defer wg.Done()
+				deps := queryBlockedDependents(path, closedID)
+				resultChan <- deps
+			}(dbPath)
+		}
+
+		go func() {
+			wg.Wait()
+			close(resultChan)
+		}()
+
+		// Collect cross-rig dependents.
+		crossRig := make(map[string][]depResult) // rig -> dependents
+		for batch := range resultChan {
+			for _, d := range batch {
+				depPrefix := beads.ExtractPrefix(d.id)
+				if depPrefix == "" || depPrefix == closedPrefix {
+					continue
+				}
+				rig := beads.GetRigNameForPrefix(townRoot, depPrefix)
+				if rig == "" {
+					continue
+				}
+				crossRig[rig] = append(crossRig[rig], d)
+			}
+		}
+
+		if len(crossRig) == 0 {
+			continue
+		}
+
+		// Fetch fresh titles for any missing ones.
+		var allDepIDs []string
+		for _, deps := range crossRig {
+			for _, d := range deps {
+				allDepIDs = append(allDepIDs, d.id)
+			}
+		}
+		detailsMap := getIssueDetailsBatch(allDepIDs)
+
+		// Notify each affected rig once, listing all unblocked issues.
+		for rig, deps := range crossRig {
+			var lines []string
+			for _, d := range deps {
+				title := d.title
+				if title == "" {
+					if det, ok := detailsMap[d.id]; ok {
+						title = det.Title
+					}
+				}
+				if title != "" {
+					lines = append(lines, fmt.Sprintf("  %s (%s)", d.id, title))
+				} else {
+					lines = append(lines, fmt.Sprintf("  %s", d.id))
+				}
+			}
+
+			addr := rig + "/witness"
+			subject := fmt.Sprintf("Dependency resolved: %s", closedID)
+			body := fmt.Sprintf("External dependency %s has closed.\nUnblocked:\n%s\nThis issue may now proceed.", closedID, strings.Join(lines, "\n"))
+
+			mailCmd := exec.Command("gt", "mail", "send", addr, "-s", subject, "-m", body)
+			_ = mailCmd.Run() // best-effort
+		}
+	}
+}
+
+// queryBlockedDependents runs `bd dep list` in the given database path to find
+// issues that are blocked by the given closed issue. Returns a slice of
+// depResult values; title may be empty if bd dep list doesn't include it.
+func queryBlockedDependents(dbPath, closedID string) []depResult {
+	var result []depResult
+
+	cmd := exec.Command("bd", "dep", "list", closedID, "--direction=up", "--type=blocks", "--json")
+	cmd.Dir = dbPath
+	cmd.Env = filterEnvKey(os.Environ(), "BEADS_DIR")
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	if err := cmd.Run(); err != nil {
+		return result
+	}
+
+	var deps []struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &deps); err != nil {
+		return result
+	}
+
+	for _, d := range deps {
+		id := beads.ExtractIssueID(d.ID)
+		if id != "" {
+			result = append(result, depResult{id: id, title: d.Title})
+		}
+	}
+	return result
 }

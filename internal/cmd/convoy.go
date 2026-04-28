@@ -1676,9 +1676,10 @@ func checkAndCloseCompletedConvoys(townBeads string, dryRun bool) ([]struct{ ID,
 	return closed, nil
 }
 
-// notifyConvoyCompletion sends notifications to owner and any notify addresses.
+// notifyConvoyCompletion sends notifications to owner, notify addresses, and
+// the Mayor for strategic visibility.
 func notifyConvoyCompletion(townBeads, convoyID, title string) {
-	// Get convoy description to find owner and notify addresses
+	// Get convoy details for notification content
 	showArgs := []string{"show", convoyID, "--json"}
 	showCmd := exec.Command("bd", showArgs...)
 	showCmd.Dir = townBeads
@@ -1691,13 +1692,43 @@ func notifyConvoyCompletion(townBeads, convoyID, title string) {
 
 	var convoys []struct {
 		Description string `json:"description"`
+		CreatedAt   string `json:"created_at"`
+		ClosedAt    string `json:"closed_at,omitempty"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &convoys); err != nil || len(convoys) == 0 {
 		return
 	}
+	convoy := convoys[0]
+
+	// Get tracked issue count for summary
+	tracked, _ := getTrackedIssues(townBeads, convoyID)
+	issueCount := len(tracked)
+
+	// Calculate duration
+	durationStr := ""
+	if convoy.CreatedAt != "" {
+		start, err := time.Parse(time.RFC3339, convoy.CreatedAt)
+		if err == nil {
+			end := time.Now()
+			if convoy.ClosedAt != "" {
+				if t, err := time.Parse(time.RFC3339, convoy.ClosedAt); err == nil {
+					end = t
+				}
+			}
+			durationStr = formatDuration(end.Sub(start))
+		}
+	}
+
+	// Notify mayor/ for strategic visibility (always sent on convoy completion)
+	mayorSubject := fmt.Sprintf("Convoy complete: %s", title)
+	mayorBody := fmt.Sprintf("Convoy %s has completed. All tracked issues closed.\n\nDuration: %s\nIssues: %d\n\nSummary: %s", convoyID, durationStr, issueCount, title)
+	mayorCmd := exec.Command("gt", "mail", "send", "mayor/", "-s", mayorSubject, "-m", mayorBody)
+	if err := mayorCmd.Run(); err != nil {
+		style.PrintWarning("could not notify mayor/: %v", err)
+	}
 
 	// ZFC: Use typed accessor instead of parsing description text
-	fields := beads.ParseConvoyFields(&beads.Issue{Description: convoys[0].Description})
+	fields := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description})
 	for _, addr := range fields.NotificationAddresses() {
 		mailArgs := []string{"mail", "send", addr,
 			"-s", fmt.Sprintf("🚚 Convoy landed: %s", title),
