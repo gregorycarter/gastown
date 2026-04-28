@@ -1357,8 +1357,13 @@ func runDeaconResume(cmd *cobra.Command, args []string) error {
 
 // runDeaconCleanupOrphans cleans up orphaned claude subagent processes.
 func runDeaconCleanupOrphans(cmd *cobra.Command, args []string) error {
-	// First, find orphans
-	orphans, err := util.FindOrphanedClaudeProcesses()
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	// First, find orphans belonging to this town only
+	orphans, err := util.FindOrphanedClaudeProcessesForTown(townRoot)
 	if err != nil {
 		return fmt.Errorf("finding orphaned processes: %w", err)
 	}
@@ -1371,7 +1376,7 @@ func runDeaconCleanupOrphans(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Found %d orphaned claude process(es)\n", style.Bold.Render("●"), len(orphans))
 
 	// Process them with signal escalation
-	results, err := util.CleanupOrphanedClaudeProcesses()
+	results, err := util.CleanupOrphanedClaudeProcessesForTown(townRoot)
 	if err != nil {
 		style.PrintWarning("cleanup had errors: %v", err)
 	}
@@ -1412,8 +1417,13 @@ func runDeaconCleanupOrphans(cmd *cobra.Command, args []string) error {
 
 // runDeaconZombieScan finds and cleans zombie Claude processes not in active tmux sessions.
 func runDeaconZombieScan(cmd *cobra.Command, args []string) error {
-	// Find zombies using tmux verification
-	zombies, err := util.FindZombieClaudeProcesses()
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	// Find zombies using tmux verification, filtered to this town
+	zombies, err := util.FindZombieClaudeProcessesForTown(townRoot)
 	if err != nil {
 		return fmt.Errorf("finding zombie processes: %w", err)
 	}
@@ -1441,7 +1451,7 @@ func runDeaconZombieScan(cmd *cobra.Command, args []string) error {
 	}
 
 	// Process them with signal escalation
-	results, err := util.CleanupZombieClaudeProcesses()
+	results, err := util.CleanupZombieClaudeProcessesForTown(townRoot)
 	if err != nil {
 		style.PrintWarning("cleanup had errors: %v", err)
 	}

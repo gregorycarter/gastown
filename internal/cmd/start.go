@@ -650,7 +650,7 @@ func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) err
 		graceSecs = shutdownCleanupOrphansGrace
 	}
 	fmt.Printf("\nPhase 5: Cleaning up orphaned Claude processes...\n")
-	cleanupOrphanedClaude(graceSecs)
+	cleanupOrphanedClaude(graceSecs, townRoot)
 
 	// Phase 6: Cleanup polecat worktrees and branches
 	fmt.Printf("\nPhase 6: Cleaning up polecats...\n")
@@ -666,7 +666,7 @@ func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) err
 
 	// Phase 8: Verify no Claude processes survived
 	fmt.Printf("\nPhase 8: Verifying shutdown...\n")
-	verifyNoOrphans()
+	verifyNoOrphans(townRoot)
 
 	fmt.Println()
 	fmt.Printf("%s Graceful shutdown complete (%d sessions stopped)\n", style.Bold.Render("✓"), stopped)
@@ -690,7 +690,7 @@ func runImmediateShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) er
 	}
 	fmt.Println()
 	fmt.Println("Cleaning up orphaned Claude processes...")
-	cleanupOrphanedClaude(graceSecs)
+	cleanupOrphanedClaude(graceSecs, townRoot)
 
 	// Cleanup polecat worktrees and branches
 	if townRoot != "" {
@@ -709,7 +709,7 @@ func runImmediateShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) er
 	// Verify no Claude processes survived
 	fmt.Println()
 	fmt.Println("Verifying shutdown...")
-	verifyNoOrphans()
+	verifyNoOrphans(townRoot)
 
 	fmt.Println()
 	fmt.Printf("%s Gas Town shutdown complete (%d sessions stopped)\n", style.Bold.Render("✓"), stopped)

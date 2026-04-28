@@ -385,7 +385,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Println("Cleaning up orphaned Claude processes...")
-		cleanupOrphanedClaude(defaultDownOrphanGraceSecs)
+		cleanupOrphanedClaude(defaultDownOrphanGraceSecs, townRoot)
 
 		time.Sleep(500 * time.Millisecond)
 		respawned := verifyShutdown(t, townRoot)

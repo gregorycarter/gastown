@@ -2838,7 +2838,7 @@ func (d *Daemon) killIdlePolecat(rigName, polecatName, sessionName string, idleD
 // Detection uses TTY column: processes with TTY "?" have no controlling terminal.
 // This is a safety net fallback - Deacon patrol also runs this more frequently.
 func (d *Daemon) cleanupOrphanedProcesses() {
-	results, err := util.CleanupOrphanedClaudeProcesses()
+	results, err := util.CleanupOrphanedClaudeProcessesForTown(d.config.TownRoot)
 	if err != nil {
 		d.logger.Printf("Warning: orphan process cleanup failed: %v", err)
 		return

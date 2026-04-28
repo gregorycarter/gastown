@@ -438,6 +438,16 @@ type OrphanedProcess struct {
 // Additionally, processes must be older than minOrphanAge seconds to be considered
 // orphaned. This prevents race conditions with newly spawned processes.
 func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
+	return findOrphanedClaudeProcesses("")
+}
+
+// FindOrphanedClaudeProcessesForTown finds orphaned Claude processes belonging to a
+// specific Gas Town workspace. If townRoot is empty, behaves like FindOrphanedClaudeProcesses.
+func FindOrphanedClaudeProcessesForTown(townRoot string) ([]OrphanedProcess, error) {
+	return findOrphanedClaudeProcesses(townRoot)
+}
+
+func findOrphanedClaudeProcesses(townRoot string) ([]OrphanedProcess, error) {
 	// Get PIDs belonging to valid Gas Town tmux sessions.
 	// These should not be killed even if they show TTY "?" during startup.
 	protectedPIDs := getTmuxSessionPIDs()
@@ -512,8 +522,14 @@ func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
 		// Only kill orphaned Claude processes whose cwd is under a Gas Town
 		// workspace root. This prevents killing user's Claude Code instances
 		// running in repos outside ~/gt/ (or wherever the workspace is).
-		townRoot := resolveTownRoot(pid)
-		if townRoot == "" {
+		processTownRoot := resolveTownRoot(pid)
+		if processTownRoot == "" {
+			continue
+		}
+
+		// Multi-town safety: if a specific town root was requested, only match
+		// processes belonging to that town. Other towns manage their own orphans.
+		if townRoot != "" && processTownRoot != townRoot {
 			continue
 		}
 
@@ -521,7 +537,7 @@ func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
 			PID:      pid,
 			Cmd:      cmd,
 			Age:      age,
-			TownRoot: townRoot,
+			TownRoot: processTownRoot,
 		})
 	}
 
@@ -549,6 +565,16 @@ type ZombieProcess struct {
 // has died. Processes with a real TTY (e.g. pts/*) are skipped because those
 // are interactive terminal sessions, not zombies.
 func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
+	return findZombieClaudeProcesses("")
+}
+
+// FindZombieClaudeProcessesForTown finds zombie Claude processes belonging to a
+// specific Gas Town workspace. If townRoot is empty, behaves like FindZombieClaudeProcesses.
+func FindZombieClaudeProcessesForTown(townRoot string) ([]ZombieProcess, error) {
+	return findZombieClaudeProcesses(townRoot)
+}
+
+func findZombieClaudeProcesses(townRoot string) ([]ZombieProcess, error) {
 	// Get ALL valid PIDs (panes + their children) from active tmux sessions
 	validPIDs := getTmuxSessionPIDs()
 
@@ -630,8 +656,14 @@ func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
 		// Only kill zombie Claude processes whose cwd is under a Gas Town
 		// workspace root. This prevents killing user's Claude Code instances
 		// running in repos outside ~/gt/.
-		townRoot := resolveTownRoot(pid)
-		if townRoot == "" {
+		processTownRoot := resolveTownRoot(pid)
+		if processTownRoot == "" {
+			continue
+		}
+
+		// Multi-town safety: if a specific town root was requested, only match
+		// processes belonging to that town. Other towns manage their own zombies.
+		if townRoot != "" && processTownRoot != townRoot {
 			continue
 		}
 
@@ -641,7 +673,7 @@ func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
 			Cmd:      cmd,
 			Age:      age,
 			TTY:      tty,
-			TownRoot: townRoot,
+			TownRoot: processTownRoot,
 		})
 	}
 
@@ -676,7 +708,17 @@ type ZombieCleanupResult struct {
 //  2. Next cycle, still alive after grace period → SIGKILL
 //  3. Next cycle, still alive after SIGKILL → log as unkillable
 func CleanupZombieClaudeProcesses() ([]ZombieCleanupResult, error) {
-	zombies, err := FindZombieClaudeProcesses()
+	return cleanupZombieClaudeProcesses("")
+}
+
+// CleanupZombieClaudeProcessesForTown finds and kills zombie Claude processes belonging
+// to a specific Gas Town workspace. If townRoot is empty, behaves like CleanupZombieClaudeProcesses.
+func CleanupZombieClaudeProcessesForTown(townRoot string) ([]ZombieCleanupResult, error) {
+	return cleanupZombieClaudeProcesses(townRoot)
+}
+
+func cleanupZombieClaudeProcesses(townRoot string) ([]ZombieCleanupResult, error) {
+	zombies, err := findZombieClaudeProcesses(townRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -740,7 +782,7 @@ func CleanupZombieClaudeProcesses() ([]ZombieCleanupResult, error) {
 		}
 
 		// TOCTOU guard: re-verify this process is still a zombie before signaling.
-		// Between FindZombieClaudeProcesses() and now, the process may have
+		// Between findZombieClaudeProcesses() and now, the process may have
 		// joined a tmux session or been adopted by an active session.
 		if !isProcessStillOrphaned(zombie.PID) {
 			continue
@@ -777,7 +819,18 @@ func CleanupZombieClaudeProcesses() ([]ZombieCleanupResult, error) {
 //
 // Returns the list of cleanup results and any error encountered.
 func CleanupOrphanedClaudeProcesses() ([]CleanupResult, error) {
-	orphans, err := FindOrphanedClaudeProcesses()
+	return cleanupOrphanedClaudeProcesses("")
+}
+
+// CleanupOrphanedClaudeProcessesForTown finds and kills orphaned claude/codex processes
+// belonging to a specific Gas Town workspace. If townRoot is empty, behaves like
+// CleanupOrphanedClaudeProcesses.
+func CleanupOrphanedClaudeProcessesForTown(townRoot string) ([]CleanupResult, error) {
+	return cleanupOrphanedClaudeProcesses(townRoot)
+}
+
+func cleanupOrphanedClaudeProcesses(townRoot string) ([]CleanupResult, error) {
+	orphans, err := findOrphanedClaudeProcesses(townRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -848,7 +901,7 @@ func CleanupOrphanedClaudeProcesses() ([]CleanupResult, error) {
 		}
 
 		// TOCTOU guard: re-verify this process is still orphaned before signaling.
-		// Between FindOrphanedClaudeProcesses() and now, the process may have
+		// Between findOrphanedClaudeProcesses() and now, the process may have
 		// joined a tmux session or acquired a TTY.
 		if !isProcessStillOrphaned(orphan.PID) {
 			continue

@@ -42,8 +42,18 @@ func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
 	return nil, nil
 }
 
+// FindOrphanedClaudeProcessesForTown is a Windows stub.
+func FindOrphanedClaudeProcessesForTown(townRoot string) ([]OrphanedProcess, error) {
+	return nil, nil
+}
+
 // CleanupOrphanedClaudeProcesses is a Windows stub.
 func CleanupOrphanedClaudeProcesses() ([]CleanupResult, error) {
+	return nil, nil
+}
+
+// CleanupOrphanedClaudeProcessesForTown is a Windows stub.
+func CleanupOrphanedClaudeProcessesForTown(townRoot string) ([]CleanupResult, error) {
 	return nil, nil
 }
 
@@ -52,7 +62,17 @@ func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
 	return nil, nil
 }
 
+// FindZombieClaudeProcessesForTown is a Windows stub.
+func FindZombieClaudeProcessesForTown(townRoot string) ([]ZombieProcess, error) {
+	return nil, nil
+}
+
 // CleanupZombieClaudeProcesses is a Windows stub.
 func CleanupZombieClaudeProcesses() ([]ZombieCleanupResult, error) {
+	return nil, nil
+}
+
+// CleanupZombieClaudeProcessesForTown is a Windows stub.
+func CleanupZombieClaudeProcessesForTown(townRoot string) ([]ZombieCleanupResult, error) {
 	return nil, nil
 }

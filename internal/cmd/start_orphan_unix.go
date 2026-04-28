@@ -17,9 +17,18 @@ import (
 // 2. Sends SIGTERM to all of them
 // 3. Waits for the grace period
 // 4. Sends SIGKILL to any that are still alive
-func cleanupOrphanedClaude(graceSecs int) {
+//
+// Only processes belonging to the given townRoot are targeted. If townRoot is empty,
+// all Gas Town orphans are targeted (backward compatibility for callers without context).
+func cleanupOrphanedClaude(graceSecs int, townRoot string) {
 	// Find orphaned processes
-	orphans, err := util.FindOrphanedClaudeProcesses()
+	var orphans []util.OrphanedProcess
+	var err error
+	if townRoot != "" {
+		orphans, err = util.FindOrphanedClaudeProcessesForTown(townRoot)
+	} else {
+		orphans, err = util.FindOrphanedClaudeProcesses()
+	}
 	if err != nil {
 		fmt.Printf("  %s Warning: %v\n", style.Bold.Render("⚠"), err)
 		return
@@ -89,15 +98,28 @@ func cleanupOrphanedClaude(graceSecs int) {
 
 // verifyNoOrphans checks that no Claude processes survived shutdown.
 // If any are found, it reports them and attempts a final SIGKILL.
-func verifyNoOrphans() {
-	orphans, err := util.FindOrphanedClaudeProcesses()
+// Only processes belonging to the given townRoot are targeted.
+func verifyNoOrphans(townRoot string) {
+	var orphans []util.OrphanedProcess
+	var err error
+	if townRoot != "" {
+		orphans, err = util.FindOrphanedClaudeProcessesForTown(townRoot)
+	} else {
+		orphans, err = util.FindOrphanedClaudeProcesses()
+	}
 	if err != nil {
 		fmt.Printf("  %s Could not verify: %v\n", style.Bold.Render("⚠"), err)
 		return
 	}
 
 	// Also check for zombie processes (have TTY but no tmux session)
-	zombies, zErr := util.FindZombieClaudeProcesses()
+	var zombies []util.ZombieProcess
+	var zErr error
+	if townRoot != "" {
+		zombies, zErr = util.FindZombieClaudeProcessesForTown(townRoot)
+	} else {
+		zombies, zErr = util.FindZombieClaudeProcesses()
+	}
 	if zErr != nil {
 		// Non-fatal, FindOrphanedClaudeProcesses already covered TTY-less ones
 		zombies = nil

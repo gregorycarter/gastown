@@ -10,13 +10,13 @@ import (
 
 // cleanupOrphanedClaude is a Windows stub.
 // Orphan cleanup requires Unix-specific signals (SIGTERM/SIGKILL).
-func cleanupOrphanedClaude(graceSecs int) {
+func cleanupOrphanedClaude(graceSecs int, townRoot string) {
 	fmt.Printf("  %s Orphan cleanup not supported on Windows\n",
 		style.Dim.Render("○"))
 }
 
 // verifyNoOrphans is a Windows stub.
-func verifyNoOrphans() {
+func verifyNoOrphans(townRoot string) {
 	fmt.Printf("  %s Orphan verification not supported on Windows\n",
 		style.Dim.Render("○"))
 }
