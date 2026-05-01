@@ -27,6 +27,7 @@ func TestClassifyCallback(t *testing.T) {
 		{"POLECAT_DIED: 2 polecat(s) died with active work in gastown_rig", CallbackPolecatDied},
 		{"Wisp Compaction: 2026-05-01", CallbackWispCompaction},
 		{"Weekly Wisp Compaction: 2026-04-28 to 2026-05-01", CallbackWispCompaction},
+		{"RECOVERY_NEEDED: bt-ocy7.1 closed but unmerged", CallbackRecoveryNeeded},
 		{"random unknown message", CallbackUnknown},
 		{"", CallbackUnknown},
 	}
@@ -205,6 +206,29 @@ func TestProcessCallback_WispCompaction(t *testing.T) {
 	result := processCallback("/tmp/fake-town", msg, true)
 	if result.CallbackType != CallbackWispCompaction {
 		t.Errorf("expected CallbackWispCompaction, got %q", result.CallbackType)
+	}
+	if result.Error != nil {
+		t.Errorf("unexpected error: %v", result.Error)
+	}
+	if !result.Handled {
+		t.Error("expected handled")
+	}
+	if result.Action == "" {
+		t.Error("expected action description")
+	}
+}
+
+func TestProcessCallback_RecoveryNeeded(t *testing.T) {
+	msg := &mail.Message{
+		ID:      "bd-rec1",
+		From:    "bridge_town_core/witness",
+		Subject: "RECOVERY_NEEDED: bt-ocy7.1 closed but unmerged",
+		Body:    "Witness patrol detected unmerged work for bt-ocy7.1.",
+	}
+
+	result := processCallback("/tmp/fake-town", msg, true)
+	if result.CallbackType != CallbackRecoveryNeeded {
+		t.Errorf("expected CallbackRecoveryNeeded, got %q", result.CallbackType)
 	}
 	if result.Error != nil {
 		t.Errorf("unexpected error: %v", result.Error)

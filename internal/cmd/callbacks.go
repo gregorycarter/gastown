@@ -57,6 +57,9 @@ var (
 	// Wisp Compaction: <date> - compaction report from agent
 	patternWispCompaction = regexp.MustCompile(`^(Weekly\s+)?Wisp Compaction:`)
 
+	// RECOVERY_NEEDED: <bead-id> ... - witness detected unmerged closed work
+	patternRecoveryNeeded = regexp.MustCompile(`^RECOVERY_NEEDED:\s+(\S+)`)
+
 	// NOTE: WITNESS_REPORT and REFINERY_REPORT removed.
 	// Witnesses and Refineries handle their duties autonomously.
 	// They only escalate genuine problems, not routine status updates.
@@ -78,6 +81,7 @@ const (
 	CallbackSpawnStorm          CallbackType = "spawn_storm"
 	CallbackPolecatDied         CallbackType = "polecat_died"
 	CallbackWispCompaction      CallbackType = "wisp_compaction"
+	CallbackRecoveryNeeded      CallbackType = "recovery_needed"
 	CallbackUnknown             CallbackType = "unknown"
 	// NOTE: CallbackWitnessReport and CallbackRefineryReport removed.
 	// Routine status reports are no longer sent to Mayor.
@@ -289,6 +293,10 @@ func processCallback(townRoot string, msg *mail.Message, dryRun bool) CallbackRe
 		result.Action, result.Error = handleWispCompaction(townRoot, msg, dryRun)
 		result.Handled = result.Error == nil
 
+	case CallbackRecoveryNeeded:
+		result.Action, result.Error = handleRecoveryNeeded(townRoot, msg, dryRun)
+		result.Handled = result.Error == nil
+
 	default:
 		result.Action = "unknown message type, skipped"
 		result.Handled = false
@@ -334,6 +342,8 @@ func classifyCallback(subject string) CallbackType {
 		return CallbackPolecatDied
 	case patternWispCompaction.MatchString(subject):
 		return CallbackWispCompaction
+	case patternRecoveryNeeded.MatchString(subject):
+		return CallbackRecoveryNeeded
 	default:
 		return CallbackUnknown
 	}
@@ -739,6 +749,24 @@ func handleWispCompaction(townRoot string, msg *mail.Message, dryRun bool) (stri
 	logCallback(townRoot, fmt.Sprintf("wisp_compaction: archived report %s from %s", title, msg.From))
 
 	return fmt.Sprintf("archived wisp compaction report: %s", title), nil
+}
+
+// handleRecoveryNeeded processes a RECOVERY_NEEDED callback from Witness.
+// Logs the recovery alert for human review.
+func handleRecoveryNeeded(townRoot string, msg *mail.Message, dryRun bool) (string, error) {
+	matches := patternRecoveryNeeded.FindStringSubmatch(msg.Subject)
+	if len(matches) < 2 {
+		return "", fmt.Errorf("could not parse bead ID from subject: %q", msg.Subject)
+	}
+	beadID := matches[1]
+
+	if dryRun {
+		return fmt.Sprintf("would log recovery needed for %s", beadID), nil
+	}
+
+	logCallback(townRoot, fmt.Sprintf("recovery_needed: %s from %s — unmerged closed work", beadID, msg.From))
+
+	return fmt.Sprintf("logged recovery needed for %s", beadID), nil
 }
 
 // logCallback logs a callback processing event to the town log.
