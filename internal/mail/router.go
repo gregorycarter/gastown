@@ -1732,6 +1732,8 @@ func prioritySeverityLabel(priority Priority) string {
 // Skipped when:
 //   - No town root (can't use nudge queue)
 //   - Message type is TypeReply (recipient is already replying)
+//   - Message type is TypeEscalation (recipient should use gt escalate ack/close)
+//   - Subject/body is a terminal acknowledgement marker
 //   - Configured delay is zero or negative (feature disabled)
 func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	if r.townRoot == "" {
@@ -1739,6 +1741,12 @@ func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	}
 	if msg.Type == TypeReply {
 		return // Already a reply — reminder would be redundant
+	}
+	if msg.Type == TypeEscalation {
+		return // Escalations have their own ack/close flow, not a mail reply flow.
+	}
+	if isTerminalAckMessage(msg) {
+		return
 	}
 	delay := config.LoadOperationalConfig(r.townRoot).GetMailConfig().ReplyReminderDelayD()
 	if delay <= 0 {
@@ -1753,6 +1761,41 @@ func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	if err := nudge.Enqueue(r.townRoot, sessionID, reminder); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to enqueue reply reminder for %s: %v\n", sessionID, err)
 	}
+}
+
+func isTerminalAckMessage(msg *Message) bool {
+	if msg == nil {
+		return false
+	}
+	subject := strings.ToLower(strings.TrimSpace(msg.Subject))
+	body := strings.ToLower(msg.Body)
+	if subject == "" {
+		return false
+	}
+
+	terminalMarkers := []string{
+		"[ack]",
+		"[acknowledged]",
+		"[closed]",
+		"[final]",
+		"thread terminating",
+		"terminating",
+		"closed from",
+		"no further action",
+	}
+	for _, marker := range terminalMarkers {
+		if strings.Contains(subject, marker) || strings.Contains(body, marker) {
+			return true
+		}
+	}
+
+	trimmed := strings.TrimPrefix(subject, "re:")
+	trimmed = strings.TrimSpace(trimmed)
+	return strings.HasPrefix(trimmed, "ack ") ||
+		strings.HasPrefix(trimmed, "ack-") ||
+		strings.HasPrefix(trimmed, "ack—") ||
+		strings.HasPrefix(trimmed, "ack —") ||
+		trimmed == "ack"
 }
 
 // IsRecipientMuted checks if a mail recipient has DND/muted notifications enabled.

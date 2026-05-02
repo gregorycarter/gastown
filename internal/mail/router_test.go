@@ -1899,6 +1899,51 @@ func TestEnqueueReplyReminder_SkipsReply(t *testing.T) {
 	}
 }
 
+func TestEnqueueReplyReminder_SkipsEscalation(t *testing.T) {
+	townRoot := t.TempDir()
+	r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+	msg := &Message{
+		From:    "gastown/witness",
+		To:      "mayor/",
+		Subject: "[HIGH] investigate ack loop",
+		Type:    TypeEscalation,
+	}
+	r.enqueueReplyReminder(msg, "hq-mayor")
+
+	pending, _ := nudge.Pending(townRoot, "hq-mayor")
+	if pending != 0 {
+		t.Errorf("TypeEscalation should not enqueue a reply reminder, got %d", pending)
+	}
+}
+
+func TestEnqueueReplyReminder_SkipsTerminalAckSubjects(t *testing.T) {
+	tests := []string{
+		"RE: RECOVERY_NEEDED onyx bt-c60j1 — submitted [ack]",
+		"RE: RECOVERY_NEEDED onyx bt-c60j1 — submitted [acknowledged]",
+		"RE: RECOVERY_NEEDED onyx bt-c60j1 — submitted [closed]",
+		"RE: RECOVERY_NEEDED onyx bt-c60j1 — submitted [final]",
+		"ack — onyx recovery thread terminating",
+	}
+	for _, subject := range tests {
+		t.Run(subject, func(t *testing.T) {
+			townRoot := t.TempDir()
+			r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+			msg := &Message{
+				From:    "gastown/witness",
+				To:      "mayor/",
+				Subject: subject,
+				Type:    TypeNotification,
+			}
+			r.enqueueReplyReminder(msg, "hq-mayor")
+
+			pending, _ := nudge.Pending(townRoot, "hq-mayor")
+			if pending != 0 {
+				t.Errorf("terminal ack subject %q should not enqueue a reply reminder, got %d", subject, pending)
+			}
+		})
+	}
+}
+
 // TestEnqueueReplyReminder_NoTownRoot verifies that the function is a no-op
 // when no town root is set (nudge queue requires a town root).
 func TestEnqueueReplyReminder_NoTownRoot(t *testing.T) {
