@@ -11,9 +11,22 @@ set -euo pipefail
 
 # --- Configuration -----------------------------------------------------------
 
-DOLT_DATA_DIR="${DOLT_DATA_DIR:-$HOME/gt/.dolt-data}"
-BACKUP_DIR="${DOLT_BACKUP_DIR:-$HOME/gt/.dolt-backup}"
+TOWN_ROOT="${GT_TOWN_ROOT:-${GT_ROOT:-}}"
+if [[ -z "$TOWN_ROOT" ]] && command -v gt >/dev/null 2>&1; then
+  TOWN_ROOT="$(gt town root 2>/dev/null || true)"
+fi
+TOWN_ROOT="${TOWN_ROOT:-$HOME/gt}"
+
+DOLT_DATA_DIR="${DOLT_DATA_DIR:-$TOWN_ROOT/.dolt-data}"
+BACKUP_DIR="${DOLT_BACKUP_DIR:-$TOWN_ROOT/.dolt-backup}"
 BACKUP_TIMEOUT=60
+
+TIMEOUT_CMD=()
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_CMD=(timeout)
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_CMD=(gtimeout)
+fi
 
 # --- Argument parsing ---------------------------------------------------------
 
@@ -75,6 +88,7 @@ FAILED_DBS=""
 for DB in "${PROD_DBS[@]}"; do
   DB_DIR="$DOLT_DATA_DIR/$DB"
   BACKUP_NAME="${DB}-backup"
+  BACKUP_URL="file://$BACKUP_DIR/$DB"
   HASH_FILE="$BACKUP_DIR/${DB}/.last-backup-hash"
 
   # Check DB dir exists
@@ -85,8 +99,36 @@ for DB in "${PROD_DBS[@]}"; do
     continue
   fi
 
+  BACKUP_REMOTE_URL=$(cd "$DB_DIR" && dolt backup -v 2>/dev/null | awk -v name="$BACKUP_NAME" '$1 == name {print $2; exit}' || true)
+  BACKUP_ADDED=false
+  if [[ -z "$BACKUP_REMOTE_URL" ]]; then
+    if $DRY_RUN; then
+      log "  $DB: DRY RUN would add backup remote $BACKUP_NAME -> $BACKUP_URL"
+      BACKUP_ADDED=true
+    else
+      mkdir -p "$BACKUP_DIR/$DB"
+      set +e
+      ADD_OUTPUT=$(cd "$DB_DIR" && dolt backup add "$BACKUP_NAME" "$BACKUP_URL" 2>&1)
+      ADD_RC=$?
+      set -e
+      if [[ $ADD_RC -ne 0 ]]; then
+        FAILED=$((FAILED + 1))
+        FAILED_DBS="$FAILED_DBS $DB(add-backup-remote)"
+        log "  $DB: FAILED to add backup remote $BACKUP_NAME: $ADD_OUTPUT"
+        continue
+      fi
+      BACKUP_ADDED=true
+      log "  $DB: added backup remote $BACKUP_NAME -> $BACKUP_URL"
+    fi
+  elif [[ "$BACKUP_REMOTE_URL" != "$BACKUP_URL" ]]; then
+    FAILED=$((FAILED + 1))
+    FAILED_DBS="$FAILED_DBS $DB(remote-url-mismatch)"
+    log "  $DB: backup remote $BACKUP_NAME points to $BACKUP_REMOTE_URL, expected $BACKUP_URL"
+    continue
+  fi
+
   # Get current HEAD hash
-  CURRENT_HASH=$(cd "$DB_DIR" && dolt log -n 1 --oneline 2>/dev/null | head -1 | cut -d' ' -f1 || true)
+  CURRENT_HASH=$(cd "$DB_DIR" && NO_COLOR=1 dolt log -n 1 --oneline 2>/dev/null | head -1 | cut -d' ' -f1 || true)
   if [[ -z "$CURRENT_HASH" ]]; then
     log "  $DB: could not get HEAD hash, will sync anyway"
     CURRENT_HASH="unknown"
@@ -96,6 +138,9 @@ for DB in "${PROD_DBS[@]}"; do
   LAST_HASH=""
   if [[ -f "$HASH_FILE" ]]; then
     LAST_HASH=$(cat "$HASH_FILE")
+  fi
+  if $BACKUP_ADDED; then
+    LAST_HASH=""
   fi
 
   if [[ "$CURRENT_HASH" = "$LAST_HASH" ]] && [[ "$CURRENT_HASH" != "unknown" ]]; then
@@ -114,8 +159,15 @@ for DB in "${PROD_DBS[@]}"; do
   log "  $DB: syncing ($LAST_HASH -> $CURRENT_HASH)..."
   SYNC_START=$(date +%s)
 
-  SYNC_OUTPUT=$(cd "$DB_DIR" && timeout "$BACKUP_TIMEOUT" dolt backup sync "$BACKUP_NAME" 2>&1) || true
-  SYNC_RC=${PIPESTATUS[0]:-$?}
+  set +e
+  if [[ ${#TIMEOUT_CMD[@]} -gt 0 ]]; then
+    SYNC_OUTPUT=$(cd "$DB_DIR" && "${TIMEOUT_CMD[@]}" "$BACKUP_TIMEOUT" dolt backup sync "$BACKUP_NAME" 2>&1)
+    SYNC_RC=$?
+  else
+    SYNC_OUTPUT=$(cd "$DB_DIR" && dolt backup sync "$BACKUP_NAME" 2>&1)
+    SYNC_RC=$?
+  fi
+  set -e
   SYNC_ELAPSED=$(( $(date +%s) - SYNC_START ))
 
   if [[ $SYNC_RC -eq 0 ]]; then
@@ -143,6 +195,10 @@ SUMMARY="Backup: $SYNCED synced, $SKIPPED unchanged, $FAILED failed (of ${#PROD_
 log "$SUMMARY"
 
 # --- Step 4: Record result and escalate if needed -----------------------------
+
+if $DRY_RUN; then
+  exit 0
+fi
 
 if [[ "$FAILED" -eq 0 ]]; then
   # Success — record quietly
