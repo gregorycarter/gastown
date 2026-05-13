@@ -288,3 +288,65 @@ func TestFormatWeeklyRollup(t *testing.T) {
 		t.Error("missing anomalies section")
 	}
 }
+
+func TestExtractBeadID(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:  "clean output",
+			input: "hq-1a2b\n",
+			want:  "hq-1a2b",
+		},
+		{
+			name: "noisy stdout — beads.role warning before id (regression: GH#2950)",
+			// `bd` may print a multi-line warning on stdout when beads.role is
+			// unset in the cwd's repo. Without extractBeadID, TrimSpace would
+			// capture the whole blob, `bd close <blob>` would fail silently,
+			// and the audit bead would stay open — causing one duplicate
+			// compaction digest mail per patrol cycle.
+			input: "warning: beads.role not configured (GH#2950).\n  Fix: git config beads.role maintainer\n  Or:  git config beads.role contributor\nhq-1a2b\n",
+			want:  "hq-1a2b",
+		},
+		{
+			name:  "trailing whitespace",
+			input: "  hq-1a2b   \n",
+			want:  "hq-1a2b",
+		},
+		{
+			name:  "multi-rig prefix lengths",
+			input: "co-rln\n",
+			want:  "co-rln",
+		},
+		{
+			name:    "no id present",
+			input:   "warning: something broke\n",
+			wantErr: true,
+		},
+		{
+			name:    "empty",
+			input:   "",
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := extractBeadID(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got nil (id=%q)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
