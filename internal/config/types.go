@@ -106,6 +106,10 @@ type TownSettings struct {
 	// Scheduler configures the capacity scheduler for polecat dispatch.
 	Scheduler *capacity.SchedulerConfig `json:"scheduler,omitempty"`
 
+	// Polecat configures per-polecat behavior (target/ clean hook, etc.).
+	// Added for hq-x0v7v.
+	Polecat *PolecatConfig `json:"polecat,omitempty"`
+
 	// Operational configures operational thresholds (timeouts, retries, intervals).
 	// These were previously hardcoded as Go constants throughout the codebase.
 	// All values are optional — omitted values use compiled-in defaults.
@@ -348,6 +352,10 @@ type DaemonThresholds struct {
 	// BootSpawnCooldown prevents Boot from spawning on every daemon heartbeat (default "2m").
 	BootSpawnCooldown string `json:"boot_spawn_cooldown,omitempty"`
 
+	// BootIdleSuppression is how long to suppress Boot spawns after Boot reported "nothing"
+	// (deacon was healthy). Prevents burning API calls when deacon is running fine (default "15m").
+	BootIdleSuppression string `json:"boot_idle_suppression,omitempty"`
+
 	// DeaconGracePeriod is time to wait after starting Deacon before checking heartbeat (default "5m").
 	DeaconGracePeriod string `json:"deacon_grace_period,omitempty"`
 
@@ -503,6 +511,16 @@ type ConvoyConfig struct {
 	// NotifyOnComplete controls whether convoy completion pushes a notification
 	// into the active Mayor session (in addition to mail). Opt-in; default false.
 	NotifyOnComplete bool `json:"notify_on_complete,omitempty"`
+}
+
+// PolecatConfig configures per-polecat behavior. Added for hq-x0v7v
+// (target/ clean hook on reuse).
+type PolecatConfig struct {
+	// TargetCleanPolicy controls when the daemon deletes <polecat>/target/
+	// before reusing an idle polecat for a new bead.
+	// Values: "per_bead" (default), "every_n_beads:<N>", "never".
+	// Parsed by polecat.ParseTargetCleanPolicy.
+	TargetCleanPolicy string `json:"target_clean_policy,omitempty"`
 }
 
 // ParseDurationOrDefault parses a Go duration string, returning fallback on error or empty input.
@@ -856,6 +874,14 @@ func (rc *RuntimeConfig) BuildCommandWithPrompt(prompt string) string {
 	}
 
 	if p == "" || resolved.PromptMode == "none" {
+		if p != "" {
+			// A non-empty prompt was silently dropped because prompt_mode is "none".
+			// This commonly happens when a user copies a codex agent entry (which ships
+			// with prompt_mode: "none") to create a claude override, inadvertently
+			// suppressing the daemon's startup beacon injection and causing a crash-loop
+			// that looks like a deacon failure. Warn so misconfiguration is self-diagnosing.
+			fmt.Fprintf(os.Stderr, "warning: agent %q has prompt_mode: \"none\" — startup prompt dropped (agent may not bootstrap correctly)\n", resolved.Command)
+		}
 		return base
 	}
 
@@ -901,6 +927,8 @@ func (rc *RuntimeConfig) BuildArgsWithPrompt(prompt string) []string {
 		default:
 			args = append(args, p)
 		}
+	} else if p != "" {
+		fmt.Fprintf(os.Stderr, "warning: agent %q has prompt_mode: \"none\" — startup prompt dropped (agent may not bootstrap correctly)\n", resolved.Command)
 	}
 
 	return args

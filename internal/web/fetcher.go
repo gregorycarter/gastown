@@ -99,20 +99,30 @@ type fetchCircuitBreaker struct {
 	failures    int
 	lastAttempt time.Time
 	backoff     time.Duration
+	inFlight    bool
 }
 
 // maxBackoff is the maximum backoff duration for the circuit breaker.
 const maxBackoff = 5 * time.Minute
 
 // allow returns true if enough time has passed since the last failure to permit
-// a new attempt. Always allows the first attempt (zero failures).
+// a new attempt, and reserves that attempt so concurrent callers do not all
+// stampede through when backoff opens.
 func (cb *fetchCircuitBreaker) allow() bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+	if cb.inFlight {
+		return false
+	}
 	if cb.failures == 0 {
+		cb.inFlight = true
 		return true
 	}
-	return time.Since(cb.lastAttempt) >= cb.backoff
+	if time.Since(cb.lastAttempt) < cb.backoff {
+		return false
+	}
+	cb.inFlight = true
+	return true
 }
 
 // recordFailure increments the failure count and sets exponential backoff.
@@ -122,6 +132,7 @@ func (cb *fetchCircuitBreaker) recordFailure() {
 	defer cb.mu.Unlock()
 	cb.failures++
 	cb.lastAttempt = time.Now()
+	cb.inFlight = false
 	// Exponential backoff: 10s, 20s, 40s, 80s, 160s, capped at maxBackoff
 	cb.backoff = time.Duration(1<<min(cb.failures, 10)) * 5 * time.Second
 	if cb.backoff > maxBackoff {
@@ -135,6 +146,7 @@ func (cb *fetchCircuitBreaker) recordSuccess() {
 	defer cb.mu.Unlock()
 	cb.failures = 0
 	cb.backoff = 0
+	cb.inFlight = false
 }
 
 // LiveConvoyFetcher fetches convoy data from beads.
@@ -168,7 +180,7 @@ type LiveConvoyFetcher struct {
 	tmuxSocket string
 
 	// Circuit breaker for FetchConvoys — prevents process storms when
-	// bd list --type=convoy fails persistently (e.g., schema mismatch).
+	// bd list by convoy label fails persistently (e.g., schema mismatch).
 	convoyBreaker fetchCircuitBreaker
 }
 
@@ -225,26 +237,32 @@ func (f *LiveConvoyFetcher) FetchConvoys() ([]ConvoyRow, error) {
 		return nil, nil // Backed off — return empty result silently
 	}
 
-	// List all open convoy issues
-	stdout, err := f.runBdCmd(f.townRoot, "list", "--type=convoy", "--status=open", "--json")
+	// List all open issues and filter locally so legacy type=convoy beads remain visible.
+	stdout, err := f.runBdCmd(f.townRoot, "list", "--status=open", "--json", "--limit=0")
 	if err != nil {
 		f.convoyBreaker.recordFailure()
 		return nil, fmt.Errorf("listing convoys: %w", err)
 	}
 
 	var convoys []struct {
-		ID        string `json:"id"`
-		Title     string `json:"title"`
-		Status    string `json:"status"`
-		CreatedAt string `json:"created_at"`
+		ID        string   `json:"id"`
+		Title     string   `json:"title"`
+		Status    string   `json:"status"`
+		CreatedAt string   `json:"created_at"`
+		IssueType string   `json:"issue_type"`
+		Labels    []string `json:"labels"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &convoys); err != nil {
+		f.convoyBreaker.recordFailure()
 		return nil, fmt.Errorf("parsing convoy list: %w", err)
 	}
 
 	// Build convoy rows with activity data
 	rows := make([]ConvoyRow, 0, len(convoys))
 	for _, c := range convoys {
+		if c.IssueType != "convoy" && !webConvoyHasLabel(c.Labels, "gt:convoy") {
+			continue
+		}
 		row := ConvoyRow{
 			ID:     c.ID,
 			Title:  c.Title,
@@ -346,6 +364,15 @@ func (f *LiveConvoyFetcher) FetchConvoys() ([]ConvoyRow, error) {
 
 	f.convoyBreaker.recordSuccess()
 	return rows, nil
+}
+
+func webConvoyHasLabel(labels []string, target string) bool {
+	for _, label := range labels {
+		if label == target {
+			return true
+		}
+	}
+	return false
 }
 
 // trackedIssueInfo holds info about an issue being tracked by a convoy.

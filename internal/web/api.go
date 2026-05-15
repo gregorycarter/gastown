@@ -725,12 +725,19 @@ func (h *APIHandler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	// Fetch rigs
 	go func() {
 		defer wg.Done()
-		if output, err := h.runGtCommand(r.Context(), 3*time.Second, []string{"rig", "list"}); err == nil {
+		if output, err := h.runGtCommand(r.Context(), 3*time.Second, []string{"rig", "list", "--json"}); err == nil {
 			mu.Lock()
-			resp.Rigs = parseRigListOutput(output)
+			resp.Rigs = parseRigListJSON(output)
 			mu.Unlock()
 		} else {
-			log.Printf("warning: handleOptions: rig list: %v", err)
+			log.Printf("warning: handleOptions: rig list --json: %v", err)
+			if output, fallbackErr := h.runGtCommand(r.Context(), 3*time.Second, []string{"rig", "list"}); fallbackErr == nil {
+				mu.Lock()
+				resp.Rigs = parseRigListOutput(output)
+				mu.Unlock()
+			} else {
+				log.Printf("warning: handleOptions: rig list fallback: %v", fallbackErr)
+			}
 		}
 	}()
 
@@ -749,7 +756,7 @@ func (h *APIHandler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	// Fetch convoys
 	go func() {
 		defer wg.Done()
-		if output, err := h.runBdCommand(r.Context(), 3*time.Second, []string{"list", "--type=convoy", "--json"}); err == nil {
+		if output, err := h.runBdCommand(r.Context(), 3*time.Second, []string{"list", "--json", "--limit=0"}); err == nil {
 			mu.Lock()
 			resp.Convoys = parseConvoyListJSON(output)
 			mu.Unlock()
@@ -844,10 +851,30 @@ func parseRigListOutput(output string) []string {
 	return rigs
 }
 
-// parseConvoyListJSON extracts convoy IDs from JSON output of "bd list --type=convoy --json".
+// parseRigListJSON extracts rig names from JSON output of "gt rig list --json".
+func parseRigListJSON(jsonStr string) []string {
+	var rigList []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &rigList); err != nil {
+		return nil
+	}
+
+	rigs := make([]string, 0, len(rigList))
+	for _, rig := range rigList {
+		if rig.Name != "" {
+			rigs = append(rigs, rig.Name)
+		}
+	}
+	return rigs
+}
+
+// parseConvoyListJSON extracts convoy IDs from JSON output of "bd list --json".
 func parseConvoyListJSON(jsonStr string) []string {
 	var convoys []struct {
-		ID string `json:"id"`
+		ID        string   `json:"id"`
+		IssueType string   `json:"issue_type"`
+		Labels    []string `json:"labels"`
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &convoys); err != nil {
 		log.Printf("warning: parseConvoyListJSON: %v", err)
@@ -855,11 +882,20 @@ func parseConvoyListJSON(jsonStr string) []string {
 	}
 	ids := make([]string, 0, len(convoys))
 	for _, c := range convoys {
-		if c.ID != "" {
+		if c.ID != "" && (c.IssueType == "convoy" || webAPIHasLabel(c.Labels, "gt:convoy")) {
 			ids = append(ids, c.ID)
 		}
 	}
 	return ids
+}
+
+func webAPIHasLabel(labels []string, target string) bool {
+	for _, label := range labels {
+		if label == target {
+			return true
+		}
+	}
+	return false
 }
 
 // parseHooksListOutput extracts bead names from hooks list output.

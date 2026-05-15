@@ -33,6 +33,55 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestDaemonPathCandidatesIncludesLaunchdToolDirs(t *testing.T) {
+	home := filepath.Join("Users", "alice")
+	exePath := filepath.Join("opt", "homebrew", "bin", "gt")
+
+	got := daemonPathCandidates(home, exePath)
+	for _, want := range []string{
+		filepath.Dir(exePath),
+		filepath.Join(home, ".local/bin"),
+		filepath.Join(home, "bin"),
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+	} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("daemonPathCandidates(%q, %q) missing %q; got %v", home, exePath, want, got)
+		}
+	}
+}
+
+func TestCleanupLegacySocketSessionsRunsOnce(t *testing.T) {
+	oldCleanup := cleanupLegacySocketsForDaemon
+	t.Cleanup(func() { cleanupLegacySocketsForDaemon = oldCleanup })
+
+	var calls int
+	var gotRoot string
+	cleanupLegacySocketsForDaemon = func(townRoot string) (int, int) {
+		calls++
+		gotRoot = townRoot
+		return 1, 2
+	}
+
+	townRoot := t.TempDir()
+	d := &Daemon{
+		config: DefaultConfig(townRoot),
+		logger: log.New(io.Discard, "", 0),
+	}
+	d.cleanupLegacySocketSessions()
+	if calls != 1 {
+		t.Fatalf("cleanup calls after first invocation = %d, want 1", calls)
+	}
+	if gotRoot != townRoot {
+		t.Fatalf("cleanup townRoot = %q, want %q", gotRoot, townRoot)
+	}
+
+	d.cleanupLegacySocketSessions()
+	if calls != 1 {
+		t.Fatalf("cleanup calls after second invocation = %d, want 1", calls)
+	}
+}
+
 func TestStateFile(t *testing.T) {
 	townRoot := "/tmp/test-town"
 	expected := filepath.Join(townRoot, "daemon", "state.json")
