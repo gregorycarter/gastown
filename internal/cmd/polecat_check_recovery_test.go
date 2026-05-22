@@ -164,6 +164,73 @@ func TestCleanupStatusBlockerForRecovery_PartialSpawnWithoutHook(t *testing.T) {
 	}
 }
 
+func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      polecat.CleanupStatus
+		terminal    bool
+		hookBead    string
+		activeMR    string
+		gitState    *GitState
+		gitErr      error
+		wantCanSkip bool
+	}{
+		{
+			name:        "closed source with clean git ignores stale unpushed cleanup",
+			status:      polecat.CleanupUnpushed,
+			terminal:    true,
+			gitState:    &GitState{Clean: true},
+			wantCanSkip: true,
+		},
+		{
+			name:     "open source still blocks",
+			status:   polecat.CleanupUnpushed,
+			gitState: &GitState{Clean: true},
+		},
+		{
+			name:     "hooked work still blocks",
+			status:   polecat.CleanupUnpushed,
+			terminal: true,
+			hookBead: "gt-work",
+			gitState: &GitState{Clean: true},
+		},
+		{
+			name:     "active MR still blocks",
+			status:   polecat.CleanupUnpushed,
+			terminal: true,
+			activeMR: "gt-mr",
+			gitState: &GitState{Clean: true},
+		},
+		{
+			name:     "dirty git still blocks",
+			status:   polecat.CleanupUnpushed,
+			terminal: true,
+			gitState: &GitState{UnpushedCommits: 1},
+		},
+		{
+			name:     "git error still blocks",
+			status:   polecat.CleanupUnpushed,
+			terminal: true,
+			gitErr:   errors.New("git failed"),
+		},
+		{
+			name:     "non-unpushed cleanup still blocks",
+			status:   polecat.CleanupStash,
+			terminal: true,
+			gitState: &GitState{Clean: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := staleCleanupStatusCanBeIgnoredForRecovery(tt.status, tt.terminal, tt.hookBead, tt.activeMR, tt.gitState, tt.gitErr)
+			if got != tt.wantCanSkip {
+				t.Fatalf("staleCleanupStatusCanBeIgnoredForRecovery() = %v, want %v", got, tt.wantCanSkip)
+			}
+		})
+	}
+}
+
 func TestPartialSpawnWithoutDurableHook(t *testing.T) {
 	assignee := "gastown/polecats/nitro"
 	tests := []struct {

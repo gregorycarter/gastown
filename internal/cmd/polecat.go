@@ -967,44 +967,13 @@ func getGitState(worktreePath string) (*GitState, error) {
 		state.Clean = false
 	}
 
-	// Check for unpushed commits (git log origin/main..HEAD)
-	// We check commits first, then verify if content differs.
-	// After squash merge, commits may differ but content may be identical.
-	mainRef := "origin/main"
-	logCmd := exec.Command("git", "log", mainRef+"..HEAD", "--oneline")
-	logCmd.Dir = worktreePath
-	output, err = logCmd.Output()
-	if err != nil {
-		// origin/main might not exist - try origin/master
-		mainRef = "origin/master"
-		logCmd = exec.Command("git", "log", mainRef+"..HEAD", "--oneline")
-		logCmd.Dir = worktreePath
-		output, _ = logCmd.Output() // non-fatal: might be a new repo without remote tracking
-	}
-	if len(output) > 0 {
-		lines := splitLines(string(output))
-		count := 0
-		for _, line := range lines {
-			if line != "" {
-				count++
-			}
-		}
-		if count > 0 {
-			// Commits exist that aren't on main. But after squash merge,
-			// the content may actually be on main with different commit SHAs.
-			// Check if there's any actual diff between HEAD and main.
-			diffCmd := exec.Command("git", "diff", mainRef, "HEAD", "--quiet")
-			diffCmd.Dir = worktreePath
-			diffErr := diffCmd.Run()
-			if diffErr == nil {
-				// Exit code 0 means no diff - content IS on main (squash merged)
-				// Don't count these as unpushed
-				state.UnpushedCommits = 0
-			} else {
-				// Exit code 1 means there's a diff - truly unpushed work
-				state.UnpushedCommits = count
-				state.Clean = false
-			}
+	// Check for local commits ahead of the worktree's own tracking ref. Polecat
+	// branches may track integration branches or their pushed source branch; using
+	// origin/main here marks clean completed work as unpushed.
+	if comparisonRef, refErr := gitStateComparisonRef(worktreePath); refErr == nil {
+		if count, countErr := countPatchUniqueCommits(worktreePath, comparisonRef); countErr == nil && count > 0 {
+			state.UnpushedCommits = count
+			state.Clean = false
 		}
 	}
 
@@ -1023,6 +992,43 @@ func getGitState(worktreePath string) (*GitState, error) {
 	}
 
 	return state, nil
+}
+
+func gitStateComparisonRef(worktreePath string) (string, error) {
+	upstreamCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	upstreamCmd.Dir = worktreePath
+	if output, err := upstreamCmd.Output(); err == nil {
+		if upstream := strings.TrimSpace(string(output)); upstream != "" {
+			return upstream, nil
+		}
+	}
+
+	for _, ref := range []string{"origin/main", "origin/master"} {
+		verifyCmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref)
+		verifyCmd.Dir = worktreePath
+		if err := verifyCmd.Run(); err == nil {
+			return ref, nil
+		}
+	}
+
+	return "", fmt.Errorf("no upstream, origin/main, or origin/master")
+}
+
+func countPatchUniqueCommits(worktreePath, baseRef string) (int, error) {
+	cherryCmd := exec.Command("git", "cherry", baseRef, "HEAD")
+	cherryCmd.Dir = worktreePath
+	output, err := cherryCmd.Output()
+	if err != nil {
+		return 0, err
+	}
+
+	count := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "+") {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // RecoveryStatus represents whether a polecat needs recovery or is safe to nuke.
@@ -1062,7 +1068,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	rigPath := r.Path
 	bd := beads.New(rigPath)
 	agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
-	_, fields, err := bd.GetAgentBead(agentBeadID)
+	agentIssue, fields, err := bd.GetAgentBead(agentBeadID)
 
 	status := RecoveryStatus{
 		Rig:     rigName,
@@ -1070,6 +1076,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		Branch:  p.Branch,
 		Issue:   p.Issue,
 	}
+	beadTerminal := isAssignedBeadTerminal(bd, status.Issue)
 
 	if err != nil || fields == nil {
 		// No agent bead or no cleanup_status - fall back to git check
@@ -1104,16 +1111,34 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		// Use cleanup_status from agent bead
 		status.CleanupStatus = polecat.CleanupStatus(fields.CleanupStatus)
 		status.ActiveMR = fields.ActiveMR
+		hookBead := agentHookBead(agentIssue, fields)
+		var gitState *GitState
+		var gitErr error
+		gitStateLoaded := false
+		loadGitState := func() {
+			if gitStateLoaded {
+				return
+			}
+			gitState, gitErr = getGitState(p.ClonePath)
+			gitStateLoaded = true
+		}
 		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 		partialSpawn, diagnostic := partialSpawnWithoutDurableHook(bd, fields, assignee, status.Issue)
 		if diagnostic != "" {
 			status.Diagnostics = append(status.Diagnostics, diagnostic)
 		}
 		if blocker := cleanupStatusBlockerForRecovery(status.CleanupStatus, partialSpawn); blocker != "" {
-			status.Blockers = append(status.Blockers, blocker)
+			if status.CleanupStatus == polecat.CleanupUnpushed {
+				loadGitState()
+			}
+			if staleCleanupStatusCanBeIgnoredForRecovery(status.CleanupStatus, beadTerminal, hookBead, fields.ActiveMR, gitState, gitErr) {
+				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_stale_cleanup_status=%s direct_git_state=clean assigned_bead=terminal", status.CleanupStatus))
+			} else {
+				status.Blockers = append(status.Blockers, blocker)
+			}
 		}
 		if status.CleanupStatus == "" || status.CleanupStatus == polecat.CleanupUnknown {
-			gitState, gitErr := getGitState(p.ClonePath)
+			loadGitState()
 			if blocker := recoveryGitStateBlocker(p.ClonePath, gitState, gitErr); blocker != "" {
 				status.Blockers = append(status.Blockers, blocker)
 			}
@@ -1144,7 +1169,6 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	// done, which just ran `gt done` again and died, over and over.
 	if status.Verdict == "SAFE_TO_NUKE" && status.Branch != "" {
 		mqBd := beads.New(r.Path)
-		beadTerminal := isAssignedBeadTerminal(mqBd, status.Issue)
 		gitState, gitErr := getGitState(p.ClonePath)
 		hasSubmittableWork := hasSubmittableWorkForRecovery(p.ClonePath, gitState, gitErr)
 		applyMQCheck(&status, mqBd, beadTerminal, hasSubmittableWork)
@@ -1227,6 +1251,26 @@ func cleanupStatusBlockerForRecovery(status polecat.CleanupStatus, partialSpawnW
 		return ""
 	}
 	return cleanupStatusBlocker(status)
+}
+
+func agentHookBead(agentIssue *beads.Issue, fields *beads.AgentFields) string {
+	if agentIssue != nil && agentIssue.HookBead != "" {
+		return agentIssue.HookBead
+	}
+	if fields != nil {
+		return fields.HookBead
+	}
+	return ""
+}
+
+func staleCleanupStatusCanBeIgnoredForRecovery(status polecat.CleanupStatus, beadTerminal bool, hookBead, activeMR string, gitState *GitState, gitErr error) bool {
+	return status == polecat.CleanupUnpushed &&
+		beadTerminal &&
+		hookBead == "" &&
+		activeMR == "" &&
+		gitErr == nil &&
+		gitState != nil &&
+		gitState.Clean
 }
 
 func partialSpawnWithoutDurableHook(bd issueShower, fields *beads.AgentFields, assignee, currentIssue string) (bool, string) {
@@ -1316,17 +1360,9 @@ func commitsAheadOfUpstream(worktreePath string) (int, error) {
 		return 0, fmt.Errorf("upstream %q is not a recovery base", upstream)
 	}
 
-	countCmd := exec.Command("git", "cherry", upstream, "HEAD")
-	countCmd.Dir = worktreePath
-	countOut, err := countCmd.Output()
+	count, err := countPatchUniqueCommits(worktreePath, upstream)
 	if err != nil {
 		return 0, err
-	}
-	count := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(countOut)), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "+ ") {
-			count++
-		}
 	}
 	return count, nil
 }
