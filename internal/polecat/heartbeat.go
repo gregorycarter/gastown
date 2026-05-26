@@ -9,8 +9,11 @@ import (
 
 // SessionHeartbeatStaleThreshold is the age at which a polecat session heartbeat
 // is considered stale, indicating the agent process is likely dead.
+// Set to 10 minutes: LLM agents (Claude Code) routinely spend 4-6+ minutes in
+// thinking/execution phases between gt commands. The previous 3-minute threshold
+// caused false "stalled" reports for actively-working polecats.
 // Configurable via operational.polecat.heartbeat_stale_threshold in settings/config.json.
-const SessionHeartbeatStaleThreshold = 3 * time.Minute
+const SessionHeartbeatStaleThreshold = 10 * time.Minute
 
 // HeartbeatState represents the agent-reported state in a heartbeat v2 (gt-3vr5).
 // Agents report their own state; the witness makes exactly one inference:
