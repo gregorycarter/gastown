@@ -26,6 +26,7 @@ type polecatCapacitySnapshot struct {
 	Working         int `json:"working"`
 	RecoveryBlocked int `json:"recovery_blocked"`
 	ReusableIdle    int `json:"reusable_idle"`
+	PendingMR       int `json:"pending_mr"`
 	Reservations    int `json:"reservations"`
 	Free            int `json:"free"`
 	ActiveSessions  int `json:"active_sessions"`
@@ -73,7 +74,7 @@ func (e *polecatCapacityAdmissionError) Error() string {
 		return fmt.Sprintf("polecat admission denied: %s", e.Reason)
 	}
 	return fmt.Sprintf(
-		"polecat admission denied: %s (max=%d occupied=%d working=%d recovery_blocked=%d reservations=%d reusable_idle=%d free=%d). Resolve recovery-needed polecats or raise scheduler.max_polecats; inspect with `gt scheduler status --json` or `gt polecat list --all --json`",
+		"polecat admission denied: %s (max=%d occupied=%d working=%d recovery_blocked=%d reservations=%d reusable_idle=%d pending_mr=%d free=%d). Resolve recovery-needed polecats or raise scheduler.max_polecats; inspect with `gt scheduler status --json` or `gt polecat list --all --json`",
 		e.Reason,
 		e.Snapshot.Max,
 		e.Snapshot.occupied(),
@@ -81,6 +82,7 @@ func (e *polecatCapacityAdmissionError) Error() string {
 		e.Snapshot.RecoveryBlocked,
 		e.Snapshot.Reservations,
 		e.Snapshot.ReusableIdle,
+		e.Snapshot.PendingMR,
 		e.Snapshot.Free,
 	)
 }
@@ -252,8 +254,12 @@ func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigNa
 		}
 		return
 	}
-	if fields.PushFailed || fields.MRFailed || fields.ActiveMR != "" {
+	if fields.PushFailed || fields.MRFailed {
 		snapshot.RecoveryBlocked++
+		return
+	}
+	if fields.ActiveMR != "" {
+		snapshot.PendingMR++
 		return
 	}
 	if fields.CleanupStatus == "clean" || state == "nuked" {
@@ -264,6 +270,10 @@ func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigNa
 }
 
 func applyWorkstateDispositionToCapacitySnapshot(snapshot *polecatCapacitySnapshot, state polecat.State, disposition polecat.WorkstateDisposition) {
+	if disposition.ReuseStatus == "idle-pr-open" {
+		snapshot.PendingMR++
+		return
+	}
 	if disposition.Reusable {
 		snapshot.ReusableIdle++
 		return

@@ -264,8 +264,8 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		if err != nil {
 			snapshot = lastCapacitySnapshot
 		}
-		fmt.Printf("\n%s Skipped %d bead(s) — zero capacity (working: %d recovery_blocked: %d reservations: %d reusable_idle: %d)\n",
-			style.Dim.Render("○"), report.Skipped, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle)
+		fmt.Printf("\n%s Skipped %d bead(s) — zero capacity (working: %d recovery_blocked: %d reservations: %d reusable_idle: %d pending_mr: %d)\n",
+			style.Dim.Render("○"), report.Skipped, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle, snapshot.PendingMR)
 	}
 
 	return report.Dispatched, nil
@@ -280,8 +280,8 @@ func printDryRunPlan(plan capacity.DispatchPlan, snapshot polecatCapacitySnapsho
 
 	capStr := "unlimited"
 	if snapshot.Max > 0 {
-		capStr = fmt.Sprintf("%d free of %d (working: %d, recovery_blocked: %d, reservations: %d, reusable_idle: %d)",
-			snapshot.Free, snapshot.Max, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle)
+		capStr = fmt.Sprintf("%d free of %d (working: %d, recovery_blocked: %d, reservations: %d, reusable_idle: %d, pending_mr: %d)",
+			snapshot.Free, snapshot.Max, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle, snapshot.PendingMR)
 	}
 
 	totalReady := len(plan.ToDispatch) + plan.Skipped

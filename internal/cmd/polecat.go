@@ -999,7 +999,7 @@ type RecoveryStatus struct {
 	Polecat              string                `json:"polecat"`
 	CleanupStatus        polecat.CleanupStatus `json:"cleanup_status"`
 	NeedsRecovery        bool                  `json:"needs_recovery"`
-	Verdict              string                `json:"verdict"` // SAFE_TO_NUKE, NEEDS_RECOVERY, or NEEDS_MQ_SUBMIT
+	Verdict              string                `json:"verdict"` // SAFE_TO_NUKE, PENDING_MR, NEEDS_RECOVERY, or NEEDS_MQ_SUBMIT
 	Reason               string                `json:"reason,omitempty"`
 	Reusable             bool                  `json:"reusable"`
 	SafeToNuke           bool                  `json:"safe_to_nuke"`
@@ -1184,6 +1184,10 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 		fmt.Printf("  %s Work is pushed but was never submitted to the merge queue.\n", style.Warning.Render("⚠"))
 		fmt.Println("  Submit to MQ before cleanup, or the branch will be orphaned.")
+	case "PENDING_MR":
+		fmt.Printf("  Verdict:         %s\n", style.Warning.Render("PENDING_MR"))
+		fmt.Println()
+		fmt.Println("  Work is waiting on an active merge request; preserve this polecat until it lands.")
 	case "NEEDS_RECOVERY":
 		fmt.Printf("  Verdict:         %s\n", style.Error.Render("NEEDS_RECOVERY"))
 		fmt.Println()

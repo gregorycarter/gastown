@@ -5,6 +5,7 @@ import "strings"
 const (
 	WorkstateVerdictWorking       = "WORKING"
 	WorkstateVerdictSafeToNuke    = "SAFE_TO_NUKE"
+	WorkstateVerdictPendingMR     = "PENDING_MR"
 	WorkstateVerdictNeedsRecovery = "NEEDS_RECOVERY"
 	WorkstateVerdictNeedsMQSubmit = "NEEDS_MQ_SUBMIT"
 )
@@ -119,19 +120,21 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 	if in.UnpushedCommits > 0 {
 		block("git-unpushed", "git_state=has_unpushed unpushed_commits="+itoa(in.UnpushedCommits))
 	}
-	if in.ActiveMRBlocker != "" {
+	activeMRBlocks := in.ActiveMRBlocker != ""
+	if activeMRBlocks {
 		block("active-mr-open", in.ActiveMRBlocker)
 	}
 
 	if len(d.Blockers) > 0 {
+		if activeMRBlocks && len(d.Blockers) == 1 {
+			d.Verdict = WorkstateVerdictPendingMR
+			d.ReuseStatus = "idle-pr-open"
+			return d
+		}
 		d.Verdict = WorkstateVerdictNeedsRecovery
 		d.NeedsRecovery = true
 		d.CountsTowardCapacity = true
-		if in.ActiveMR != "" && in.ActiveMRBlocker != "" {
-			d.ReuseStatus = "idle-pr-open"
-		} else {
-			d.ReuseStatus = "idle-recovery-needed"
-		}
+		d.ReuseStatus = "idle-recovery-needed"
 		return d
 	}
 

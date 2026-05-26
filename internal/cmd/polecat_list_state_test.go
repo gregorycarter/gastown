@@ -237,6 +237,11 @@ func TestWorkstateDispositionProjectionAgreement(t *testing.T) {
 			in:           polecat.WorkstateInput{State: polecat.StateWorking, CleanupStatus: polecat.CleanupClean},
 			wantCapacity: polecatCapacitySnapshot{Working: 1},
 		},
+		{
+			name:         "pending active mr",
+			in:           polecat.WorkstateInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupClean, ActiveMR: "gt-mr-open", ActiveMRBlocker: "active_mr=gt-mr-open status=open"},
+			wantCapacity: polecatCapacitySnapshot{PendingMR: 1},
+		},
 	}
 
 	for _, tt := range tests {
@@ -263,7 +268,7 @@ func TestWorkstateDispositionProjectionAgreement(t *testing.T) {
 			}
 			snapshot := polecatCapacitySnapshot{}
 			applyWorkstateDispositionToCapacitySnapshot(&snapshot, tt.in.State, disposition)
-			if snapshot.Working != tt.wantCapacity.Working || snapshot.RecoveryBlocked != tt.wantCapacity.RecoveryBlocked || snapshot.ReusableIdle != tt.wantCapacity.ReusableIdle {
+			if snapshot.Working != tt.wantCapacity.Working || snapshot.RecoveryBlocked != tt.wantCapacity.RecoveryBlocked || snapshot.ReusableIdle != tt.wantCapacity.ReusableIdle || snapshot.PendingMR != tt.wantCapacity.PendingMR {
 				t.Fatalf("capacity projection = %+v, want %+v", snapshot, tt.wantCapacity)
 			}
 		})
