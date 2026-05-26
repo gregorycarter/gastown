@@ -3164,11 +3164,23 @@ func activeMRGitSafe(workDir, rigName, polecatName string) bool {
 		return false
 	}
 	clonePath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
-	status, err := git.NewGit(clonePath).CheckUncommittedWork()
+	g := git.NewGit(clonePath)
+	branch, err := g.CurrentBranch()
+	if err != nil || branch == "" {
+		return false
+	}
+	status, err := g.CheckUncommittedWork()
 	if err != nil {
 		return false
 	}
-	return status.CleanExcludingRuntime() && status.StashCount == 0 && status.UnpushedCommits == 0
+	if !status.CleanExcludingRuntime() || status.StashCount > 0 || status.UnpushedCommits > 0 {
+		return false
+	}
+	pushed, unpushed, err := g.BranchPushedToRemote(branch, "origin")
+	if err != nil {
+		return false
+	}
+	return pushed && unpushed == 0
 }
 
 func terminalSafeDoneSnapshot(bd *BdCli, workDir, rigName, polecatName string, snap *agentBeadSnapshot) bool {

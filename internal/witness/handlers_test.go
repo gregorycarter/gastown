@@ -488,11 +488,26 @@ func setupActiveMRGitSafeWorkDir(t *testing.T, rigName, polecatName string) stri
 	if err := os.MkdirAll(clonePath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("git", "init")
-	cmd.Dir = clonePath
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
 	}
+	runGit(clonePath, "init")
+	runGit(clonePath, "config", "user.email", "test@example.com")
+	runGit(clonePath, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(clonePath, "README.md"), []byte("test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(clonePath, "add", "README.md")
+	runGit(clonePath, "commit", "-m", "initial")
+	remotePath := filepath.Join(townRoot, "origin.git")
+	runGit(townRoot, "init", "--bare", remotePath)
+	runGit(clonePath, "remote", "add", "origin", remotePath)
+	runGit(clonePath, "push", "-u", "origin", "HEAD")
 	return townRoot
 }
 
