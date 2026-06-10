@@ -399,8 +399,6 @@ gh pr create --title "<type>: <description> ({{issue}})" \
 - [ ] AI review comments addressed
 
 Resolves: {{issue}}
-
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 EOF
 )" --repo $(git remote get-url origin | sed 's|.*github.com[:/]||;s|\\.git$||')
 ```

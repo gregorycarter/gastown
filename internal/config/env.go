@@ -143,6 +143,15 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		}
 	}
 
+	// Normalize git commit identity so EVERY commit (any role) is authored and
+	// committed by the human owner. BD_ACTOR above still records the real agent
+	// for the beads ledger; only the git author/committer trailer is normalized.
+	// User standing order: all commits authored by Greg Carter <email@gregorycarter.net>.
+	env["GIT_AUTHOR_NAME"] = "Greg Carter"
+	env["GIT_AUTHOR_EMAIL"] = "email@gregorycarter.net"
+	env["GIT_COMMITTER_NAME"] = "Greg Carter"
+	env["GIT_COMMITTER_EMAIL"] = "email@gregorycarter.net"
+
 	// Only set GT_ROOT if provided
 	// Empty values would override tmux session environment
 	if cfg.TownRoot != "" {
