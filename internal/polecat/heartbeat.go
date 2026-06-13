@@ -9,14 +9,18 @@ import (
 
 // SessionHeartbeatStaleThreshold is the age at which a polecat session heartbeat
 // is considered stale, indicating the agent process is likely dead.
-// Set to 30 minutes: heartbeats are only emitted when the agent runs a `gt`
+// Set to 60 minutes: heartbeats are only emitted when the agent runs a `gt`
 // command (root.go persistentPreRun). A polecat doing a long stretch of real work
 // — editing files and running the full test suite — routinely goes 16-24+ minutes
-// between gt commands (observed: "Churned for 24m" single turns). The previous
-// 10-minute threshold caused false "stalled"/"session died" reports for
-// actively-working polecats, which then got nuked mid-work. 30min covers observed
-// long turns with margin; a genuinely-dead session is still detected within 30min.
-const SessionHeartbeatStaleThreshold = 30 * time.Minute
+// between gt commands (observed: "Churned for 24m" single turns). Since agents now
+// FOLLOW CI to green before `gt done` (push → wait for ci.yml conclusion), and
+// bridge_town_core CI runs ~23 jobs across only 3 self-hosted runners, a polecat
+// legitimately sits in a CI-wait/poll loop for 40+ minutes (observed: 43m turns
+// while CI was `queued`). The earlier 10min and 30min thresholds both false-flagged
+// these alive-but-waiting polecats as "stalled", risking mid-work nukes. 60min
+// covers observed CI-wait turns with margin; a genuinely-dead session is still
+// detected within 60min.
+const SessionHeartbeatStaleThreshold = 60 * time.Minute
 
 // HeartbeatState represents the agent-reported state in a heartbeat v2 (gt-3vr5).
 // Agents report their own state; the witness makes exactly one inference:
