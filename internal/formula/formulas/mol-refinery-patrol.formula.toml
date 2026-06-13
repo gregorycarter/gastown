@@ -577,32 +577,39 @@ Determine `<merge-target>` using the **Target Resolution Rule** above.
 
 **If merge_strategy = "direct" (default):**
 
-**Step 1a (direct only): CI GATE — merge ONLY on green CI.**
+**Step 1a (direct only): CI GATE — merge ONLY on a GREEN PR ci.yml run.**
 
 For any rig with CI (e.g. **bridge_town_core**), the refinery IS the merge gate:
 bridge_town_core has NO GitHub branch protection / required checks (org is on the free
 plan — `gh api .../branches/main/protection` returns 403), so GitHub enforces nothing.
-You MUST require CI success on the exact SHA you are about to land. (Skip this gate only
-for rigs with no `.github/workflows/ci.yml`.)
+(`gt done` already refuses to submit an MR unless the PR's ci.yml is green — this step is
+defense-in-depth and re-checks, since main may have moved since submission.) Skip this gate
+only for rigs with no `.github/workflows/ci.yml`.
+
+**Check the PR's `ci.yml` conclusion — NOT a branch-push run.** `ci.yml` triggers on
+`pull_request` + push-to-main only; pushing the rebased branch does NOT start a CI run, so
+never gate on a branch-push SHA. Read the polecat PR's own run:
 
 ```bash
-# Publish the rebased commit so CI runs on the EXACT content being merged.
-git push origin temp:refs/heads/<polecat-branch> --force-with-lease
-SHA=$(git rev-parse temp)
-# Poll CI for that SHA:
-gh run list --commit "$SHA" --workflow ci.yml --limit 1 --json status,conclusion
+# The polecat opened a PR for <polecat-branch>; read its latest pull_request ci.yml run.
+gh run list --branch <polecat-branch> --workflow ci.yml --event pull_request \
+  --limit 1 --json status,conclusion
 ```
 
-- conclusion == **"success"** → proceed to the ff-merge below.
-- conclusion == **"failure"/"cancelled"/"timed_out"** → **DO NOT MERGE.** Send FIX_NEEDED to
-  the polecat with the failing run (`gh run view <id> --log-failed`). The polecat owns the fix
-  and re-pushes; re-gate on the new SHA. Never merge red.
-- status == **"in_progress"/"queued"** (pending) → it is still running OR runners are offline.
-  Check `gh api repos/Bridge-Town/bridge-town-core/actions/runners`: if zero are online,
-  recover (`cd ci-runner && docker compose up -d`) and wait. **NEVER merge around stuck-pending.**
-  Re-poll until the run reaches a real conclusion.
+Read the single object's `status` and `conclusion`:
+- `status == "completed"` AND `conclusion == "success"` → proceed to the ff-merge below.
+- `status == "completed"` AND conclusion is anything else (**failure/cancelled/timed_out**) → **DO NOT MERGE.** Send FIX_NEEDED
+  to the polecat with the failing run (`gh run view <id> --log-failed`). The polecat owns the fix
+  and re-pushes; re-gate on the new run. Never merge red.
+- **`queued`/`in_progress`** (pending) → still running OR runners offline. Check
+  `gh api repos/Bridge-Town/bridge-town-core/actions/runners`: if zero online, recover
+  (`cd ci-runner && docker compose up -d`) and wait. **NEVER merge around stuck-pending.** Re-poll.
 
-Only when CI conclusion == "success" for `$SHA`:
+**Serialize merges:** process and land **one MR fully (merge + push) before starting the next**.
+Do NOT merge multiple MRs back-to-back in one cycle — each push-to-main starts a fresh main
+ci.yml run, and parallel merges would stack. One-at-a-time keeps the main CI signal clean.
+
+Only when the PR's ci.yml conclusion == "success":
 
 ```bash
 git checkout <merge-target>

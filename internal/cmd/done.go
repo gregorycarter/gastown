@@ -1151,6 +1151,30 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// distinguishes genuinely new submissions from idempotent retries.
 		commitSHA, _ = g.Rev("HEAD")
 
+		// bt-fq3qd: HARD CI-green precondition. Do NOT submit an MR to the merge
+		// queue unless the polecat's PR has a GREEN ci.yml run. The merge gate must
+		// be enforced in code here — formula/skill "wait for CI" text is only advice
+		// and was bypassed (MRs landed while ci.yml was pending/red). Scoped to
+		// polecats on rigs that actually have a CI workflow; non-code/report-only
+		// tasks (no_merge, --cleanup-status=clean) bypass since they have no CI.
+		if os.Getenv("GT_POLECAT") != "" && !isNoMergeTask && doneCleanupStatus != "clean" && rigHasCIWorkflow(cwd) {
+			switch ciState := checkPRCIGreen(branch); ciState {
+			case "success":
+				fmt.Printf("%s PR CI is green (ci.yml success) — proceeding to submit MR\n", style.Bold.Render("✓"))
+			case "failure":
+				return fmt.Errorf("cannot submit MR: PR CI (ci.yml) is RED for branch %s\n"+
+					"Inspect it (gh run view <id> --log-failed), fix the cause, push, and re-run gt done once CI is green.\n"+
+					"A red PR must not enter the merge queue", branch)
+			case "pending":
+				return fmt.Errorf("cannot submit MR: PR CI (ci.yml) has not finished for branch %s\n"+
+					"Wait for the run to conclude GREEN, then re-run gt done. 'pending' is not a pass —\n"+
+					"if it is stuck, verify runners are online: gh api repos/{owner}/{repo}/actions/runners", branch)
+			default: // "none"
+				return fmt.Errorf("cannot submit MR: no green ci.yml run found for branch %s\n"+
+					"Ensure a PR is open and its CI has run to success before gt done", branch)
+			}
+		}
+
 		// Resume: skip MR creation if already completed in a previous run (gt-aufru).
 		// Mirrors the push checkpoint pattern above. Without this, every retry
 		// re-attempts bd.Create which hits unique constraints or creates duplicates.
@@ -2084,5 +2108,47 @@ func purgeClosedEphemeralBeads(bd *beads.Beads) {
 	outStr := strings.TrimSpace(string(out))
 	if outStr != "" && outStr != "0" {
 		fmt.Fprintf(os.Stderr, "Purged closed ephemeral beads: %s\n", outStr)
+	}
+}
+
+// rigHasCIWorkflow reports whether the rig has a GitHub CI workflow (ci.yml) that
+// gates merges. Used to scope the bt-fq3qd CI-green precondition to CI rigs only.
+func rigHasCIWorkflow(cwd string) bool {
+	if cwd == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(cwd, ".github", "workflows", "ci.yml"))
+	return err == nil
+}
+
+// checkPRCIGreen returns the state of the latest pull_request `ci.yml` run for the
+// given branch: "success", "failure", "pending", or "none" (no run / gh error).
+// This is the authoritative pre-merge CI signal — the PR run (pull_request event),
+// NOT a branch-push run (ci.yml does not trigger on arbitrary branch pushes).
+func checkPRCIGreen(branch string) string {
+	out, err := exec.Command("gh", "run", "list",
+		"--branch", branch,
+		"--workflow", "ci.yml",
+		"--event", "pull_request",
+		"--limit", "1",
+		"--json", "status,conclusion",
+		"--jq", `.[0] | "\(.status)/\(.conclusion // "")"`,
+	).Output()
+	if err != nil {
+		return "none"
+	}
+	s := strings.TrimSpace(string(out))
+	if s == "" || s == "null" || s == "/" {
+		return "none"
+	}
+	switch {
+	case strings.HasSuffix(s, "/success"):
+		return "success"
+	case strings.HasPrefix(s, "completed/"):
+		// completed but not success: failure, cancelled, timed_out, etc.
+		return "failure"
+	default:
+		// queued / in_progress / waiting → still running
+		return "pending"
 	}
 }
