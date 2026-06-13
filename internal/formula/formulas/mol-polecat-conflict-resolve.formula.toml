@@ -223,33 +223,26 @@ needs = ["rebase-resolve"]
 description = """
 Verify the resolution doesn't break anything.
 
-**1. Run the test suite:**
-```bash
-go test ./...               # Or appropriate test command
-```
+**Do NOT assume a Go rig.** Use the rig's OWN quality gates — for bridge_town_core
+(Python + JS/TS) that is e.g. `poetry run ruff check .`, `poetry run mypy --strict .`,
+`poetry run pytest tests/unit/ -q`, and `pnpm -C web exec tsc --noEmit`. If unsure,
+read `.gastown/settings.json` (`lint_command`/`typecheck_command`/`test_command`) for the
+configured commands. Running `go test ./...` on a non-Go rig is a NO-OP that proves nothing —
+it has historically let broken conflict-resolutions land. Don't repeat that.
 
-**ALL TESTS MUST PASS.** Do not push with failures.
+**1. Run the rig's local quality gates** (the commands above for bridge_town_core).
+**ALL must pass.** Do not push with failures.
 
-**2. If tests fail:**
-- Determine if it's a resolution error or pre-existing
-- If your resolution broke something: fix it
-- If pre-existing: file a bead, but still must fix before pushing
+**2. If a gate fails:**
+- Determine if it's a resolution error or pre-existing.
+- If your resolution broke something: fix it.
+- If pre-existing: file a bead, but still fix before pushing.
 
-```bash
-# Quick check: does {{base_branch}} pass?
-git stash
-git checkout origin/{{base_branch}}
-go test ./...
-git checkout temp-resolve
-git stash pop
-```
+**3. CI is the authoritative gate (NOT local checks).** Local gates are a fast pre-screen;
+the merge is only safe once CI (`ci.yml`) is green on the resolved SHA. The actual CI gate
+runs in the next step (push-to-main) before base advances.
 
-**3. Run build check:**
-```bash
-go build ./...
-```
-
-**Exit criteria:** All tests pass, build succeeds."""
+**Exit criteria:** Local quality gates pass; ready to CI-gate the push."""
 
 [[steps]]
 id = "push-to-main"
@@ -272,17 +265,33 @@ git rebase origin/{{base_branch}}
 
 If new conflicts: resolve them (return to rebase-resolve step).
 
-**2. Push to main:**
+**2. CI GATE — never push to {{base_branch}} on red or pending.**
+On rigs with CI (e.g. bridge_town_core), do NOT push the resolved commit straight to
+{{base_branch}} — that bypasses CI (CI would only run after it's already landed and main is
+red). Instead, publish the resolved SHA to its branch, require CI success, THEN advance base:
+```bash
+git push origin temp-resolve:{{branch}} --force-with-lease
+SHA=$(git rev-parse temp-resolve)
+gh run list --commit "$SHA" --workflow ci.yml --limit 1 --json status,conclusion
+```
+- conclusion == "success" → continue to step 3.
+- conclusion == failure/cancelled/timed_out → STOP. Your resolution is broken; fix it and re-push.
+- pending → still running OR runners offline (`gh api repos/Bridge-Town/bridge-town-core/actions/runners`;
+  recover with `cd ci-runner && docker compose up -d`). Re-poll. **NEVER push to base around stuck-pending.**
+
+(If the rig has no `.github/workflows/ci.yml`, skip the CI gate and push directly.)
+
+**3. Advance base (only after CI is green for `$SHA`):**
 ```bash
 git push origin temp-resolve:{{base_branch}}
 ```
 
-**3. Verify the push:**
+**4. Verify the push:**
 ```bash
 git log origin/{{base_branch}} --oneline -3    # Your commits should be there
 ```
 
-**Exit criteria:** Changes are on origin/{{base_branch}}."""
+**Exit criteria:** CI was green on the resolved SHA AND changes are on origin/{{base_branch}}."""
 
 [[steps]]
 id = "close-beads"

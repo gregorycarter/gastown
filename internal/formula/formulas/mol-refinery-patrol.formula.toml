@@ -577,6 +577,33 @@ Determine `<merge-target>` using the **Target Resolution Rule** above.
 
 **If merge_strategy = "direct" (default):**
 
+**Step 1a (direct only): CI GATE — merge ONLY on green CI.**
+
+For any rig with CI (e.g. **bridge_town_core**), the refinery IS the merge gate:
+bridge_town_core has NO GitHub branch protection / required checks (org is on the free
+plan — `gh api .../branches/main/protection` returns 403), so GitHub enforces nothing.
+You MUST require CI success on the exact SHA you are about to land. (Skip this gate only
+for rigs with no `.github/workflows/ci.yml`.)
+
+```bash
+# Publish the rebased commit so CI runs on the EXACT content being merged.
+git push origin temp:refs/heads/<polecat-branch> --force-with-lease
+SHA=$(git rev-parse temp)
+# Poll CI for that SHA:
+gh run list --commit "$SHA" --workflow ci.yml --limit 1 --json status,conclusion
+```
+
+- conclusion == **"success"** → proceed to the ff-merge below.
+- conclusion == **"failure"/"cancelled"/"timed_out"** → **DO NOT MERGE.** Send FIX_NEEDED to
+  the polecat with the failing run (`gh run view <id> --log-failed`). The polecat owns the fix
+  and re-pushes; re-gate on the new SHA. Never merge red.
+- status == **"in_progress"/"queued"** (pending) → it is still running OR runners are offline.
+  Check `gh api repos/Bridge-Town/bridge-town-core/actions/runners`: if zero are online,
+  recover (`cd ci-runner && docker compose up -d`) and wait. **NEVER merge around stuck-pending.**
+  Re-poll until the run reaches a real conclusion.
+
+Only when CI conclusion == "success" for `$SHA`:
+
 ```bash
 git checkout <merge-target>
 git merge --ff-only temp

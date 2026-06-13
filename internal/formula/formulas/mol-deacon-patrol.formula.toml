@@ -714,9 +714,45 @@ Log `Dolt health: OK` and move on.
 **Exit criteria:** Health check run, alerts handled or escalated."""
 
 [[steps]]
+id = "ci-runner-health"
+title = "Check self-hosted CI runner health (bridge_town_core)"
+needs = ["dolt-health"]
+description = """
+bridge_town_core CI runs on **self-hosted** runners (`ci-runner/docker-compose.yml` →
+gastown-mac-runner-1/2/3) because the org is on the GitHub free plan. There is NO branch
+protection on the repo, so the refinery/agents are the ONLY merge gate — and that gate
+depends on CI actually running. **When all runners are offline, queued checks hang
+`pending` forever (they never fail)**, which silently removes the gate.
+
+This step runs the same check as the `ci-runner-health` plugin, but unconditionally each
+patrol (the plugin is cooldown-gated; this guarantees a per-cycle read right after dolt-health).
+
+**Step 1: Count online runners**
+```bash
+gh api repos/Bridge-Town/bridge-town-core/actions/runners \
+  --jq '[.runners[] | select(.status=="online")] | length'
+```
+
+**Step 2: React**
+- **>= 1 online** → log `CI runners: OK` and move on.
+- **0 online** → recover, then re-check:
+  ```bash
+  ( cd "$GT_ROOT/ci-runner" && docker compose up -d )
+  sleep 20
+  gh api repos/Bridge-Town/bridge-town-core/actions/runners --jq '[.runners[] | select(.status=="online")] | length'
+  ```
+- **still 0 after recovery** → escalate; queued CI will hang and merges must NOT proceed:
+  ```bash
+  gt escalate -s HIGH "bridge_town_core CI runners DOWN — checks will hang pending; do not merge"
+  ```
+- **gh/network error** → log a warning and move on (don't false-alarm on a transient hiccup).
+
+**Exit criteria:** Runner health read; offline runners recovered or escalated HIGH."""
+
+[[steps]]
 id = "zombie-scan"
 title = "Detect zombie polecats (NO KILL AUTHORITY)"
-needs = ["dolt-health"]
+needs = ["ci-runner-health"]
 description = """
 Defense-in-depth DETECTION of zombie polecats that Witness should have cleaned.
 
