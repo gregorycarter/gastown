@@ -1155,9 +1155,13 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// queue unless the polecat's PR has a GREEN ci.yml run. The merge gate must
 		// be enforced in code here — formula/skill "wait for CI" text is only advice
 		// and was bypassed (MRs landed while ci.yml was pending/red). Scoped to
-		// polecats on rigs that actually have a CI workflow; non-code/report-only
-		// tasks (no_merge, --cleanup-status=clean) bypass since they have no CI.
-		if os.Getenv("GT_POLECAT") != "" && !isNoMergeTask && doneCleanupStatus != "clean" && rigHasCIWorkflow(cwd) {
+		// polecats on rigs that have a CI workflow; no_merge tasks bypass.
+		// Do NOT gate on --cleanup-status: "clean" is the NORMAL clean-worktree
+		// state of a successfully completed code task, so the old `!= "clean"`
+		// clause skipped EVERY real code MR and let red/pending code merge
+		// (bt-fq3qd repro, 2026-06-14). The "none" (no PR run) case below is a
+		// soft pass so genuine non-code / no-PR clean completions aren't blocked.
+		if os.Getenv("GT_POLECAT") != "" && !isNoMergeTask && rigHasCIWorkflow(cwd) {
 			switch ciState := checkPRCIGreen(branch); ciState {
 			case "success":
 				fmt.Printf("%s PR CI is green (ci.yml success) — proceeding to submit MR\n", style.Bold.Render("✓"))
@@ -1169,9 +1173,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				return fmt.Errorf("cannot submit MR: PR CI (ci.yml) has not finished for branch %s\n"+
 					"Wait for the run to conclude GREEN, then re-run gt done. 'pending' is not a pass —\n"+
 					"if it is stuck, verify runners are online: gh api repos/{owner}/{repo}/actions/runners", branch)
-			default: // "none"
-				return fmt.Errorf("cannot submit MR: no green ci.yml run found for branch %s\n"+
-					"Ensure a PR is open and its CI has run to success before gt done", branch)
+			default: // "none" — no PR ci.yml run found (non-code or no-PR clean completion); soft pass.
+				fmt.Printf("%s No PR ci.yml run found for branch %s — skipping CI gate (no PR / non-code completion)\n", style.Bold.Render("⚠"), branch)
 			}
 		}
 
