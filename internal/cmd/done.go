@@ -1162,19 +1162,31 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// (bt-fq3qd repro, 2026-06-14). The "none" (no PR run) case below is a
 		// soft pass so genuine non-code / no-PR clean completions aren't blocked.
 		if os.Getenv("GT_POLECAT") != "" && !isNoMergeTask && rigHasCIWorkflow(cwd) {
-			switch ciState := checkPRCIGreen(branch); ciState {
-			case "success":
-				fmt.Printf("%s PR CI is green (ci.yml success) — proceeding to submit MR\n", style.Bold.Render("✓"))
-			case "failure":
-				return fmt.Errorf("cannot submit MR: PR CI (ci.yml) is RED for branch %s\n"+
-					"Inspect it (gh run view <id> --log-failed), fix the cause, push, and re-run gt done once CI is green.\n"+
-					"A red PR must not enter the merge queue", branch)
-			case "pending":
-				return fmt.Errorf("cannot submit MR: PR CI (ci.yml) has not finished for branch %s\n"+
-					"Wait for the run to conclude GREEN, then re-run gt done. 'pending' is not a pass —\n"+
-					"if it is stuck, verify runners are online: gh api repos/{owner}/{repo}/actions/runners", branch)
-			default: // "none" — no PR ci.yml run found (non-code or no-PR clean completion); soft pass.
-				fmt.Printf("%s No PR ci.yml run found for branch %s — skipping CI gate (no PR / non-code completion)\n", style.Bold.Render("⚠"), branch)
+			// Gate on every required pre-merge PR workflow: ci.yml always, plus
+			// mcp-e2e.yml when present (E2E tests run only there; it is a required
+			// branch-protection check, but the Refinery merges via the org-admin
+			// bypass — so this gt-done gate is the real chokepoint that keeps red
+			// E2E out of the merge queue). "none" (no PR run for a workflow) is a
+			// soft pass so non-code / not-triggered completions aren't blocked.
+			gateWorkflows := []string{"ci.yml"}
+			if _, err := os.Stat(filepath.Join(cwd, ".github", "workflows", "mcp-e2e.yml")); err == nil {
+				gateWorkflows = append(gateWorkflows, "mcp-e2e.yml")
+			}
+			for _, wf := range gateWorkflows {
+				switch checkPRWorkflowGreen(branch, wf) {
+				case "success":
+					fmt.Printf("%s PR %s is green — proceeding\n", style.Bold.Render("✓"), wf)
+				case "failure":
+					return fmt.Errorf("cannot submit MR: PR CI (%s) is RED for branch %s\n"+
+						"Inspect it (gh run view <id> --log-failed), fix the cause, push, and re-run gt done once it is green.\n"+
+						"A red PR must not enter the merge queue", wf, branch)
+				case "pending":
+					return fmt.Errorf("cannot submit MR: PR CI (%s) has not finished for branch %s\n"+
+						"Wait for the run to conclude GREEN, then re-run gt done. 'pending' is not a pass —\n"+
+						"if it is stuck, verify runners are online: gh api repos/{owner}/{repo}/actions/runners", wf, branch)
+				default: // "none" — no PR run found for this workflow; soft pass.
+					fmt.Printf("%s No PR %s run found for branch %s — skipping (no PR / not triggered)\n", style.Bold.Render("⚠"), wf, branch)
+				}
 			}
 		}
 
@@ -2128,10 +2140,10 @@ func rigHasCIWorkflow(cwd string) bool {
 // given branch: "success", "failure", "pending", or "none" (no run / gh error).
 // This is the authoritative pre-merge CI signal — the PR run (pull_request event),
 // NOT a branch-push run (ci.yml does not trigger on arbitrary branch pushes).
-func checkPRCIGreen(branch string) string {
+func checkPRWorkflowGreen(branch, workflow string) string {
 	out, err := exec.Command("gh", "run", "list",
 		"--branch", branch,
-		"--workflow", "ci.yml",
+		"--workflow", workflow,
 		"--event", "pull_request",
 		"--limit", "1",
 		"--json", "status,conclusion",
