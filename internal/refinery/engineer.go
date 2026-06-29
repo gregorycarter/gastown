@@ -1296,7 +1296,12 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 }
 
 func (e *Engineer) clearAgentActiveMR(agentBeadID string) error {
-	return e.beads.ForAgentBead().UpdateAgentActiveMR(agentBeadID, "")
+	// Self-route by ID (agentBeadTargetForID): Dolt-native rigs clear active_mr in
+	// the rig store where the capacity classifier reads it; town-backed rigs keep
+	// town routing. Using ForAgentBead() here forced the clear to the town store
+	// while reads came from the rig store, so the polecat stayed idle-pr-open
+	// forever after a merge (bt-fesl1 / bt-28op2).
+	return e.beads.UpdateAgentActiveMR(agentBeadID, "")
 }
 
 // HandleMRInfoFailure handles a failed merge from MRInfo.

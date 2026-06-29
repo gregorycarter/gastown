@@ -1924,7 +1924,7 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 func resetPolecatAgentBeadForReuse(r *rig.Rig, rigName, polecatName string) {
 	agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
 	bd := beads.New(r.Path)
-	if err := bd.ForAgentBead().ResetAgentBeadForReuse(agentBeadID, "nuked"); err != nil {
+	if err := bd.ResetAgentBeadForReuse(agentBeadID, "nuked"); err != nil {
 		fmt.Printf("  %s agent bead not found or already cleaned\n", style.Dim.Render("○"))
 	} else {
 		fmt.Printf("  %s reset agent bead %s\n", style.Success.Render("✓"), agentBeadID)
