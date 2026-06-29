@@ -279,7 +279,12 @@ func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigNa
 		snapshot.PendingMR++
 		return
 	}
-	if fields.CleanupStatus == "clean" || state == "nuked" {
+	// Reusable when explicitly clean/nuked, OR a freshly pool-init'd idle polecat:
+	// state idle/empty with no dirty cleanup status yet (a new worktree reports no
+	// cleanup_status until it does work). A dirty idle polecat (cleanup_status =
+	// has_uncommitted/has_stash/has_unpushed) falls through to recovery below.
+	if fields.CleanupStatus == "clean" || state == "nuked" ||
+		((state == "idle" || state == "") && fields.CleanupStatus == "") {
 		snapshot.ReusableIdle++
 		return
 	}
