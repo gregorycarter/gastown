@@ -246,11 +246,28 @@ func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigNa
 	}
 
 	state := strings.TrimSpace(fields.AgentState)
-	if fields.HookBead != "" || state == "working" || state == "spawning" {
+	// Assigned work or actively working: a live session means working; no session
+	// means a stuck spawn/worker that needs recovery.
+	if fields.HookBead != "" || state == "working" {
 		if running {
 			snapshot.Working++
 		} else {
 			snapshot.RecoveryBlocked++
+		}
+		return
+	}
+	// "spawning" with a live session is a polecat coming up (working). With no
+	// session AND no assigned work (no hook, handled above) it's an idle
+	// pool-init'd polecat whose "spawning" label is stale: agent-state writes can
+	// lag for Dolt-native rigs where ResolveAgentState reads the description from a
+	// different store than SetAgentState writes the column. Counting it as
+	// recovery-blocked pins a freshly-initialized pool at 0 free capacity. Treat
+	// it as reusable so the pool can actually take work (bt-fesl1 follow-up).
+	if state == "spawning" {
+		if running {
+			snapshot.Working++
+		} else {
+			snapshot.ReusableIdle++
 		}
 		return
 	}
