@@ -649,6 +649,26 @@ func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
 		}
 	}
 
+	// Release the worker polecat by clearing its active_mr (bt-fesl1). The refinery
+	// merges out-of-band of the polecat's own gt-done flow, so without this the
+	// polecat stays idle-pr-open after its MR lands and clogs the pool. The Go batch
+	// path clears via HandleMRInfoSuccess, but the formula-agent path runs only
+	// PostMerge — so it must clear here too. UpdateAgentActiveMR self-routes by ID
+	// (agentBeadTargetForID) to the rig store for Dolt-native rigs (bt-28op2).
+	if mr.Worker != "" {
+		name := strings.TrimPrefix(mr.Worker, "polecats/")
+		prefix := mr.ID
+		if i := strings.IndexByte(mr.ID, '-'); i > 0 {
+			prefix = mr.ID[:i]
+		}
+		agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, m.rig.Name, name)
+		if err := b.UpdateAgentActiveMR(agentBeadID, ""); err != nil {
+			_, _ = fmt.Fprintf(m.output, "  %s clear active_mr for %s: %v\n", style.Dim.Render("○"), name, err)
+		} else {
+			_, _ = fmt.Fprintf(m.output, "  %s released polecat %s (cleared active_mr)\n", style.Dim.Render("✓"), name)
+		}
+	}
+
 	return result, nil
 }
 
