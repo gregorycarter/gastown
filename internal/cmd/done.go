@@ -1181,9 +1181,16 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 						"Inspect it (gh run view <id> --log-failed), fix the cause, push, and re-run gt done once it is green.\n"+
 						"A red PR must not enter the merge queue", wf, branch)
 				case "pending":
-					return fmt.Errorf("cannot submit MR: PR CI (%s) has not finished for branch %s\n"+
-						"Wait for the run to conclude GREEN, then re-run gt done. 'pending' is not a pass —\n"+
-						"if it is stuck, verify runners are online: gh api repos/{owner}/{repo}/actions/runners", wf, branch)
+					// bt-fq3qd: do NOT block enqueue on pending CI. Blocking here
+					// coupled MR creation to the polecat surviving the full (~25min)
+					// CI run and re-running gt done — but polecats die during that
+					// wait, leaving CI-green PRs unmerged in an empty queue so the
+					// Mayor hand-merges. Enqueue the MR now (polecat exits cleanly)
+					// and let the Refinery's CI gate (mol-refinery-patrol Step 1a:
+					// "merge ONLY on a GREEN PR ci.yml run") hold it until CI passes.
+					// Red still returns above — defense in depth keeps red out of the queue.
+					fmt.Printf("%s PR %s CI still pending for branch %s — enqueuing MR anyway; "+
+						"the Refinery merges only once CI is green\n", style.Bold.Render("⚠"), wf, branch)
 				default: // "none" — no PR run found for this workflow; soft pass.
 					fmt.Printf("%s No PR %s run found for branch %s — skipping (no PR / not triggered)\n", style.Bold.Render("⚠"), wf, branch)
 				}

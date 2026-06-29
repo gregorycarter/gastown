@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -225,6 +226,149 @@ Examples:
 
 var refineryBlockedJSON bool
 
+var refineryBatchJSON bool
+var refineryBatchMaxSize int
+var refineryBatchDryRun bool
+
+var refineryBatchCmd = &cobra.Command{
+	Use:   "batch [rig]",
+	Short: "Process the ready MR queue as one batch (stack → gate once → ff-merge all; bisect on red)",
+	Long: `Process the ready merge-request queue using the batch-then-bisect algorithm.
+
+Assembles up to --max-size ready MRs into a single rebase stack, runs the merge
+gates ONCE on the stack tip, and fast-forwards all of them on green. On red it
+retries once (flaky guard) then bisects to isolate the culprit, merging the
+innocent MRs. This amortizes the (serialized) E2E gate across the whole batch
+instead of paying it per MR — bt-mad9c.
+
+Examples:
+  gt refinery batch
+  gt refinery batch --max-size 5
+  gt refinery batch --dry-run
+  gt refinery batch --json`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runRefineryBatch,
+}
+
+// prCIGreenInDir reports the state of the latest pull_request <workflow> run for
+// branch, running gh in dir (the refinery clone whose origin is canonical
+// GitHub). Returns "success", "failure", "pending", or "none". Mirrors
+// checkPRWorkflowGreen (done.go) but is cwd-explicit so the refinery batch path
+// resolves the right repo (bt-mad9c). Callers MUST fail-closed on anything but
+// "success".
+func prCIGreenInDir(dir, branch, workflow string) string {
+	c := exec.Command("gh", "run", "list",
+		"--branch", branch,
+		"--workflow", workflow,
+		"--event", "pull_request",
+		"--limit", "1",
+		"--json", "status,conclusion",
+		"--jq", `.[0] | "\(.status)/\(.conclusion // "")"`,
+	)
+	c.Dir = dir
+	out, err := c.Output()
+	if err != nil {
+		return "none"
+	}
+	s := strings.TrimSpace(string(out))
+	if s == "" || s == "null" || s == "/" {
+		return "none"
+	}
+	switch {
+	case strings.HasSuffix(s, "/success"):
+		return "success"
+	case strings.HasPrefix(s, "completed/"):
+		return "failure"
+	default:
+		return "pending"
+	}
+}
+
+func runRefineryBatch(cmd *cobra.Command, args []string) error {
+	rigName := ""
+	if len(args) > 0 {
+		rigName = args[0]
+	}
+	_, r, rigName, err := getRefineryManager(rigName)
+	if err != nil {
+		return err
+	}
+	eng := refinery.NewEngineer(r)
+
+	ready, err := eng.ListReadyMRs()
+	if err != nil {
+		return fmt.Errorf("listing ready MRs: %w", err)
+	}
+
+	cfg := refinery.DefaultBatchConfig()
+	if refineryBatchMaxSize > 0 {
+		cfg.MaxBatchSize = refineryBatchMaxSize
+	}
+
+	batch := eng.AssembleBatch(ready, cfg)
+
+	// bt-mad9c SAFETY: ProcessBatch's gates run LOCAL configured gates only — they
+	// do NOT verify the PR's GitHub ci.yml. To preserve the bt-fq3qd / formula
+	// Step 1a CI gate, filter the batch to MRs whose PR ci.yml is GREEN before
+	// merging. MRs that are pending/red are left in the queue for a later cycle.
+	// The check runs in the refinery's workDir (origin = canonical GitHub) so gh
+	// resolves the right repo — running it in the wrong cwd would error → "none"
+	// → silently merge red, which must never happen.
+	if len(batch) > 0 {
+		var green []*refinery.MRInfo
+		for _, mr := range batch {
+			// FAIL-CLOSED: only an explicit green ci.yml run merges. pending/
+			// failure AND "none" (no run found / gh error) are all skipped — the
+			// batch is the authoritative merge gate, so never merge what we cannot
+			// prove is green. Skipped MRs stay queued and retry next cycle.
+			if st := prCIGreenInDir(eng.WorkDir(), mr.Branch, "ci.yml"); st == "success" {
+				green = append(green, mr)
+			} else {
+				fmt.Printf("  %s skipping %s (%s): PR ci.yml=%s (not green)\n", style.Dim.Render("⏭"), mr.Branch, mr.ID, st)
+			}
+		}
+		batch = green
+	}
+
+	if len(batch) == 0 {
+		fmt.Printf("%s No CI-green MRs to batch for '%s'\n", style.Bold.Render("✓"), rigName)
+		return nil
+	}
+
+	target := batch[0].Target
+	if target == "" {
+		target = r.DefaultBranch()
+	}
+
+	if refineryBatchDryRun {
+		fmt.Printf("%s Would batch %d MR(s) → %s:\n", style.Bold.Render("🧪"), len(batch), target)
+		for i, mr := range batch {
+			fmt.Printf("  %d. %s (%s)\n", i+1, mr.Branch, mr.ID)
+		}
+		return nil
+	}
+
+	fmt.Printf("%s Processing batch of %d MR(s) → %s\n", style.Bold.Render("⚙"), len(batch), target)
+	result := eng.ProcessBatch(cmd.Context(), batch, target, cfg)
+
+	if refineryBatchJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+
+	fmt.Printf("  Merged:    %d\n", len(result.Merged))
+	fmt.Printf("  Culprits:  %d\n", len(result.Culprits))
+	fmt.Printf("  Conflicts: %d\n", len(result.Conflicts))
+	if result.MergeCommit != "" {
+		fmt.Printf("  Merge commit: %s\n", result.MergeCommit)
+	}
+	if result.Error != nil {
+		return fmt.Errorf("batch processing: %w", result.Error)
+	}
+	return nil
+}
+
 func init() {
 	// Start flags
 	refineryStartCmd.Flags().BoolVar(&refineryForeground, "foreground", false, "Run in foreground (default: background)")
@@ -265,6 +409,10 @@ func init() {
 	refineryCmd.AddCommand(refineryUnclaimedCmd)
 	refineryCmd.AddCommand(refineryReadyCmd)
 	refineryCmd.AddCommand(refineryBlockedCmd)
+	refineryCmd.AddCommand(refineryBatchCmd)
+	refineryBatchCmd.Flags().BoolVar(&refineryBatchJSON, "json", false, "Output as JSON")
+	refineryBatchCmd.Flags().IntVar(&refineryBatchMaxSize, "max-size", 0, "Max MRs per batch (0 = default 5)")
+	refineryBatchCmd.Flags().BoolVar(&refineryBatchDryRun, "dry-run", false, "Show what would be batched without merging")
 
 	rootCmd.AddCommand(refineryCmd)
 }

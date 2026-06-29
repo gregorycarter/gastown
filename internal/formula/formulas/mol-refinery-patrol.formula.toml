@@ -276,9 +276,39 @@ If branch doesn't exist for a queued MR:
 Track verified MR list for this cycle."""
 
 [[steps]]
+id = "batch-merge"
+title = "Batch-merge ready MRs (fast path)"
+needs = ["queue-scan"]
+description = """
+FAST PATH (bt-mad9c): merge all CI-green ready MRs as a single batch to amortize
+the (serialized) e2e / CI gate across the whole queue instead of paying it per MR.
+
+If queue-scan found NO ready work, SKIP this step entirely and continue.
+
+Otherwise run ONE command. It claims up to N ready MRs, stacks them (rebase chain),
+runs the gates ONCE on the stack tip, verifies EACH MR's PR ci.yml is GREEN —
+FAIL-CLOSED, so it NEVER merges a pending/red MR (those are skipped and stay
+queued) — ff-merges the green batch, runs post-merge cleanup for each (close the
+source bead, delete the branch, nudge mayor), and bisects to isolate the culprit
+if the stack goes red:
+
+```bash
+gt refinery batch
+```
+
+Report the `Merged: N / Culprits / Conflicts` line it prints. Do NOT manually
+rebase or merge here — the command performs the merge. MRs it SKIPPED (CI not yet
+green) stay in the queue; the per-MR steps below are the fallback for any leftover
+single MR, and the next patrol cycle re-batches once more go green.
+
+If `gt refinery batch` errors, do NOT panic-merge — fall through to the per-MR
+steps below, which are the unchanged, proven single-MR merge path.
+"""
+
+[[steps]]
 id = "process-branch"
 title = "Mechanical rebase"
-needs = ["queue-scan"]
+needs = ["batch-merge"]
 description = """
 Pick next branch from queue. Attempt mechanical rebase on the MR's effective target branch.
 
