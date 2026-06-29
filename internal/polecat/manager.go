@@ -355,7 +355,13 @@ func (m *Manager) createAgentBeadWithRetry(agentID string, fields *beads.AgentFi
 }
 
 func (m *Manager) agentBeads() *beads.Beads {
-	return m.beads.ForAgentBead()
+	// Return the un-pinned beads wrapper so agent-bead ops self-route per ID via
+	// agentBeadTargetForID: town-level agents and town-backed rigs go to the town
+	// store (as ForAgentBead did), but Dolt-native rigs that run their own database
+	// route to the rig store — where ListAgentBeads/the capacity classifier read
+	// them. Pre-pinning to ForAgentBead() here forced all writes to town and
+	// bypassed that per-ID routing (bt-28op2).
+	return m.beads
 }
 
 func (m *Manager) resetAgentBeadForReuse(agentID, reason string) error {
