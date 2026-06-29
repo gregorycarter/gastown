@@ -421,6 +421,40 @@ func (b *Beads) agentBeadTarget() *Beads {
 	return b.ForAgentBead()
 }
 
+// agentBeadTargetForID returns the Beads wrapper that owns the given agent bead,
+// routing by the bead ID's rig and that rig's backend.
+//
+// Town-backed rigs (and town-level agents like mayor/overseer/deacon) keep the
+// existing town-store routing — agent beads are centralized in town/.beads. But a
+// Dolt-native rig that runs its OWN database on the shared Dolt server (config
+// dolt.database=<rig>, detected here via Dolt metadata in the rig's .beads) keeps
+// its agent beads in the rig database, and that is where ListAgentBeads / the
+// capacity classifier read them from (beads.New(rigPath)). Previously writes were
+// force-routed to the town database while reads came from the rig database, leaving
+// stale agent_state/active_mr (the root of the pool strand + recovery miscount,
+// bt-28op2). For such rigs, route writes to the rig store so reads and writes agree.
+func (b *Beads) agentBeadTargetForID(id string) *Beads {
+	if b.noRoute {
+		return b
+	}
+	if rig, _, _, ok := ParseAgentBeadID(id); ok && rig != "" {
+		if townRoot := b.getTownRoot(); townRoot != "" {
+			rigBeadsDir := filepath.Join(townRoot, rig, ".beads")
+			if meta := readDoltMetadata(rigBeadsDir); meta.Port != "" || meta.Host != "" {
+				return &Beads{
+					workDir:    filepath.Join(townRoot, rig),
+					isolated:   b.isolated,
+					serverPort: b.serverPort,
+					store:      b.store,
+					townRoot:   townRoot,
+					noRoute:    true,
+				}
+			}
+		}
+	}
+	return b.ForAgentBead()
+}
+
 // getActor returns the BD_ACTOR value for this context.
 // Returns empty string when in isolated mode (tests) to prevent
 // inherited actors from routing to production databases.

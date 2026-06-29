@@ -547,3 +547,53 @@ esac
 		t.Fatalf("CreateOrReopenAgentBead did not use town BEADS_DIR for existing bead path; log:\n%s", logOutput)
 	}
 }
+
+// TestAgentBeadTargetForIDRouting verifies backend-aware agent-bead routing (bt-28op2):
+// Dolt-native rigs (own DB on the shared server, detected via Dolt metadata in the
+// rig's .beads) route agent beads to the rig store; town-backed rigs and town-level
+// agents keep town routing.
+func TestAgentBeadTargetForIDRouting(t *testing.T) {
+	townRoot, _ := filepath.EvalSymlinks(t.TempDir())
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Dolt-native rig: Dolt metadata present in its .beads.
+	doltRig := "bridge_town_core"
+	doltRigBeads := filepath.Join(townRoot, doltRig, ".beads")
+	if err := os.MkdirAll(doltRigBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltRigBeads, "dolt-server.port"), []byte("3307\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Town-backed rig: no Dolt metadata.
+	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(townRoot)
+
+	cases := []struct {
+		name    string
+		id      string
+		wantDir string
+	}{
+		{"dolt-native rig polecat → rig store", "bt-bridge_town_core-polecat-jasper", filepath.Join(townRoot, doltRig)},
+		{"town-backed rig polecat → town store", "gt-gastown-polecat-rust", townRoot},
+		{"town-level agent → town store", "gt-mayor", townRoot},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := b.agentBeadTargetForID(tc.id)
+			if got.workDir != tc.wantDir {
+				t.Fatalf("agentBeadTargetForID(%q).workDir = %q, want %q", tc.id, got.workDir, tc.wantDir)
+			}
+		})
+	}
+}
