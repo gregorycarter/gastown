@@ -117,8 +117,20 @@ func (e *Engineer) BuildRebaseStack(ctx context.Context, batch []*MRInfo, target
 	for _, mr := range batch {
 		_, _ = fmt.Fprintf(e.output, "[Batch] Stacking MR %s (branch %s)...\n", mr.ID, mr.Branch)
 
-		// Check branch exists
+		// Check branch exists. No-fetch fix: if it's not local yet, the polecat may
+		// have pushed straight to origin — confirm on the remote and fetch it before
+		// treating the work as lost.
 		exists, brErr := e.git.BranchExists(mr.Branch)
+		if brErr == nil && !exists {
+			if remoteExists, rerr := e.git.RemoteBranchExists("origin", mr.Branch); rerr == nil && remoteExists {
+				_, _ = fmt.Fprintf(e.output, "[Batch] Branch %s not local but present on origin — fetching\n", mr.Branch)
+				if ferr := e.git.FetchBranchToLocal("origin", mr.Branch); ferr != nil {
+					_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to fetch %s from origin: %v\n", mr.Branch, ferr)
+				} else {
+					exists, brErr = e.git.BranchExists(mr.Branch)
+				}
+			}
+		}
 		if brErr != nil || !exists {
 			// Branch not found — escalate to mayor (gas-556)
 			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: branch %s not found, escalating to mayor\n", mr.ID, mr.Branch)

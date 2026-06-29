@@ -975,11 +975,16 @@ const GUPPViolationTimeout = constants.GUPPViolationTimeout
 // listAgentBeadsJSON queries both the issues and wisps tables for agent beads
 // and unmarshals the combined results into the provided slice pointer.
 // The wisps query is best-effort (gracefully ignored if table doesn't exist).
-func (d *Daemon) listAgentBeadsJSON(dest interface{}) error {
-	// Query issues table (backward compat during migration)
-	cmd := exec.Command(d.bdPath, "list", "--label=gt:agent", "--json", "--flat") //nolint:gosec // G204: bd is a trusted internal tool
+func (d *Daemon) listAgentBeadsJSON(rigName string, dest interface{}) error {
+	// Query issues table via --rig routing. Dolt-native rigs keep their agent
+	// beads in the rig's own store (Dolt), not the town .beads — so the old
+	// behavior of pinning to town/.beads found nothing for them, which made
+	// the GUPP / orphaned-work checks fail with "no agent beads found" and
+	// aborted polecat dispatch. Routing by --rig finds agent beads for both
+	// Dolt-native and local rigs (and gracefully returns empty for docked rigs).
+	cmd := exec.Command(d.bdPath, "list", "--rig", rigName, "--label=gt:agent", "--json", "--flat") //nolint:gosec // G204: bd is a trusted internal tool
 	cmd.Dir = d.config.TownRoot
-	cmd.Env = bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads"))
+	cmd.Env = bdReadOnlyRoutingEnv(d.config.TownRoot)
 	util.SetDetachedProcessGroup(cmd)
 
 	issuesOutput, issuesErr := cmd.Output()
@@ -1091,7 +1096,7 @@ func (d *Daemon) checkRigGUPPViolations(rigName string) {
 		Type        string   `json:"issue_type"`
 	}
 
-	if err := d.listAgentBeadsJSON(&agents); err != nil {
+	if err := d.listAgentBeadsJSON(rigName, &agents); err != nil {
 		// Suppress warning when there are simply no agent beads (expected when all rigs are docked)
 		d.logger.Printf("Warning: listing agent beads failed for GUPP check: %v", err)
 		return
@@ -1206,7 +1211,7 @@ func (d *Daemon) checkRigOrphanedWork(rigName string) {
 		Type        string   `json:"issue_type"`
 	}
 
-	if err := d.listAgentBeadsJSON(&agents); err != nil {
+	if err := d.listAgentBeadsJSON(rigName, &agents); err != nil {
 		d.logger.Printf("Warning: listing agent beads failed for orphaned work check: %v", err)
 		return
 	}

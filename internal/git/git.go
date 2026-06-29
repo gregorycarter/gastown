@@ -913,6 +913,17 @@ func (g *Git) FetchBranch(remote, branch string) error {
 	return err
 }
 
+// FetchBranchToLocal fetches a remote branch and creates/updates the local
+// branch ref of the same name. Callers that operate on the local branch
+// (conflict checks, merges) can then see a branch that was just pushed to the
+// remote but not yet present in this repo's refs/heads — e.g. the refinery
+// processing an MR whose polecat pushed straight to origin.
+func (g *Git) FetchBranchToLocal(remote, branch string) error {
+	refspec := branch + ":" + branch
+	_, err := g.run("fetch", remote, refspec)
+	return err
+}
+
 // FetchBranchShallow fetches a single branch with --depth 1 and creates the
 // remote tracking ref (e.g. origin/<branch>). Use this on shallow single-branch
 // clones to add a branch that wasn't included in the initial clone.

@@ -519,10 +519,24 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 		}
 	}
 	if !exists {
+		// No-fetch fix: the polecat may have pushed the branch straight to origin
+		// (e.g. via `gt done`) without it landing in this repo's local refs yet.
+		// Before declaring the work lost, confirm against the remote and fetch it
+		// into a local ref. Only a branch absent from origin too is truly missing.
+		if remoteExists, rerr := e.git.RemoteBranchExists("origin", branch); rerr == nil && remoteExists {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Branch %s not local but present on origin — fetching\n", branch)
+			if ferr := e.git.FetchBranchToLocal("origin", branch); ferr != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to fetch %s from origin: %v\n", branch, ferr)
+			} else {
+				exists, _ = e.git.BranchExists(branch)
+			}
+		}
+	}
+	if !exists {
 		return ProcessResult{
 			Success:        false,
 			BranchNotFound: true,
-			Error:          fmt.Sprintf("branch %s not found locally", branch),
+			Error:          fmt.Sprintf("branch %s not found locally or on origin", branch),
 		}
 	}
 
@@ -1605,6 +1619,13 @@ func (e *Engineer) firstOpenBlocker(issue *beads.Issue) string {
 // Uses bd list instead of bd ready because MRs are ephemeral beads and
 // bd ready filters out ephemeral issues (see gt-t5t6y). This matches the
 // pattern used by ListBlockedMRs and ListAllOpenMRs.
+// WorkDir returns the refinery's git working directory (the clone whose
+// "origin" is the canonical GitHub remote). CI-status checks (gh run list)
+// must run here so gh resolves the correct repo — bt-mad9c.
+func (e *Engineer) WorkDir() string {
+	return e.workDir
+}
+
 func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
 	// Query beads for all open merge-request issues.
 	// Cannot use ReadyWithType here because bd ready excludes ephemeral beads,
