@@ -1407,8 +1407,12 @@ notifyWitness:
 	// longer processes routine completions from these fields.
 	fmt.Printf("\nNotifying Witness...\n")
 	if agentBeadID != "" {
-		// Agent bead lives in town DB despite rig prefix — bypass routing.
-		completionBd := beads.New(cwd).ForAgentBead()
+		// Self-route by ID (agentBeadTargetForID): write completion metadata
+		// (mr_failed/push_failed/exit_type) to the same store the witness patrol
+		// and capacity classifier read it from — the rig Dolt store for Dolt-native
+		// rigs, town otherwise. (Previously force-pinned town via ForAgentBead(),
+		// which desynced from the rig-store reads — bt-28op2 residual.)
+		completionBd := beads.New(cwd)
 		meta := &beads.CompletionMetadata{
 			ExitType:       exitType,
 			MRID:           mrID,
@@ -1844,11 +1848,15 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) {
 		beadsPath = filepath.Join(townRoot, ctx.Rig)
 	}
 	bd := beads.New(beadsPath)
-	// agentBd bypasses prefix routing — agent beads (gt:agent label) live in
-	// the town DB regardless of their ID prefix, but the rig-prefix routing
-	// would otherwise misroute them to the rig DB and silently fail with
-	// "issue not found". See beads.ForAgentBead docstring for details.
-	agentBd := bd.ForAgentBead()
+	// agentBd performs agent-bead completion writes (agent_state, cleanup_status,
+	// hook_bead). Use the self-routing wrapper, NOT bd.ForAgentBead(): the agent-bead
+	// methods route per-ID via agentBeadTargetForID, which sends Dolt-native rigs to
+	// the rig Dolt store and falls back to the town DB otherwise. These writes MUST land
+	// in the same store recovery reads from (manager.go GetAgentBead /
+	// getCleanupStatusFromBead). ForAgentBead() force-pins town (noRoute), so on
+	// Dolt-native rigs cleanup_status was written to town but read from the rig Dolt DB,
+	// reading back as <missing> and stalling polecat recovery (bt-28op2 residual).
+	agentBd := bd
 
 	// Find the hooked bead to close. Use issueID directly instead of reading
 	// agent bead's hook_bead slot (hq-l6mm5: direct bead tracking).
