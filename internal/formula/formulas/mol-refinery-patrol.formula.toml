@@ -273,7 +273,19 @@ If branch doesn't exist for a queued MR:
 - Close the MR bead: `bd close <mr-id> --reason "Branch no longer exists"`
 - Remove from processing queue
 
-Track verified MR list for this cycle."""
+Track verified MR list for this cycle.
+
+**Batch optimization (bt-mad9c): pay the serialized e2e gate ONCE per cycle.**
+If 2 or more verified MRs are CI-green, process them together as a BATCH before the
+per-MR process-branch loop:
+```bash
+gt refinery batch <rig>
+```
+This stacks the green MRs onto a single rebase, runs the gates ONCE on the stack tip,
+and fast-forwards all of them — bisecting on red so only a genuinely-bad MR is dropped.
+The command is fail-closed: it automatically skips any MR whose PR CI is not green.
+After batching, continue to process-branch for any MRs that remain (not green, conflicts,
+or dropped by bisect). If only 0-1 MR is ready, skip batching and proceed normally."""
 
 [[steps]]
 id = "batch-merge"
