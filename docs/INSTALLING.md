@@ -15,6 +15,7 @@ Native source installs require these host tools. Homebrew and Docker installs pr
 | **Go** | 1.26.2+ | `go version` | See [golang.org](https://go.dev/doc/install) |
 | **Git** | 2.20+ | `git --version` | See below |
 | **sqlite3** | any | `sqlite3 --version` | Usually pre-installed on macOS; Linux packages are commonly named `sqlite3` |
+| **ICU4C dev headers** | varies | `pkg-config --modversion icu-uc` or `dpkg -l libicu-dev` | Linux source builds need `libicu-dev`; macOS source builds can use Homebrew's `icu4c` |
 | **Dolt** | >= 2.0.7 | `dolt version` | macOS: `brew install dolt`; other platforms: see [dolthub/dolt](https://github.com/dolthub/dolt?tab=readme-ov-file#installation) |
 | **Beads** | >= 0.57.0 | `bd version` | Installed by `brew install gastown`, or from source with `go install github.com/steveyegge/beads/cmd/bd@latest` |
 | **Docker Compose** | v2+ | `docker compose version` | Docker setup only. Install Docker Desktop or Docker Engine with the Compose plugin. |
@@ -44,6 +45,7 @@ brew install gastown
 
 # Optional: source builds also need Go and Dolt
 brew install go dolt
+# Source builds also need icu4c.
 
 # Optional: Docker setup only
 # Install Docker Desktop or another Docker Engine with Compose v2.
@@ -57,7 +59,7 @@ brew install tmux
 ```bash
 # Required
 sudo apt update
-sudo apt install -y git sqlite3
+sudo apt install -y git sqlite3 libicu-dev
 
 # Install Go (apt version may be outdated, use official installer)
 wget https://go.dev/dl/go1.26.2.linux-amd64.tar.gz
@@ -79,6 +81,7 @@ sudo apt install -y tmux
 # Required
 sudo dnf install -y git sqlite
 # Install Go 1.26.2+ from your distro if available, otherwise use the official Go installer.
+# Linux source builds also need libicu-dev (or your distro's ICU development package).
 # Install Dolt: see https://github.com/dolthub/dolt?tab=readme-ov-file#installation
 # Docker setup only: install Docker Engine with the Compose plugin.
 

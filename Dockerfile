@@ -11,6 +11,7 @@ USER root
 RUN apt-get update && apt-get install -y \
     build-essential \
     git \
+    libicu-dev \
     sqlite3 \
     tmux \
     curl \
