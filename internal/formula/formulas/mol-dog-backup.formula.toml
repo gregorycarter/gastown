@@ -2,18 +2,19 @@ description = """
 Sync Dolt database backups to local and offsite storage.
 
 The Backup Dog runs `dolt backup sync` for each production database, then
-rsyncs the local backup directory to iCloud Drive for offsite replication.
+rsyncs the local backup directory to the configured offsite mirror for NAS/cloud
+backup pickup.
 
 Current behavior (from dolt_backup.go):
 - Discovers databases with backup remotes configured
 - Runs `dolt backup sync <name>-backup` per database
-- Rsyncs .dolt-backup/ to iCloud Drive
+- Rsyncs .dolt-backup/ to the configured offsite mirror
 
 ## Dog Contract
 
 This is infrastructure work. You:
 1. Sync each production database to its backup remote
-2. Rsync local backups to offsite (iCloud Drive)
+2. Rsync local backups to offsite mirror storage
 3. Report results to Deacon
 4. Return to kennel
 
@@ -63,15 +64,15 @@ id = "offsite"
 title = "Sync backups to offsite storage"
 needs = ["sync"]
 description = """
-Rsync local backups to iCloud Drive for offsite replication.
+Rsync local backups to the offsite mirror for NAS/cloud backup pickup.
 
 **1. Check prerequisites:**
 - .dolt-backup/ directory exists
-- iCloud Drive path is accessible
+- Offsite mirror path is accessible
 
 **2. Run offsite sync:**
 ```bash
-rsync -a --delete .dolt-backup/ ~/Library/Mobile\\ Documents/com~apple~CloudDocs/gt-dolt-backup/
+rsync -a --delete .dolt-backup/ ~/dolt-backups/gt-dolt-backup/
 ```
 
 **3. Record results:**
@@ -79,7 +80,7 @@ rsync -a --delete .dolt-backup/ ~/Library/Mobile\\ Documents/com~apple~CloudDocs
 - Duration
 
 **Note:** This is a stopgap until proper dolt remote push is configured.
-If iCloud is unavailable, log and continue — not a fatal error.
+If the offsite mirror is unavailable, log and continue — not a fatal error.
 
 **Exit criteria:** Offsite sync attempted."""
 

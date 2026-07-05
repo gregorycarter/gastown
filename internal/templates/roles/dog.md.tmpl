@@ -143,7 +143,7 @@ Steps: scan → reap → purge → auto-close → report
 dolt backup sync <db>-backup
 
 # Offsite replication:
-rsync -a --delete {{ .TownRoot }}/.dolt-backup/ ~/Library/Mobile\ Documents/com~apple~CloudDocs/gt-dolt-backup/
+rsync -a --delete {{ .TownRoot }}/.dolt-backup/ ~/dolt-backups/gt-dolt-backup/
 ```
 
 Steps: sync databases → offsite rsync → report

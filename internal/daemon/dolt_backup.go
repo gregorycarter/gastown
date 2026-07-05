@@ -16,6 +16,7 @@ import (
 
 const (
 	defaultDoltBackupInterval = 15 * time.Minute
+	defaultDoltBackupOffsite  = "~/dolt-backups/gt-dolt-backup"
 	doltBackupTimeout         = 120 * time.Second
 )
 
@@ -31,11 +32,19 @@ func doltBackupInterval(config *DaemonPatrolConfig) time.Duration {
 	return defaultDoltBackupInterval
 }
 
+// doltBackupOffsiteDir returns the local mirror directory for offsite pickup.
+func doltBackupOffsiteDir(config *DoltBackupConfig) string {
+	if config != nil && strings.TrimSpace(config.OffsiteDir) != "" {
+		return util.ExpandHome(strings.TrimSpace(config.OffsiteDir))
+	}
+	return util.ExpandHome(defaultDoltBackupOffsite)
+}
+
 // syncDoltBackups syncs each production database to its configured backup location.
 // Non-fatal: errors are logged but don't stop the daemon.
 func (d *Daemon) syncDoltBackups() {
-	// Dolt backup uses iCloud Drive for offsite sync — only available on macOS.
-	// On Linux this generates HIGH priority escalation spam every ~15 minutes.
+	// Dolt backup uses a local offsite mirror on macOS. On Linux this generates
+	// HIGH priority escalation spam every ~15 minutes.
 	if runtime.GOOS != "darwin" {
 		return
 	}
@@ -94,7 +103,7 @@ func (d *Daemon) syncDoltBackups() {
 		mol.closeStep("sync")
 	}
 
-	// Offsite sync: rsync local backups to iCloud Drive for cloud replication.
+	// Offsite sync: rsync local backups to a NAS/cloud pickup directory.
 	// This is a stopgap until proper dolt remote push is configured.
 	if synced > 0 {
 		d.syncOffsiteBackup()
@@ -125,35 +134,29 @@ func (d *Daemon) syncBackup(dataDir, db, backupName string) error {
 	return nil
 }
 
-// syncOffsiteBackup rsyncs the local backup directory to iCloud Drive.
-// iCloud automatically syncs to Apple's cloud, providing offsite replication.
-// Non-fatal: if iCloud is unavailable or rsync fails, we just log and continue.
+// syncOffsiteBackup rsyncs the local backup directory to a local offsite mirror.
+// Non-fatal: if the mirror is unavailable or rsync fails, we just log and continue.
 func (d *Daemon) syncOffsiteBackup() {
 	backupDir := filepath.Join(d.config.TownRoot, ".dolt-backup")
 	if _, err := os.Stat(backupDir); os.IsNotExist(err) {
 		return
 	}
 
-	// iCloud Drive path (macOS)
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return
-	}
-	icloudDir := filepath.Join(homeDir, "Library", "Mobile Documents", "com~apple~CloudDocs", "gt-dolt-backup")
-	if err := os.MkdirAll(icloudDir, 0755); err != nil {
-		d.logger.Printf("dolt_backup: offsite: cannot create iCloud dir: %v", err)
+	offsiteDir := doltBackupOffsiteDir(d.patrolConfig.Patrols.DoltBackup)
+	if err := os.MkdirAll(offsiteDir, 0755); err != nil {
+		d.logger.Printf("dolt_backup: offsite: cannot create mirror dir %s: %v", offsiteDir, err)
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "rsync", "-a", "--delete", backupDir+"/", icloudDir+"/")
+	cmd := exec.CommandContext(ctx, "rsync", "-a", "--delete", backupDir+"/", offsiteDir+"/")
 	util.SetDetachedProcessGroup(cmd)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		d.logger.Printf("dolt_backup: offsite sync failed: %v (%s)", err, strings.TrimSpace(string(output)))
 	} else {
-		d.logger.Printf("dolt_backup: offsite synced to iCloud")
+		d.logger.Printf("dolt_backup: offsite synced to %s", offsiteDir)
 	}
 }
 
