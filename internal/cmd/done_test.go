@@ -274,7 +274,7 @@ func TestFindHookedBeadForAgent(t *testing.T) {
 			setupBeads: func(t *testing.T, bd *beads.Beads) {
 				// Create a task and set it to hooked with assignee
 				_, err := bd.CreateWithID("test-456", beads.CreateOptions{
-					Title: "Task to be hooked",
+					Title:  "Task to be hooked",
 					Labels: []string{"gt:task"},
 				})
 				if err != nil {
@@ -537,9 +537,9 @@ func TestSessionKillGateGuardLogic(t *testing.T) {
 func TestMRVerificationSetsMRFailed(t *testing.T) {
 	tests := []struct {
 		name         string
-		createErr    error  // error from bd.Create
-		showErr      error  // error from bd.Show (verification)
-		showReturns  bool   // whether Show returns a non-nil issue
+		createErr    error // error from bd.Create
+		showErr      error // error from bd.Show (verification)
+		showReturns  bool  // whether Show returns a non-nil issue
 		wantMRFailed bool
 	}{
 		{
@@ -607,10 +607,10 @@ func TestMRVerificationSetsMRFailed(t *testing.T) {
 // Without this, the refinery never finds the MR and the branch sits unmerged.
 func TestMRBeadCreationUsesRig(t *testing.T) {
 	tests := []struct {
-		name     string
-		issueID  string
-		rigName  string
-		wantRig  string
+		name    string
+		issueID string
+		rigName string
+		wantRig string
 	}{
 		{
 			name:    "same-rig bead: rig is still set",
@@ -636,10 +636,10 @@ func TestMRBeadCreationUsesRig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Simulate the CreateOptions construction in done.go.
 			opts := beads.CreateOptions{
-				Title:       "Merge: " + tt.issueID,
-				Labels:      []string{"gt:merge-request"},
-				Ephemeral:   true,
-				Rig:         tt.rigName,
+				Title:     "Merge: " + tt.issueID,
+				Labels:    []string{"gt:merge-request"},
+				Ephemeral: true,
+				Rig:       tt.rigName,
 			}
 			if opts.Rig != tt.wantRig {
 				t.Errorf("CreateOptions.Rig = %q, want %q (issue %s)", opts.Rig, tt.wantRig, tt.issueID)
@@ -1024,7 +1024,7 @@ func TestReadDoneCheckpoints(t *testing.T) {
 			},
 		},
 		{
-			name:   "mixed with done-intent and other labels",
+			name: "mixed with done-intent and other labels",
 			labels: []string{
 				"gt:agent",
 				"done-intent:COMPLETED:1738972800",
@@ -1170,12 +1170,12 @@ func TestCheckpointNilMapSafe(t *testing.T) {
 // convoy merge=direct was not propagated because cross-rig dep resolution failed.
 func TestConvoyInfoFallbackChain(t *testing.T) {
 	tests := []struct {
-		name            string
-		attachmentInfo  *ConvoyInfo // Result from getConvoyInfoFromIssue
-		depInfo         *ConvoyInfo // Result from getConvoyInfoForIssue
-		wantConvoyID    string
-		wantMerge       string
-		wantNil         bool
+		name           string
+		attachmentInfo *ConvoyInfo // Result from getConvoyInfoFromIssue
+		depInfo        *ConvoyInfo // Result from getConvoyInfoForIssue
+		wantConvoyID   string
+		wantMerge      string
+		wantNil        bool
 	}{
 		{
 			name:           "attachment fields provide convoy info",
@@ -1241,9 +1241,9 @@ func TestConvoyInfoFallbackChain(t *testing.T) {
 // closing and caused infinite dispatch loops.
 func TestHookedBeadCloseNotRestrictedToHookedStatus(t *testing.T) {
 	tests := []struct {
-		name       string
-		status     string
-		wantClose  bool
+		name      string
+		status    string
+		wantClose bool
 	}{
 		{"status hooked → close", "hooked", true},
 		{"status in_progress → close", "in_progress", true},
@@ -1484,6 +1484,61 @@ func TestAutoCommitSafetyNet(t *testing.T) {
 	})
 }
 
+// TestWorktreeMismatchGuard verifies that the gt-pvx safety net refuses to
+// auto-commit when the branch checked out in cwd doesn't match GT_BRANCH —
+// the session-spawn-time identity set independent of any cwd reconstruction
+// in runDone. This is a regression test for gt-o17m: a polecat's gt done
+// auto-committed and pushed a sibling polecat's uncommitted work because the
+// safety net swept whatever was dirty in the resolved cwd without verifying
+// it actually belonged to the invoking session.
+func TestWorktreeMismatchGuard(t *testing.T) {
+	tests := []struct {
+		name         string
+		branch       string // branch actually checked out in cwd
+		gtBranch     string // GT_BRANCH env var (session-spawn-time identity)
+		wantMismatch bool
+	}{
+		{
+			name:         "matching branches - no mismatch",
+			branch:       "polecat/dust-abc123",
+			gtBranch:     "polecat/dust-abc123",
+			wantMismatch: false,
+		},
+		{
+			name:         "GT_BRANCH unset - skip check (non-polecat callers)",
+			branch:       "polecat/dust-abc123",
+			gtBranch:     "",
+			wantMismatch: false,
+		},
+		{
+			name:         "branch unresolved - skip check",
+			branch:       "",
+			gtBranch:     "polecat/dust-abc123",
+			wantMismatch: false,
+		},
+		{
+			name:         "mismatched branches - sibling worktree contamination",
+			branch:       "polecat/onyx-def456",
+			gtBranch:     "polecat/obsidian-abc123",
+			wantMismatch: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate the worktree guard logic from runDone (gt-o17m)
+			worktreeMismatch := false
+			if expectedBranch := tt.gtBranch; expectedBranch != "" && tt.branch != "" && tt.branch != expectedBranch {
+				worktreeMismatch = true
+			}
+
+			if worktreeMismatch != tt.wantMismatch {
+				t.Errorf("worktreeMismatch = %v, want %v", worktreeMismatch, tt.wantMismatch)
+			}
+		})
+	}
+}
+
 // TestSyncGuardWithUncommittedChanges verifies that the worktree sync guard
 // (gt-pvx) prevents switching branches when uncommitted changes remain.
 func TestSyncGuardWithUncommittedChanges(t *testing.T) {
@@ -1533,4 +1588,3 @@ func testRunGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
 }
-
