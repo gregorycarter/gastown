@@ -281,7 +281,27 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	//
 	// Auto-commit ensures work is NEVER lost regardless of exit type or agent behavior.
 	// The commit message is clearly marked as an auto-save so reviewers know.
-	if cwdAvailable && doneCleanupStatus == "uncommitted" {
+	// WORKTREE GUARD (gt-o17m): verify cwd actually belongs to this session
+	// before sweeping its "uncommitted changes" into an auto-commit. cwd may
+	// have been reconstructed above (see the GT_POLECAT-based fallback when
+	// the shell's cwd isn't inside a /polecats/ path) or otherwise resolved
+	// to a directory that doesn't match where this session was spawned. If
+	// so, "uncommitted changes" here could belong to a different, concurrent
+	// polecat session entirely — as happened in the incident this bug tracks,
+	// where one polecat's gt done committed and pushed a sibling polecat's
+	// unrelated uncommitted work under its own bead label, bypassing review.
+	//
+	// GT_BRANCH is set once at session spawn (session_manager.go), independent
+	// of any cwd reconstruction done above, so it's a trustworthy check for
+	// "is cwd really my worktree?" A mismatch means we can't trust that the
+	// dirty files here belong to us — refuse to auto-commit them.
+	worktreeMismatch := false
+	if expectedBranch := os.Getenv("GT_BRANCH"); expectedBranch != "" && branch != "" && branch != expectedBranch {
+		worktreeMismatch = true
+		style.PrintWarning("auto-commit SKIPPED (gt-pvx safety net): worktree at %s is on branch %q, but this session was spawned on %q (GT_BRANCH) — refusing to sweep possibly-foreign uncommitted changes into an auto-commit", cwd, branch, expectedBranch)
+	}
+
+	if cwdAvailable && doneCleanupStatus == "uncommitted" && !worktreeMismatch {
 		// Re-check to get file details (cleanup detection already confirmed uncommitted changes)
 		workStatus, err := g.CheckUncommittedWork()
 		if err == nil && workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
