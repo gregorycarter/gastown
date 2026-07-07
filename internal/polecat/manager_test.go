@@ -1257,8 +1257,8 @@ func TestAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T) {
 		}
 	} else {
 		installMockBd(t)
-		// Write the custom-types sentinel so EnsureCustomTypes is a no-op.
-		_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte("v1\n"), 0644)
+		// Write the type-config sentinel so EnsureCustomTypes is a no-op.
+		_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644)
 	}
 
 	// Initialize git repo in mayor/rig WITHOUT any .beads/PRIME.md
@@ -1607,8 +1607,8 @@ func TestAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
 		}
 	} else {
 		installMockBd(t)
-		// Write the custom-types sentinel so EnsureCustomTypes is a no-op.
-		_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte("v1\n"), 0644)
+		// Write the type-config sentinel so EnsureCustomTypes is a no-op.
+		_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644)
 	}
 
 	// Initialize a CLEAN git repo with known files only
@@ -1753,8 +1753,8 @@ func TestAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) {
 		}
 	} else {
 		installMockBd(t)
-		// Write the custom-types sentinel so EnsureCustomTypes is a no-op.
-		_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte("v1\n"), 0644)
+		// Write the type-config sentinel so EnsureCustomTypes is a no-op.
+		_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644)
 	}
 
 	// Initialize a git repo
@@ -2155,8 +2155,8 @@ esac
 	if err := os.WriteFile(filepath.Join(rigBeads, "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
 		t.Fatalf("write redirect: %v", err)
 	}
-	// Write custom-types sentinel so EnsureCustomTypes is a no-op
-	_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte("v1\n"), 0644)
+	// Write type-config sentinel so EnsureCustomTypes is a no-op
+	_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644)
 
 	r := &rig.Rig{
 		Name: "rig",
@@ -2240,7 +2240,7 @@ func TestManagerAgentLifecycleUsesTownBeadsDir(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("write routes: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte("v1\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644); err != nil {
 		t.Fatalf("write types sentinel: %v", err)
 	}
 

@@ -385,8 +385,7 @@ func TestSendFromCrewWorkspace_AvoidsEphemeralPrefixMismatch(t *testing.T) {
 	}
 
 	// Write sentinel files so beads.EnsureCustomTypes skips bd config calls.
-	typesList := strings.Join(constants.BeadsCustomTypesList(), ",")
-	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte(typesList+"\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644); err != nil {
 		t.Fatalf("write types sentinel: %v", err)
 	}
 
@@ -1230,9 +1229,12 @@ func TestValidateRecipient(t *testing.T) {
 	beadsDB := filepath.Join(beadsDir, "beads.db")
 	t.Setenv("BEADS_DB", beadsDB)
 
-	// Register custom types required for agent beads.
-	if _, err := b.Run("config", "set", "types.custom", "agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request"); err != nil {
+	// Register type config required for agent beads.
+	if _, err := b.Run("config", "set", "types.custom", constants.BeadsCustomTypes); err != nil {
 		t.Fatalf("config set types.custom: %v", err)
+	}
+	if _, err := b.Run("config", "set", "types.infra", constants.BeadsInfraTypes); err != nil {
+		t.Fatalf("config set types.infra: %v", err)
 	}
 
 	// Create test agent beads with gt:agent label.
