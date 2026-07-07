@@ -2057,6 +2057,44 @@ func (g *Git) VerifyPushedCommit(remote, branch, commit string) error {
 	return nil
 }
 
+// VerifyPushedCommitReachableFromPushTarget verifies that commit is reachable
+// from the push target branch. Use this only for shared target branches where a
+// later fast-forward push by another actor may legitimately advance the tip.
+func (g *Git) VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error {
+	commit = strings.TrimSpace(commit)
+	if commit == "" {
+		return fmt.Errorf("verified_push_failed: empty commit for %s/%s", remote, branch)
+	}
+	tip, err := g.PushRemoteBranchTip(remote, branch)
+	if err != nil {
+		return fmt.Errorf("verified_push_failed: unable to read %s/%s: %w", remote, branch, err)
+	}
+	if tip == "" {
+		return fmt.Errorf("verified_push_failed: branch %s/%s missing after push (expected %s)", remote, branch, shortSHA(commit))
+	}
+	if tip == commit {
+		return nil
+	}
+
+	fetchTarget := remote
+	fetchURL, fetchErr := g.RemoteURL(remote)
+	pushURL, pushErr := g.GetPushURL(remote)
+	if fetchErr == nil && pushErr == nil && pushURL != fetchURL {
+		fetchTarget = pushURL
+	}
+	if _, err := g.run("fetch", "--no-tags", fetchTarget, "refs/heads/"+branch); err != nil {
+		return fmt.Errorf("verified_push_failed: unable to fetch %s/%s for ancestry check: %w", remote, branch, err)
+	}
+	reachable, err := g.IsAncestor(commit, "FETCH_HEAD")
+	if err != nil {
+		return fmt.Errorf("verified_push_failed: unable to verify commit %s on %s/%s: %w", shortSHA(commit), remote, branch, err)
+	}
+	if !reachable {
+		return fmt.Errorf("verified_push_failed: commit %s not on %s/%s (remote tip %s)", shortSHA(commit), remote, branch, shortSHA(tip))
+	}
+	return nil
+}
+
 func parseLSRemoteTip(out, branch string) string {
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		line = strings.TrimSpace(line)
