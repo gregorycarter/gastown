@@ -3316,8 +3316,16 @@ func TestVerifyPushedCommitSplitURL(t *testing.T) {
 }
 
 func TestVerifyPushedCommitReachableFromPushTargetSplitURL(t *testing.T) {
-	localDir, _, forkDir, mainBranch := initTestRepoWithSplitRemote(t)
+	localDir, _, forkDir, _ := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)
+	branch := "integration/verified-split"
+
+	if err := g.CreateBranch(branch); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
 
 	if err := os.WriteFile(filepath.Join(localDir, "split-shared.txt"), []byte("v1\n"), 0644); err != nil {
 		t.Fatalf("write v1: %v", err)
@@ -3332,7 +3340,7 @@ func TestVerifyPushedCommitReachableFromPushTargetSplitURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Rev v1: %v", err)
 	}
-	if err := g.Push("origin", mainBranch, false); err != nil {
+	if err := g.Push("origin", branch, false); err != nil {
 		t.Fatalf("Push v1: %v", err)
 	}
 
@@ -3350,13 +3358,18 @@ func TestVerifyPushedCommitReachableFromPushTargetSplitURL(t *testing.T) {
 			t.Fatalf("%s: %v\n%s", args, err, out)
 		}
 	}
+	cmd := exec.Command("git", "checkout", branch)
+	cmd.Dir = cloneDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("checkout fork branch: %v\n%s", err, out)
+	}
 	if err := os.WriteFile(filepath.Join(cloneDir, "split-shared.txt"), []byte("v2\n"), 0644); err != nil {
 		t.Fatalf("write fork v2: %v", err)
 	}
 	for _, args := range [][]string{
 		{"git", "add", "split-shared.txt"},
 		{"git", "commit", "-m", "split shared v2"},
-		{"git", "push", "origin", mainBranch},
+		{"git", "push", "origin", branch},
 	} {
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Dir = cloneDir
@@ -3365,18 +3378,18 @@ func TestVerifyPushedCommitReachableFromPushTargetSplitURL(t *testing.T) {
 		}
 	}
 
-	fetchTip, err := g.RemoteBranchTip("origin", mainBranch)
+	fetchTip, err := g.RemoteBranchTip("origin", branch)
 	if err != nil {
 		t.Fatalf("RemoteBranchTip: %v", err)
 	}
-	pushTip, err := g.PushRemoteBranchTip("origin", mainBranch)
+	pushTip, err := g.PushRemoteBranchTip("origin", branch)
 	if err != nil {
 		t.Fatalf("PushRemoteBranchTip: %v", err)
 	}
 	if fetchTip == pushTip {
 		t.Fatalf("test setup expected split fetch/push tips to differ, got %s", fetchTip)
 	}
-	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", mainBranch, v1); err != nil {
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", branch, v1); err != nil {
 		t.Fatalf("Verify should query push URL and accept ancestor: %v", err)
 	}
 }
