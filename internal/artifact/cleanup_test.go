@@ -754,6 +754,9 @@ func TestCIMaintenanceReleaseErrorIsSurfaced(t *testing.T) {
 }
 
 func TestDetectSafetyTreatsOnlyNonemptyActiveJobDirectoryAsActive(t *testing.T) {
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("RUNNER_TRACKING_ID", "")
+
 	root := t.TempDir()
 	activeJobs := filepath.Join(root, "shared", ".ci-active-jobs")
 	if err := os.MkdirAll(activeJobs, 0o755); err != nil {
@@ -765,6 +768,26 @@ func TestDetectSafetyTreatsOnlyNonemptyActiveJobDirectoryAsActive(t *testing.T) 
 	writeArtifact(t, root, "shared/.ci-active-jobs/runner-1/.job-active", "run:job\n")
 	if state := DetectSafety(root, "ci"); !state.ActiveRunner {
 		t.Fatal("nonempty active-job directory did not block CI cleanup")
+	}
+}
+
+func TestDetectSafetyTreatsRunnerEnvironmentAsActive(t *testing.T) {
+	tests := []struct {
+		name             string
+		githubActions    string
+		runnerTrackingID string
+	}{
+		{name: "GitHub Actions", githubActions: "true"},
+		{name: "runner tracking ID", runnerTrackingID: "runner-process"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GITHUB_ACTIONS", tt.githubActions)
+			t.Setenv("RUNNER_TRACKING_ID", tt.runnerTrackingID)
+			if state := DetectSafety(t.TempDir(), "ci"); !state.ActiveRunner {
+				t.Fatalf("runner environment was not treated as active: %+v", state)
+			}
+		})
 	}
 }
 
