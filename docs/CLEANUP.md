@@ -14,6 +14,18 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | `gt deacon cleanup-orphans` | Kills orphaned Claude subagent processes (no controlling TTY) |
 | `gt deacon zombie-scan` | Finds/kills zombie Claude processes not in active tmux sessions |
 
+## Lifecycle Artifact Cleanup
+
+| Command | What it does |
+|---------|-------------|
+| `gt cleanup artifacts --rig <rig> --scope rig` | Dry-run the merged allowlisted artifact policy |
+| `gt cleanup artifacts ... --apply` | Apply only after explicit MR/runner verification gates |
+| `gt cleanup artifacts --scope dolt --json` | Report protected Dolt bytes and native-maintenance recommendations; never deletes |
+| `gt cleanup disk --top 15` | Read-only report of the largest immediate workspace children |
+
+See [Lifecycle Artifact Cleanup](artifact-cleanup.md) for policy fields, safety
+invariants, the polecat pre-reuse hook, and CI/Dolt retention guidance.
+
 ## Polecat (Agent Sandbox) Cleanup
 
 | Command | What it does |

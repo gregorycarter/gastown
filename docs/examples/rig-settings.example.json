@@ -73,5 +73,19 @@
 
     "workflow": {
         "default_formula": "mol-polecat-work"
+    },
+
+    "lifecycle": {
+        "cleanup": {
+            "enabled": true,
+            "mode": "apply",
+            "paths": ["target", ".next", "coverage", "dist", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".pnpm-store"],
+            "protected_paths": ["generated/release-evidence"],
+            "max_age": "168h",
+            "max_bytes": 10737418240,
+            "on_polecat_reuse": true,
+            "on_post_merge": false,
+            "on_ci_maintenance": false
+        }
     }
 }

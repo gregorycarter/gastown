@@ -1810,6 +1810,17 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		}
 	}
 
+	// hq-0onko: generic per-rig artifact cleanup. The canonical reuse decision
+	// above has already ruled out dirty work, pending MRs, and non-idle state.
+	// The hook repeats that decision immediately before each deletion and only
+	// touches configured, ignored paths. Failures remain observable but do not
+	// block dispatch, matching the compatibility behavior of target-clean.
+	if result, ran, err := m.runArtifactCleanupHook(name, clonePath); err != nil {
+		style.PrintWarning("artifact-clean hook for %s: %v", name, err)
+	} else if ran {
+		fmt.Println(formatArtifactHookResult(result))
+	}
+
 	polecatGit := git.NewGit(clonePath)
 
 	// Fetch latest from origin (non-fatal: may be offline)

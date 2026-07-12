@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/artifact"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
@@ -109,6 +110,11 @@ type TownSettings struct {
 	// Polecat configures per-polecat behavior (target/ clean hook, etc.).
 	// Added for hq-x0v7v.
 	Polecat *PolecatConfig `json:"polecat,omitempty"`
+
+	// Lifecycle configures safe cleanup of reproducible lifecycle artifacts.
+	// Rig settings may override this policy, but only a rig can opt a protected
+	// project path into cleanup.
+	Lifecycle *LifecycleConfig `json:"lifecycle,omitempty"`
 
 	// Operational configures operational thresholds (timeouts, retries, intervals).
 	// These were previously hardcoded as Go constants throughout the codebase.
@@ -523,6 +529,12 @@ type PolecatConfig struct {
 	TargetCleanPolicy string `json:"target_clean_policy,omitempty"`
 }
 
+// LifecycleConfig groups lifecycle maintenance policies shared by town and rig
+// settings. Cleanup scalars use pointers so false and zero are valid overrides.
+type LifecycleConfig struct {
+	Cleanup *artifact.PolicyConfig `json:"cleanup,omitempty"`
+}
+
 // ParseDurationOrDefault parses a Go duration string, returning fallback on error or empty input.
 func ParseDurationOrDefault(s string, fallback time.Duration) time.Duration {
 	if s == "" {
@@ -675,6 +687,7 @@ type RigSettings struct {
 	Namepool   *NamepoolConfig   `json:"namepool,omitempty"`    // polecat name pool settings
 	Crew       *CrewConfig       `json:"crew,omitempty"`        // crew startup settings
 	Workflow   *WorkflowConfig   `json:"workflow,omitempty"`    // workflow settings
+	Lifecycle  *LifecycleConfig  `json:"lifecycle,omitempty"`   // artifact lifecycle settings
 	Runtime    *RuntimeConfig    `json:"runtime,omitempty"`     // LLM runtime settings (deprecated: use Agent)
 
 	// Agent selects which agent preset to use for this rig.

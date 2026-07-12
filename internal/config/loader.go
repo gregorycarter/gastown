@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/artifact"
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/constants"
 )
@@ -234,6 +235,11 @@ func validateRigSettings(c *RigSettings) error {
 	if c.MergeQueue != nil {
 		if err := validateMergeQueueConfig(c.MergeQueue); err != nil {
 			return err
+		}
+	}
+	if c.Lifecycle != nil && c.Lifecycle.Cleanup != nil {
+		if _, err := artifact.ResolvePolicy(nil, c.Lifecycle.Cleanup); err != nil {
+			return fmt.Errorf("invalid lifecycle.cleanup: %w", err)
 		}
 	}
 	return nil
@@ -1068,6 +1074,31 @@ func TownSettingsPath(townRoot string) string {
 // RigSettingsPath returns the path to rig settings file.
 func RigSettingsPath(rigPath string) string {
 	return filepath.Join(rigPath, "settings", "config.json")
+}
+
+// ResolveArtifactCleanupPolicy merges compiled defaults, town settings, and
+// per-rig settings. A missing settings file is equivalent to no override.
+func ResolveArtifactCleanupPolicy(townRoot, rigPath string) (artifact.Policy, error) {
+	var townPolicy, rigPolicy *artifact.PolicyConfig
+	if townRoot != "" {
+		settings, err := LoadOrCreateTownSettings(TownSettingsPath(townRoot))
+		if err != nil {
+			return artifact.Policy{}, fmt.Errorf("loading town cleanup settings: %w", err)
+		}
+		if settings.Lifecycle != nil {
+			townPolicy = settings.Lifecycle.Cleanup
+		}
+	}
+	if rigPath != "" {
+		settings, err := LoadRigSettings(RigSettingsPath(rigPath))
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return artifact.Policy{}, fmt.Errorf("loading rig cleanup settings: %w", err)
+		}
+		if settings != nil && settings.Lifecycle != nil {
+			rigPolicy = settings.Lifecycle.Cleanup
+		}
+	}
+	return artifact.ResolvePolicy(townPolicy, rigPolicy)
 }
 
 // LoadOrCreateTownSettings loads town settings or creates defaults if missing.
