@@ -12,5 +12,5 @@ func filesystemID(info fs.FileInfo) (uint64, bool) {
 	if !ok {
 		return 0, false
 	}
-	return uint64(stat.Dev), true
+	return uint64(stat.Dev), true //nolint:unconvert // Dev needs conversion on Darwin but is already uint64 on Linux.
 }
