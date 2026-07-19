@@ -1314,6 +1314,42 @@ func (m *Manager) RemoveWithOptions(name string, force, nuclear, selfNuke bool) 
 	return nil
 }
 
+// ReconcileStaleClosedWorktree cleans up a polecat's worktree after its agent
+// bead has been auto-closed as stale elsewhere (e.g. by the reaper's AutoClose
+// staleness sweep). A closed agent bead alone doesn't free the worktree: the
+// capacity snapshot still counts any leftover directory (with its blocking
+// stash/uncommitted state) as recovery_blocked forever, since nothing else
+// ever removes it (gt-gjxb / gt-oapo).
+//
+// Refuses to touch a polecat with a live tmux session — a closed agent bead
+// with an active session means the closure was premature (or the session was
+// respawned since), not an orphan, so nuking it would destroy real work.
+// Uses nuclear=true to bypass the stash block (the exact thing that leaks
+// capacity), but force=false so RemoveWithOptions still refuses to remove a
+// worktree with an unmerged/pending MR.
+//
+// Returns reconciled=true if a worktree was found and removed. Returns
+// reconciled=false, err=nil if there was nothing to reconcile (no worktree,
+// or a live session is still using it).
+func (m *Manager) ReconcileStaleClosedWorktree(name string) (reconciled bool, err error) {
+	if !m.exists(name) {
+		return false, nil
+	}
+	if m.tmux != nil {
+		sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+		if running, _ := m.tmux.HasSession(sessionName); running {
+			return false, nil
+		}
+	}
+	if err := m.RemoveWithOptions(name, false, true, false); err != nil {
+		if errors.Is(err, ErrPolecatNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 // verifyRemovalComplete checks that polecat directories were actually removed.
 // If they still exist, it attempts more aggressive cleanup and returns an error
 // describing what couldn't be removed.

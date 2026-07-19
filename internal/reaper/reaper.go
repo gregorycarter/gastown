@@ -4,6 +4,12 @@
 // mol-dog-reaper formula. They execute SQL operations but do not make
 // eligibility decisions — the Dog (or daemon orchestrator) decides what
 // to reap, purge, and auto-close based on the formula.
+//
+// ReconcilePolecatAgentClosures (polecat_reconcile.go) is the one exception:
+// it's a mechanical follow-up to AutoClose, not a new eligibility decision.
+// AutoClose closing a polecat's agent bead doesn't free the polecat's
+// worktree, so callers should invoke it after every AutoClose to keep
+// capacity accounting from leaking (gt-gjxb).
 package reaper
 
 import (

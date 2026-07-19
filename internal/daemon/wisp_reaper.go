@@ -310,6 +310,19 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 			continue
 		}
 		totalAutoClosed += result.Closed
+
+		// A closed polecat agent bead alone doesn't free its worktree — reconcile
+		// so a leftover stash/uncommitted state doesn't leak a capacity slot
+		// forever (gt-gjxb). Skips polecats with a live tmux session.
+		if len(result.ClosedEntries) > 0 {
+			recon := reaper.ReconcilePolecatAgentClosures(d.config.TownRoot, result.ClosedEntries, dryRun)
+			if len(recon.Reconciled) > 0 {
+				d.logger.Printf("wisp_reaper: %s: reconciled worktrees for %v", dbName, recon.Reconciled)
+			}
+			for _, e := range recon.Errors {
+				d.logger.Printf("wisp_reaper: %s: worktree reconcile error: %s", dbName, e)
+			}
+		}
 	}
 	if autoCloseErrors > 0 {
 		mol.failStep("auto-close", fmt.Sprintf("%d databases had auto-close errors", autoCloseErrors))

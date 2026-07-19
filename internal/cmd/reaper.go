@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 var (
@@ -370,6 +371,12 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 			return fmt.Errorf("invalid --stale-age: %w", err)
 		}
 
+		// Best-effort: worktree reconciliation needs a townRoot, but auto-close
+		// itself only needs Dolt connectivity (--host/--port), so don't fail
+		// the whole command when run outside a Gas Town workspace — just skip
+		// reconciliation and let auto-close proceed as before.
+		townRoot, _ := workspace.FindFromCwd()
+
 		databases := reaperDatabaseNames()
 
 		var results []*reaper.AutoCloseResult
@@ -404,6 +411,19 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 				continue
 			}
 			results = append(results, result)
+
+			// A closed polecat agent bead alone doesn't free its worktree —
+			// reconcile so a leftover stash/uncommitted state doesn't leak a
+			// capacity slot forever (gt-gjxb). Skips live-session polecats.
+			if townRoot != "" && len(result.ClosedEntries) > 0 {
+				recon := reaper.ReconcilePolecatAgentClosures(townRoot, result.ClosedEntries, reaperDryRun)
+				for _, addr := range recon.Reconciled {
+					fmt.Printf("  reconciled worktree: %s\n", addr)
+				}
+				for _, e := range recon.Errors {
+					fmt.Fprintf(os.Stderr, "%s: worktree reconcile error: %s\n", dbName, e)
+				}
+			}
 		}
 
 		if reaperJSON {
@@ -462,6 +482,12 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 		if err != nil {
 			return fmt.Errorf("invalid --stale-age: %w", err)
 		}
+
+		// Best-effort: worktree reconciliation needs a townRoot, but the rest of
+		// the reaper cycle only needs Dolt connectivity, so don't fail the whole
+		// command when run outside a Gas Town workspace — just skip
+		// reconciliation and let the cycle proceed as before.
+		townRoot, _ := workspace.FindFromCwd()
 
 		var totalReaped, totalPurged, totalMailPurged, totalClosed, totalOpen int
 
@@ -529,6 +555,19 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 						entry.ID, entry.Title, entry.AgeDays, entry.Database)
 				}
 				totalClosed += closeResult.Closed
+
+				// A closed polecat agent bead alone doesn't free its worktree —
+				// reconcile so a leftover stash/uncommitted state doesn't leak a
+				// capacity slot forever (gt-gjxb). Skips live-session polecats.
+				if townRoot != "" && len(closeResult.ClosedEntries) > 0 {
+					recon := reaper.ReconcilePolecatAgentClosures(townRoot, closeResult.ClosedEntries, reaperDryRun)
+					for _, addr := range recon.Reconciled {
+						fmt.Printf("  reconciled worktree: %s\n", addr)
+					}
+					for _, e := range recon.Errors {
+						fmt.Printf("%s: worktree reconcile error: %s\n", dbName, e)
+					}
+				}
 			}
 
 			db.Close()
