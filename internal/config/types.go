@@ -115,6 +115,9 @@ type TownSettings struct {
 	// All values are optional — omitted values use compiled-in defaults.
 	Operational *OperationalConfig `json:"operational,omitempty"`
 
+	// Workflow holds town-level workflow settings (currently formulas_dir).
+	Workflow *WorkflowConfig `json:"workflow,omitempty"`
+
 	// DisabledPatrols lists patrol names to disable at the town level.
 	// This provides a simple way to turn off individual daemon patrol dogs
 	// without editing mayor/daemon.json. Patrol names match the keys used
@@ -698,11 +701,20 @@ type RigConfig struct {
 	Beads       *BeadsConfig `json:"beads,omitempty"`
 }
 
-// WorkflowConfig represents workflow settings for a rig.
+// WorkflowConfig represents workflow settings for a rig or for the town.
 type WorkflowConfig struct {
 	// DefaultFormula is the formula to use when `gt formula run` is called without arguments.
 	// If empty, no default is set and a formula name must be provided.
 	DefaultFormula string `json:"default_formula,omitempty"`
+
+	// FormulasDir is an absolute path to a single pinned formula directory
+	// (town-level setting only). When set it is consulted before every other
+	// resolution tier, and is passed to `bd cook` / `bd formula show` as an
+	// explicit file path rather than relying on the working directory and the
+	// .beads redirect. Point it at a git-tracked directory so a formula fix
+	// lands in exactly one place. Empty means the historical behaviour:
+	// rig .beads/formulas, then town .beads/formulas, then embedded.
+	FormulasDir string `json:"formulas_dir,omitempty"`
 }
 
 // RigSettings represents per-rig behavioral configuration (settings/config.json).

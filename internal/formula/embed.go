@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // Formulas live in internal/formula/formulas/ (source of truth).
@@ -44,8 +46,15 @@ type HealthReport struct {
 	Error     int // file could not be read (e.g. permission denied)
 }
 
-// ResolveFormulaContent resolves formula content using the three-tier precedence
-// defined in docs/design/formula-resolution.md: rig > town > embedded.
+// ResolveFormulaContent resolves formula content using the precedence defined
+// in docs/design/formula-resolution.md — pinned > rig > town > embedded.
+//
+// Tier 0 (pinned): <workflow.formulas_dir>/<name>.formula.toml, when the town
+//
+//	sets workflow.formulas_dir. This exists because the two resolvers in the
+//	codebase disagreed: gt rendered patrol steps from the town .beads/formulas
+//	while bd cook followed the rig's .beads redirect to a different directory,
+//	so a formula fix committed to one was silently inert in the other.
 //
 // Tier 1 (rig): townRoot/rigName/.beads/formulas/<name>.formula.toml
 // Tier 2 (town): townRoot/.beads/formulas/<name>.formula.toml
@@ -56,6 +65,13 @@ func ResolveFormulaContent(name, townRoot, rigName string) ([]byte, error) {
 	filename := name
 	if !hasFormulaSuffix(filename) {
 		filename = filename + ".formula.toml"
+	}
+
+	// Tier 0: pinned formula directory (town setting)
+	if pinned := config.FormulaFileIn(config.FormulasDir(townRoot), name); pinned != "" {
+		if content, err := os.ReadFile(pinned); err == nil {
+			return content, nil
+		}
 	}
 
 	// Tier 1: rig-level (most specific)

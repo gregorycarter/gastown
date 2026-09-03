@@ -96,6 +96,10 @@ type Daemon struct {
 	// Only accessed from the heartbeat goroutine - no sync needed.
 	pressureCPUDeferred bool
 
+	// rigHeadWarned throttles the rig-checkout drift warning to once per hour
+	// per rig. Only accessed from the heartbeat goroutine - no sync needed.
+	rigHeadWarned map[string]time.Time
+
 	// Restart tracking with exponential backoff to prevent crash loops
 	restartTracker *RestartTracker
 
@@ -1029,6 +1033,11 @@ func (d *Daemon) heartbeat(state *State) {
 	} else {
 		d.dispatchQueuedWork()
 	}
+
+	// 14b. Warn when a rig's mayor checkout has drifted behind origin/main.
+	// `bd cook` resolves formulas through that checkout's .beads redirect, so a
+	// stale checkout silently runs stale formulas and gate scripts.
+	d.checkRigCheckoutDrift()
 
 	// 15. Rotate oversized Dolt logs (copytruncate for child process fds).
 	// daemon.log uses lumberjack for automatic rotation; this handles Dolt server logs.

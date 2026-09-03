@@ -1192,7 +1192,23 @@ func ensureFormulaRequiredVars(formulaName string, vars []string) []string {
 // This is useful for batch mode where we cook once before processing multiple beads.
 // townRoot is required for GT_ROOT so bd can find town-level formulas.
 // Falls back to embedded formula extraction if bd can't find the formula on disk.
+//
+// When the town pins workflow.formulas_dir, the formula is passed to bd as an
+// explicit file path. Otherwise bd resolves the bare name against the working
+// directory, which follows the rig's .beads redirect — a different directory
+// from the one gt itself renders patrol steps out of.
 func CookFormula(formulaName, workDir, townRoot string) error {
+	if pinned := config.FormulaFileIn(config.FormulasDir(townRoot), formulaName); pinned != "" {
+		if err := BdCmd("cook", pinned).
+			Dir(workDir).
+			WithAutoCommit().
+			WithGTRoot(townRoot).
+			Run(); err == nil {
+			return nil
+		}
+		// Fall through to name-based resolution below.
+	}
+
 	err := BdCmd("cook", formulaName).
 		Dir(workDir).
 		WithAutoCommit().
