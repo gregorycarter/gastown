@@ -323,6 +323,16 @@ func (d *DaemonThresholds) PolecatIdleSessionTimeoutD() time.Duration {
 	return DefaultPolecatIdleSessionTimeout
 }
 
+// BootEveryHeartbeatV reports whether Boot triage should be considered on
+// every heartbeat. Default false: Boot is expensive (a fresh Claude session
+// each time) and 90 spawns a day reported "nothing" 276 times.
+func (d *DaemonThresholds) BootEveryHeartbeatV() bool {
+	if d == nil || d.BootEveryHeartbeat == nil {
+		return false
+	}
+	return *d.BootEveryHeartbeat
+}
+
 // PolecatIdleSessionTimeoutPendingMRD returns the configured or default idle
 // timeout for a polecat holding a non-terminal merge request.
 func (d *DaemonThresholds) PolecatIdleSessionTimeoutPendingMRD() time.Duration {

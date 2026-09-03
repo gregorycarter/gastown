@@ -30,6 +30,13 @@ const (
 	// auto-close. This prevents a race where the daemon's stranded scan
 	// fires before the sling's bd dep add is visible in Dolt. See GH#2303.
 	convoyGracePeriod = 5 * time.Minute
+
+	// convoyFeedBackoffBase and convoyFeedBackoffMax bound the per-convoy
+	// feed backoff. Without it the scan retried `gt sling` for the same
+	// unslingable issue every 30 seconds forever: one day's daemon log held
+	// 3,282 feed attempts, 3,282 of them failing "already hooked".
+	convoyFeedBackoffBase = 30 * time.Second
+	convoyFeedBackoffMax  = 15 * time.Minute
 )
 
 // strandedConvoyInfo matches the JSON output of `gt convoy stranded --json`.
@@ -112,6 +119,73 @@ type ConvoyManager struct {
 	// been handled. This allows the 1s overlap window above without replaying
 	// the same lifecycle events on every poll.
 	processedLifecycleEvents sync.Map // map[string]bool
+
+	// feedBackoff holds per-convoy feed backoff state, keyed by convoy ID.
+	// A convoy whose feed fails is retried on an exponential schedule
+	// instead of every scan, and logs only when its state changes.
+	feedBackoff sync.Map // map[string]*convoyFeedBackoff
+}
+
+// convoyFeedBackoff is the retry state for one convoy's feed attempts.
+type convoyFeedBackoff struct {
+	until time.Time
+	delay time.Duration
+}
+
+// feedBackoffActive reports whether this convoy is still in its backoff
+// window. Silent by design: the reason was logged when the backoff started.
+func (m *ConvoyManager) feedBackoffActive(convoyID string) bool {
+	v, ok := m.feedBackoff.Load(convoyID)
+	if !ok {
+		return false
+	}
+	state, ok := v.(*convoyFeedBackoff)
+	return ok && time.Now().Before(state.until)
+}
+
+// recordFeedFailure doubles this convoy's backoff (capped) and logs a single
+// line for the new state. reason describes why nothing could be fed.
+func (m *ConvoyManager) recordFeedFailure(convoyID, reason string) {
+	delay := convoyFeedBackoffBase
+	if v, ok := m.feedBackoff.Load(convoyID); ok {
+		if state, ok := v.(*convoyFeedBackoff); ok && state.delay > 0 {
+			delay = state.delay * 2
+		}
+	}
+	if delay > convoyFeedBackoffMax {
+		delay = convoyFeedBackoffMax
+	}
+	m.feedBackoff.Store(convoyID, &convoyFeedBackoff{until: time.Now().Add(delay), delay: delay})
+	m.logger("Convoy %s: %s — backing off %s", convoyID, reason, delay)
+}
+
+// clearFeedBackoff resets a convoy's backoff after a successful feed.
+func (m *ConvoyManager) clearFeedBackoff(convoyID string) {
+	m.feedBackoff.Delete(convoyID)
+}
+
+// issueBlocksFeeding reports whether an issue is already claimed by a worker
+// and must not be slung again. Reads the rig's own store; an unreadable issue
+// is not blocked, so an unavailable store cannot stall the feeder.
+func (m *ConvoyManager) issueBlocksFeeding(rigName, issueID string) bool {
+	m.storesMu.Lock()
+	store := m.stores[rigName]
+	m.storesMu.Unlock()
+	if store == nil {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
+	defer cancel()
+	issue, err := store.GetIssue(ctx, issueID)
+	if err != nil || issue == nil {
+		return false
+	}
+	switch string(issue.Status) {
+	case "hooked", "in_progress":
+		return true
+	}
+	return false
 }
 
 // NewConvoyManager creates a new convoy manager.
@@ -539,6 +613,9 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 	if len(c.ReadyIssues) == 0 {
 		return
 	}
+	if m.feedBackoffActive(c.ID) {
+		return
+	}
 
 	for _, issueID := range c.ReadyIssues {
 		prefix := beads.ExtractPrefix(issueID)
@@ -555,6 +632,12 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 
 		if m.isRigParked(rig) {
 			m.logger("Convoy %s: rig %s is parked, skipping %s", c.ID, rig, issueID)
+			continue
+		}
+
+		// A bead already hooked or in progress has a worker. `gt sling`
+		// refuses it, so attempting one is pure noise and Dolt load.
+		if m.issueBlocksFeeding(rig, issueID) {
 			continue
 		}
 
@@ -575,10 +658,11 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, util.FirstLine(stderr.String()))
 			continue
 		}
+		m.clearFeedBackoff(c.ID)
 		return // Successfully dispatched one issue
 	}
 
-	m.logger("Convoy %s: no dispatchable issues (all %d skipped)", c.ID, len(c.ReadyIssues))
+	m.recordFeedFailure(c.ID, fmt.Sprintf("no dispatchable issues (all %d skipped)", len(c.ReadyIssues)))
 }
 
 // checkConvoyCompletion runs gt convoy check to auto-close a convoy whose

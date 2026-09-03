@@ -87,6 +87,11 @@ type Daemon struct {
 	gtPath string
 	bdPath string
 
+	// bootPrevTriageFound records whether the previous heartbeat found
+	// anything for Boot to triage. Boot runs on a heartbeat only when the
+	// previous one saw work, or when bootTriageMaxInterval has elapsed.
+	bootPrevTriageFound bool
+
 	// Boot spawn cooldown: prevents Boot from spawning on every heartbeat tick.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	bootLastSpawned time.Time
@@ -1314,6 +1319,10 @@ func (d *Daemon) getDeaconSessionName() string {
 // In degraded mode (no tmux), falls back to mechanical checks.
 // bootSpawnCooldown returns the config-driven boot spawn cooldown.
 // Boot triage runs are expensive (AI reasoning); if one just ran, skip.
+// bootTriageMaxInterval is the longest Boot may go without being considered
+// once work exists, regardless of the previous heartbeat's verdict.
+const bootTriageMaxInterval = 60 * time.Minute
+
 func (d *Daemon) bootSpawnCooldown() time.Duration {
 	return d.loadOperationalConfig().GetDaemonConfig().BootSpawnCooldownD()
 }
@@ -1336,8 +1345,26 @@ func (d *Daemon) ensureBootRunning() {
 	// is about rate-limiting real spawns; the idle check should re-run every
 	// heartbeat so Boot fires promptly when work actually appears.
 	hb := deacon.ReadHeartbeat(d.config.TownRoot)
-	if hb != nil && hb.IsFresh() && !d.hasActiveWork() {
+	triageNeeded := hb == nil || !hb.IsFresh() || d.hasActiveWork()
+	prevTriageFound := d.bootPrevTriageFound
+	d.bootPrevTriageFound = triageNeeded
+	if !triageNeeded {
 		d.logger.Println("Boot spawn skipped: Deacon is healthy and no active work in flight")
+		return
+	}
+
+	// Hysteresis: a single heartbeat that happens to see in_progress work is
+	// not a reason to burn a Claude session. Boot spawned 69 times in a day
+	// and reported "nothing" 276 times. Require the previous heartbeat to
+	// have seen something too, unless it has been a while since the last
+	// spawn. operational.daemon.boot_every_heartbeat restores the old
+	// behaviour.
+	if !d.loadOperationalConfig().GetDaemonConfig().BootEveryHeartbeatV() &&
+		!prevTriageFound &&
+		!d.bootLastSpawned.IsZero() &&
+		time.Since(d.bootLastSpawned) < bootTriageMaxInterval {
+		d.logger.Printf("Boot spawn deferred: first heartbeat with work to triage, last spawn %s ago (interval %s)",
+			time.Since(d.bootLastSpawned).Round(time.Second), bootTriageMaxInterval)
 		return
 	}
 

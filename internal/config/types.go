@@ -321,6 +321,12 @@ type DaemonThresholds struct {
 	// unlike dogs, they should not persist when idle.
 	PolecatIdleSessionTimeout string `json:"polecat_idle_session_timeout,omitempty"`
 
+	// BootEveryHeartbeat restores the pre-2026-09 behaviour where Boot triage
+	// is considered on every heartbeat (default false). With it unset, Boot
+	// runs only when the previous heartbeat found something to triage, or
+	// once per bootTriageMaxInterval, whichever comes first.
+	BootEveryHeartbeat *bool `json:"boot_every_heartbeat,omitempty"`
+
 	// PolecatIdleSessionTimeoutPendingMR is the idle timeout for a polecat
 	// whose agent bead still points at a non-terminal merge request
 	// (default "60m"). A rejected MR is delivered by nudging the polecat's
