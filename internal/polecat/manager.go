@@ -1320,10 +1320,24 @@ func (m *Manager) ActiveMRRemovalBlocker(name string) (string, string) {
 	if activeMR == "" {
 		return "", ""
 	}
-	return activeMR, activeMRRemovalBlocker(m.beads, fields)
+	return activeMR, activeMRRemovalBlockerWithTown(m.beads, m.agentBeads(), fields, m.phantomMRAge())
+}
+
+// phantomMRAge returns the age after which an active_mr that resolves in no
+// database stops counting as pending work. Zero when workflow.close_on_merge
+// is off, which keeps upstream behaviour exactly.
+func (m *Manager) phantomMRAge() time.Duration {
+	if !config.CloseOnMergeEnabledForTown(m.townRoot) {
+		return 0
+	}
+	return DefaultPhantomMRAge
 }
 
 func activeMRRemovalBlocker(reader IssueReader, fields *beads.AgentFields) string {
+	return activeMRRemovalBlockerWithTown(reader, nil, fields, 0)
+}
+
+func activeMRRemovalBlockerWithTown(reader, townReader IssueReader, fields *beads.AgentFields, phantomAge time.Duration) string {
 	if fields == nil || strings.TrimSpace(fields.ActiveMR) == "" {
 		return ""
 	}
@@ -1331,7 +1345,13 @@ func activeMRRemovalBlocker(reader IssueReader, fields *beads.AgentFields) strin
 	if sourceHint == "" {
 		sourceHint = strings.TrimSpace(fields.HookBead)
 	}
-	assessment := AssessActiveMR(reader, ActiveMRInput{ActiveMR: fields.ActiveMR, SourceIssueHint: sourceHint})
+	assessment := AssessActiveMR(reader, ActiveMRInput{
+		ActiveMR:            fields.ActiveMR,
+		SourceIssueHint:     sourceHint,
+		TownReader:          townReader,
+		CompletionTime:      fields.CompletionTime,
+		PhantomReleaseAfter: phantomAge,
+	})
 	if !assessment.Pending {
 		return ""
 	}
@@ -2318,6 +2338,7 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	agentID := m.agentBeadID(name)
 	activeMR := ""
 	sourceHint := ""
+	completionTime := ""
 	_, fields, err := m.agentBeads().GetAgentBead(agentID)
 	hookSafe := true
 	hookTerminal := false
@@ -2343,6 +2364,7 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 		if fields.CleanupStatus != "" {
 			input.CleanupStatus = CleanupStatus(fields.CleanupStatus)
 		}
+		completionTime = fields.CompletionTime
 	}
 	clonePath := m.clonePath(name)
 	g := git.NewGit(clonePath)
@@ -2380,7 +2402,15 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	activeMRSafe := true
 	sourceTerminal := sourceHint != "" && m.assignedBeadTerminal(sourceHint)
 	if activeMR != "" {
-		assessment := AssessActiveMR(m.agentBeads(), ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
+		assessment := AssessActiveMR(m.beads, ActiveMRInput{
+			ActiveMR:            activeMR,
+			SourceIssueHint:     sourceHint,
+			RequireGitSafe:      true,
+			GitSafe:             gitSafe,
+			TownReader:          m.agentBeads(),
+			CompletionTime:      completionTime,
+			PhantomReleaseAfter: m.phantomMRAge(),
+		})
 		if assessment.Pending {
 			input.ActiveMRBlocker = assessment.Reason
 		}
