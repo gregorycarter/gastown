@@ -122,6 +122,28 @@ func TestSelectAutoFeedCandidates_RejectionReasons(t *testing.T) {
 	}
 }
 
+func TestSelectAutoFeedCandidates_IntrinsicReasonsBeatFloorMet(t *testing.T) {
+	// With the floor already met, an operator still needs the real reason a
+	// bead is undispatchable — "exclude-label=needs-operator", not
+	// "floor-met".
+	candidates := []autoFeedCandidate{
+		autoFeedTestCandidate("bt-first", 0, "2026-01-01T00:00:00Z"),
+		autoFeedTestCandidate("bt-held", 1, "2026-01-01T00:00:00Z", "needs-operator"),
+		autoFeedTestCandidate("bt-next", 2, "2026-01-01T00:00:00Z"),
+	}
+
+	selected, rejected := selectAutoFeedCandidates(candidates, defaultAutoFeedPolicy(), nil, 1)
+	if got := autoFeedIDs(selected); len(got) != 1 || got[0] != "bt-first" {
+		t.Fatalf("selected %v, want [bt-first]", got)
+	}
+	if got := rejectionReason(rejected, "bt-held"); got != "exclude-label=needs-operator" {
+		t.Errorf("bt-held rejection = %q, want exclude-label=needs-operator", got)
+	}
+	if got := rejectionReason(rejected, "bt-next"); got != "floor-met" {
+		t.Errorf("bt-next rejection = %q, want floor-met", got)
+	}
+}
+
 func TestSelectAutoFeedCandidates_AllowList(t *testing.T) {
 	policy := defaultAutoFeedPolicy()
 	policy.AllowLabels = []string{"product"}

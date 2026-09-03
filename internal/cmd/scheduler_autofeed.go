@@ -120,10 +120,10 @@ func selectAutoFeedCandidates(candidates []autoFeedCandidate, policy autoFeedPol
 	}
 
 	for _, c := range ordered {
-		if len(selected) >= limit {
-			reject(c, "floor-met")
-			continue
-		}
+		// Intrinsic disqualifications are evaluated before the floor check so
+		// a --dry-run tells an operator *why* a bead is not dispatchable
+		// ("exclude-label=needs-operator") rather than hiding it behind
+		// "floor-met".
 		if c.Status != "open" {
 			reject(c, fmt.Sprintf("status=%s", c.Status))
 			continue
@@ -159,7 +159,14 @@ func selectAutoFeedCandidates(candidates []autoFeedCandidate, policy autoFeedPol
 				reject(c, fmt.Sprintf("ops-slot-cap=%d", policy.MaxOpsSlots))
 				continue
 			}
+			if len(selected) >= limit {
+				reject(c, "floor-met")
+				continue
+			}
 			opsUsed++
+		} else if len(selected) >= limit {
+			reject(c, "floor-met")
+			continue
 		}
 		selected = append(selected, c)
 	}
