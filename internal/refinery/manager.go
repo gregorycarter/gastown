@@ -689,7 +689,19 @@ func (m *Manager) RegisterMR(_ *MergeRequest) error {
 // RejectMR manually rejects a merge request.
 // It closes the MR with rejected status and optionally notifies the worker.
 // Returns the rejected MR for display purposes.
+//
+// Deprecated in favour of RejectMRWithOptions; kept so existing callers keep
+// upstream semantics (nudge only, source bead untouched).
 func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool) (*MergeRequest, error) {
+	return m.RejectMRWithOptions(idOrBranch, reason, RejectOptions{Notify: notify})
+}
+
+// RejectMRWithOptions rejects a merge request and, when
+// opts.CloseOnMerge is set, makes the rejection produce a fix attempt:
+// the rejected candidate is recorded on the source bead, a terminal or held
+// source is reopened, and a worker with no session gets the work re-slung onto
+// its own branch instead of a nudge nobody will ever read (hq-19pxc).
+func (m *Manager) RejectMRWithOptions(idOrBranch string, reason string, opts RejectOptions) (*MergeRequest, error) {
 	b := beads.New(m.rig.BeadsPath())
 	mr, err := m.findMRForTerminalCleanup(idOrBranch, b)
 	if err != nil {
@@ -726,10 +738,27 @@ func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool) (*Merg
 	}
 	mr.Error = reason
 
-	// Optionally notify worker
-	if notify && !closeResult.AlreadyTerminal {
-		m.notifyWorkerRejected(mr, reason)
+	if !opts.CloseOnMerge {
+		// Upstream behaviour: the source issue is deliberately untouched and
+		// the only signal is an optional nudge.
+		if opts.Notify && !closeResult.AlreadyTerminal {
+			m.notifyWorkerRejected(mr, reason)
+		}
+		return mr, nil
 	}
+
+	if closeResult.AlreadyTerminal {
+		// The MR was already closed by someone else; recording a second
+		// rejection on the source would fight whatever closed it.
+		_, _ = fmt.Fprintf(m.output, "[Refinery] MR %s was already terminal — source %s left as-is\n", mr.ID, mr.IssueID)
+		return mr, nil
+	}
+
+	// b's Show/Update/AddComment already route by issue prefix, so a cross-rig
+	// source (hq-*) lands in the right database.
+	outcome := applyRejectionToSource(b, mr, reason)
+	logRejectionOutcome(m.output, mr, outcome)
+	m.recoverRejectedWork(mr, reason, opts, &outcome)
 
 	return mr, nil
 }
