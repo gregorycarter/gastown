@@ -44,6 +44,8 @@ var (
 	nudgeIfFreshFlag  bool
 	nudgeModeFlag     string
 	nudgePriorityFlag string
+	nudgeIfStaleFlag  time.Duration
+	nudgeDryRunFlag   bool
 )
 
 // Nudge delivery modes.
@@ -67,6 +69,8 @@ func init() {
 	nudgeCmd.Flags().BoolVar(&nudgeIfFreshFlag, "if-fresh", false, "Only send if caller's tmux session is <60s old (suppresses compaction nudges)")
 	nudgeCmd.Flags().StringVar(&nudgeModeFlag, "mode", NudgeModeWaitIdle, "Delivery mode: wait-idle (default), queue, or immediate")
 	nudgeCmd.Flags().StringVar(&nudgePriorityFlag, "priority", nudge.PriorityNormal, "Queue priority: normal (default) or urgent")
+	nudgeCmd.Flags().DurationVar(&nudgeIfStaleFlag, "if-stale", 0, "Only send if the target agent bead's heartbeat: label is older than this (e.g. 15m)")
+	nudgeCmd.Flags().BoolVar(&nudgeDryRunFlag, "dry-run", false, "Print the delivery decision without sending")
 }
 
 var nudgeCmd = &cobra.Command{
@@ -112,6 +116,13 @@ Channel syntax:
 DND (Do Not Disturb):
   If the target has DND enabled (gt dnd on), the nudge is skipped.
   Use --force to override DND and send anyway.
+
+Staleness gate (--if-stale):
+  Only send when the target agent bead's heartbeat: label (written by the
+  await-* molecule steps) is older than the given duration. A patrol role
+  with a fresh heartbeat is running its loop and does not need waking.
+  A missing or unreadable heartbeat never suppresses the nudge.
+  Combine with --dry-run to print the decision without sending.
 
 Examples:
   gt nudge greenplace/furiosa "Check your mail and start working"
@@ -216,11 +227,11 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 					Message:  message,
 					Priority: nudgePriorityFlag,
 				}); qErr != nil {
-					formatted := nudge.FormatForInjection([]nudge.QueuedNudge{{
+					formatted := nudge.FormatForInjectionForSession([]nudge.QueuedNudge{{
 						Sender:   sender,
 						Message:  message,
 						Priority: nudgePriorityFlag,
-					}})
+					}}, sessionName)
 					return t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
 				}
 				// Ensure a nudge-poller is running so the queue actually drains.
@@ -240,11 +251,11 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 			// Agent is idle — deliver directly. Format as system-reminder
 			// so the agent processes it as a background notification rather
 			// than a user interruption/correction.
-			formatted := nudge.FormatForInjection([]nudge.QueuedNudge{{
+			formatted := nudge.FormatForInjectionForSession([]nudge.QueuedNudge{{
 				Sender:   sender,
 				Message:  message,
 				Priority: nudgePriorityFlag,
-			}})
+			}}, sessionName)
 			deliverErr := t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
 			if !errors.Is(deliverErr, tmux.ErrSubmitNotVerified) {
 				return deliverErr
@@ -275,11 +286,11 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 			fmt.Fprintf(os.Stderr, "Warning: queue fallback failed (%v), delivering immediately\n", qErr)
 			// Still use FormatForInjection so the agent sees a consistent
 			// <system-reminder> format regardless of delivery path.
-			formatted := nudge.FormatForInjection([]nudge.QueuedNudge{{
+			formatted := nudge.FormatForInjectionForSession([]nudge.QueuedNudge{{
 				Sender:   sender,
 				Message:  message,
 				Priority: nudgePriorityFlag,
-			}})
+			}}, sessionName)
 			return t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
 		}
 		// Run watcher synchronously: polls for idle over a longer window.
@@ -292,6 +303,12 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 		return nil
 
 	default: // NudgeModeImmediate
+		// Immediate delivery bypasses FormatForInjection, so append the patrol
+		// re-entry footer here too — an interrupted patrol agent otherwise
+		// answers the nudge and parks at its prompt.
+		if nudge.IsPatrolSession(sessionName) {
+			prefixedMessage = prefixedMessage + "\n" + nudge.PatrolReentryFooter
+		}
 		opts := tmux.NudgeOpts{TownRoot: townRoot}
 		// Check if the target agent uses Escape as cancel (e.g., Gemini CLI).
 		// For these agents, skip the Escape keystroke to avoid canceling
@@ -348,7 +365,7 @@ func watchAndDeliver(t *tmux.Tmux, townRoot, sessionName string) {
 			if len(drained) == 0 {
 				return
 			}
-			formatted := nudge.FormatForInjection(drained)
+			formatted := nudge.FormatForInjectionForSession(drained, sessionName)
 			if err := t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot}); err != nil {
 				fmt.Fprintf(os.Stderr, "idle-watcher: delivery for %s failed: %v\n", sessionName, err)
 				requeueDrainedNudges(townRoot, sessionName, "idle-watcher", drained)
@@ -460,6 +477,29 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		default:
 			sender = string(roleInfo.Role)
 		}
+	}
+
+	// --if-stale: skip the nudge when the target's patrol heartbeat is fresher
+	// than the given duration. The heartbeat: label is written by the await-*
+	// molecule steps, so a fresh one proves the patrol loop is running and the
+	// nudge would only interrupt it.
+	if nudgeIfStaleFlag > 0 {
+		townRootForHB, _ := workspace.FindFromCwd()
+		age, beadID, hbErr := agentHeartbeatAge(townRootForHB, target)
+		decision := evaluateIfStale(nudgeIfStaleFlag, age, beadID, hbErr)
+		if decision.Skip {
+			fmt.Printf("%s %s\n", style.Dim.Render("○"), decision.Reason)
+			return nil
+		}
+		if nudgeDryRunFlag {
+			fmt.Printf("%s %s\n", style.Dim.Render("·"), decision.Reason)
+		}
+	}
+
+	if nudgeDryRunFlag {
+		fmt.Printf("%s Would nudge %s (mode=%s, priority=%s): %s\n",
+			style.Bold.Render("→"), target, nudgeModeFlag, nudgePriorityFlag, message)
+		return nil
 	}
 
 	// Handle channel syntax: channel:<name>
