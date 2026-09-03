@@ -78,6 +78,7 @@ var (
 	handoffReason     string
 	handoffNoGitCheck bool
 	handoffYes        bool
+	handoffForce      bool
 )
 
 func init() {
@@ -92,6 +93,7 @@ func init() {
 	handoffCmd.Flags().StringVar(&handoffReason, "reason", "", "Reason for handoff (e.g., 'compaction', 'idle')")
 	handoffCmd.Flags().BoolVar(&handoffNoGitCheck, "no-git-check", false, "Skip git workspace cleanliness check")
 	handoffCmd.Flags().BoolVarP(&handoffYes, "yes", "y", false, "Skip confirmation prompt (for automation and scripting)")
+	handoffCmd.Flags().BoolVar(&handoffForce, "force", false, "Hand off even when the patrol context guard says it is unnecessary")
 	rootCmd.AddCommand(handoffCmd)
 }
 
@@ -158,6 +160,15 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 		doneCmd.Stdout = os.Stdout
 		doneCmd.Stderr = os.Stderr
 		return doneCmd.Run()
+	}
+
+	// Patrol context guard (deacon/witness/refinery): the patrol formulas
+	// mandate a handoff every cycle, which respawns a codex process, re-renders
+	// a 40-65KB formula and writes several Dolt commits — for an agent that
+	// still has most of its context. Skip when RSS and session age are both
+	// below their thresholds. --force overrides.
+	if maybeSkipPatrolHandoff(handoffForce) {
+		return nil
 	}
 
 	// Prompt for confirmation unless --yes/-y was passed or stdin is not a TTY.
@@ -1686,13 +1697,15 @@ func cleanupMoleculeOnHandoff() {
 //
 // Crew and mayor roles are exempt — they hand off on human request,
 // not on patrol loops, so the cooldown just gets in the way.
+//
+// The cooldown is per-role: patrol roles (deacon/witness/refinery) use
+// operational.daemon.patrol_handoff_min_interval (default 20m), everyone else
+// operational.session.min_handoff_cooldown (default 2m).
 func enforceHandoffCooldown() {
-	if role := os.Getenv("GT_ROLE"); role != "" {
-		parsed, _, _ := parseRoleString(role)
-		switch parsed {
-		case RoleMayor, RoleCrew:
-			return
-		}
+	role := currentRoleName()
+	switch Role(role) {
+	case RoleMayor, RoleCrew:
+		return
 	}
 
 	cwd, err := os.Getwd()
@@ -1706,16 +1719,34 @@ func enforceHandoffCooldown() {
 		return // No previous handoff recorded — first handoff, no cooldown
 	}
 
+	cooldown := handoffCooldownForRole(role, loadTownOperationalConfig())
 	age := time.Since(info.ModTime())
-	if age >= constants.MinHandoffCooldown {
+	if age >= cooldown {
 		return // Enough time has passed
 	}
 
-	remaining := constants.MinHandoffCooldown - age
+	remaining := cooldown - age
 	fmt.Printf("%s Handoff cooldown: waiting %v (last handoff %v ago, min %v)\n",
 		style.Dim.Render("⏳"), remaining.Round(time.Second),
-		age.Round(time.Second), constants.MinHandoffCooldown)
+		age.Round(time.Second), cooldown)
 	time.Sleep(remaining)
+}
+
+// loadTownOperationalConfig loads operational settings for the current town.
+// Returns a non-nil (possibly empty) config when the town cannot be found.
+func loadTownOperationalConfig() *config.OperationalConfig {
+	townRoot, _ := workspace.FindFromCwd()
+	return config.LoadOperationalConfig(townRoot)
+}
+
+// handoffCooldownForRole returns the minimum interval between handoffs for a
+// role. Patrol roles get the longer patrol interval; everything else gets the
+// generic session cooldown (constants.MinHandoffCooldown by default).
+func handoffCooldownForRole(role string, cfg *config.OperationalConfig) time.Duration {
+	if isPatrolRole(role) {
+		return cfg.GetDaemonConfig().PatrolHandoffMinIntervalD()
+	}
+	return cfg.GetSessionConfig().MinHandoffCooldownD()
 }
 
 // recordHandoffTime writes the current timestamp to the handoff cooldown file.

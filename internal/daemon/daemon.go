@@ -96,6 +96,22 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	bootLastSpawned time.Time
 
+	// pressureCPUDeferred is the CPU-pressure hysteresis flag: once the gate
+	// engages, it stays engaged until load/core drops below
+	// threshold * pressure_cpu_exit_ratio.
+	// Only accessed from the heartbeat goroutine - no sync needed.
+	pressureCPUDeferred bool
+
+	// rigHeadWarned throttles the rig-checkout drift warning to once per hour
+	// per rig. Only accessed from the heartbeat goroutine - no sync needed.
+	rigHeadWarned map[string]time.Time
+
+	// patrolLastRun records when each patrol's health check last ran, so a
+	// configured daemon.json patrol `interval` is actually honoured instead of
+	// being parsed and ignored.
+	// Only accessed from the heartbeat goroutine - no sync needed.
+	patrolLastRun map[string]time.Time
+
 	// Restart tracking with exponential backoff to prevent crash loops
 	restartTracker *RestartTracker
 
@@ -900,7 +916,9 @@ func (d *Daemon) heartbeat(state *State) {
 	// 1. Ensure Deacon is running (restart if dead)
 	// Check patrol config - can be disabled in mayor/daemon.json
 	if d.isPatrolActive("deacon") {
-		d.ensureDeaconRunning()
+		if d.patrolDue("deacon") {
+			d.ensureDeaconRunning()
+		}
 	} else {
 		d.logger.Printf("Deacon patrol disabled in config, skipping")
 		// Kill leftover deacon/boot sessions from before patrol was disabled.
@@ -926,7 +944,9 @@ func (d *Daemon) heartbeat(state *State) {
 	// 4. Ensure Witnesses are running for all rigs (restart if dead)
 	// Check patrol config - can be disabled in mayor/daemon.json
 	if d.isPatrolActive("witness") {
-		d.ensureWitnessesRunning()
+		if d.patrolDue("witness") {
+			d.ensureWitnessesRunning()
+		}
 	} else {
 		d.logger.Printf("Witness patrol disabled in config, skipping")
 		// Kill leftover witness sessions from before patrol was disabled. (hq-2mstj)
@@ -937,7 +957,12 @@ func (d *Daemon) heartbeat(state *State) {
 	// Check patrol config - can be disabled in mayor/daemon.json
 	// Pressure-gated: refineries consume API credits, defer when system is loaded.
 	if d.isPatrolActive("refinery") {
-		if p := d.checkPressure("refinery"); !p.OK {
+		// CPU pressure does not defer the Refinery — it is the merge path, and
+		// deferring it while a CI train saturates the host stalls exactly the
+		// work that ends the load. Memory and session-count tiers still apply.
+		if !d.patrolDue("refinery") {
+			// Not due yet under the configured daemon.json interval.
+		} else if p := d.checkPressure(constants.RoleRefinery); !p.OK {
 			d.logger.Printf("Deferring refinery spawn: %s", p.Reason)
 		} else {
 			d.ensureRefineriesRunning()
@@ -950,6 +975,13 @@ func (d *Daemon) heartbeat(state *State) {
 
 	// 6. Ensure Mayor is running (restart if dead)
 	d.ensureMayorRunning()
+
+	// 6.4. Patrol parking detection: a patrol session can be alive, its agent
+	// process alive, and its patrol loop dead — the agent answered a nudge and
+	// stopped at its prompt instead of re-entering await. The heartbeat: label
+	// the await-* steps maintain is the only evidence, and nothing else reads
+	// it. Nudge once, restart if the nudge does not take. (hq-5uqry)
+	d.checkPatrolParking(state)
 
 	// 6.5. Handle Dog lifecycle: cleanup stuck dogs and dispatch plugins
 	// Pressure-gated: dog dispatch spawns new agent sessions.
@@ -999,11 +1031,31 @@ func (d *Daemon) heartbeat(state *State) {
 	// 14. Dispatch scheduled work (capacity-controlled polecat dispatch).
 	// Shells out to `gt scheduler run` to avoid circular import between daemon and cmd.
 	// Pressure-gated: polecats are the primary resource consumers.
-	if p := d.checkPressure("polecat"); !p.OK {
-		d.logger.Printf("Deferring polecat dispatch: %s", p.Reason)
+	if p := d.checkPressure(constants.RolePolecat); !p.OK {
+		// Minimum-working guarantee: a host under load that has stopped
+		// producing work cannot recover by refusing to start any. Dispatch
+		// anyway while fewer than pressure_min_working_polecats sessions live.
+		minWorking := d.loadOperationalConfig().GetDaemonConfig().PressureMinWorkingPolecatsV()
+		working, counted := d.countLivePolecatSessions()
+		if minWorking > 0 && counted && working < minWorking {
+			d.logger.Printf("Dispatching polecat work despite pressure (%s): %d live polecat session(s) < minimum %d",
+				p.Reason, working, minWorking)
+			d.dispatchQueuedWork()
+		} else {
+			d.logger.Printf("Deferring polecat dispatch: %s", p.Reason)
+			// Queue hygiene is not dispatch: skipping the scheduler entirely
+			// also freezes stale-context cleanup and reservation-TTL expiry,
+			// so a saturated host accumulates queue debris it cannot clear.
+			d.dispatchQueuedWorkCleanupOnly()
+		}
 	} else {
 		d.dispatchQueuedWork()
 	}
+
+	// 14b. Warn when a rig's mayor checkout has drifted behind origin/main.
+	// `bd cook` resolves formulas through that checkout's .beads redirect, so a
+	// stale checkout silently runs stale formulas and gate scripts.
+	d.checkRigCheckoutDrift()
 
 	// 15. Rotate oversized Dolt logs (copytruncate for child process fds).
 	// daemon.log uses lumberjack for automatic rotation; this handles Dolt server logs.
@@ -1423,6 +1475,42 @@ func (d *Daemon) ensureBootRunning() {
 	d.logger.Println("Boot spawned successfully")
 }
 
+// patrolDue reports whether a patrol's health check should run this heartbeat,
+// honouring the optional `interval` in mayor/daemon.json. Without an interval
+// (the default) every heartbeat runs the check, as before.
+//
+// Calling this records the run, so call it exactly once per heartbeat per
+// patrol and only when the patrol is active.
+func (d *Daemon) patrolDue(patrol string) bool {
+	interval := GetPatrolInterval(d.patrolConfig, patrol)
+	if interval <= 0 {
+		return true
+	}
+	if d.patrolLastRun == nil {
+		d.patrolLastRun = make(map[string]time.Time)
+	}
+	if last, ok := d.patrolLastRun[patrol]; ok {
+		if since := time.Since(last); since < interval {
+			d.logger.Printf("%s patrol check not due (%s since last, interval %s)",
+				patrol, since.Round(time.Second), interval)
+			return false
+		}
+	}
+	d.patrolLastRun[patrol] = time.Now()
+	return true
+}
+
+// hookedScanLimit bounds the hooked-bead scan in hasActiveWork. Patrol wisps
+// are skipped, so one row is not enough to tell "only wisps are hooked" from
+// "a polecat holds work".
+const hookedScanLimit = 25
+
+// isWispBeadID reports whether an ID belongs to a molecule wisp rather than a
+// real work bead. Wisp IDs always carry the "-wisp-" infix.
+func isWispBeadID(id string) bool {
+	return strings.Contains(id, "-wisp-")
+}
+
 // hasActiveWork returns true if any bead store has in_progress or hooked beads.
 // These are the only states Boot can meaningfully act on: in_progress work may be
 // stuck, and hooked work is waiting on a polecat that may have died.
@@ -1439,16 +1527,32 @@ func (d *Daemon) hasActiveWork() bool {
 	defer cancel()
 
 	for name, store := range d.beadsStores {
-		for _, rawStatus := range []string{"in_progress"} {
+		// "hooked" counts as active work: a hooked bead is a polecat's work,
+		// and a polecat that dies holding it is exactly what Boot and the
+		// Deacon stale-heartbeat nudge exist to notice. Counting only
+		// in_progress suppressed those nudges for the whole time polecats held
+		// their work (§11h).
+		//
+		// Patrol wisps are excluded: every patrol role always has one hooked,
+		// so counting them would make hasActiveWork permanently true and
+		// defeat the idle guard entirely.
+		for _, rawStatus := range []string{"in_progress", "hooked"} {
 			s := beadsdk.Status(rawStatus)
-			filter := beadsdk.IssueFilter{Status: &s, Limit: 1}
+			limit := 1
+			if rawStatus == "hooked" {
+				limit = hookedScanLimit // need enough rows to see past the wisps
+			}
+			filter := beadsdk.IssueFilter{Status: &s, Limit: limit}
 			issues, err := store.SearchIssues(ctx, "", filter)
 			if err != nil {
 				d.logger.Printf("hasActiveWork: %s/%s query failed: %v — assuming work present",
 					name, rawStatus, err)
 				return true // conservative: don't suppress Boot on query failure
 			}
-			if len(issues) > 0 {
+			for _, issue := range issues {
+				if rawStatus == "hooked" && isWispBeadID(issue.ID) {
+					continue
+				}
 				return true
 			}
 		}
@@ -3210,6 +3314,61 @@ func (d *Daemon) pruneStaleBranches() {
 // is released on process death, and dispatchSingleBead's label swap retry logic
 // prevents double-dispatch on the next cycle. The batch_size config (default: 1)
 // limits how many beads are in-flight per heartbeat, reducing the timeout window.
+// countLivePolecatSessions counts polecat worktrees across all known rigs that
+// currently have a live tmux session. The second return value is false when the
+// count could not be established (tmux unreachable), in which case callers must
+// not treat "0 working" as fact.
+func (d *Daemon) countLivePolecatSessions() (int, bool) {
+	sessions, err := d.tmux.ListSessions()
+	if err != nil {
+		return 0, false
+	}
+	live := make(map[string]bool, len(sessions))
+	for _, name := range sessions {
+		live[name] = true
+	}
+
+	count := 0
+	for _, rigName := range d.getKnownRigs() {
+		prefix := session.PrefixFor(rigName)
+		names, err := listPolecatWorktrees(filepath.Join(d.config.TownRoot, rigName, "polecats"))
+		if err != nil {
+			continue // rig has no polecats directory
+		}
+		for _, polecatName := range names {
+			if live[session.PolecatSessionName(prefix, polecatName)] {
+				count++
+			}
+		}
+	}
+	return count, true
+}
+
+// dispatchQueuedWorkCleanupOnly runs the scheduler's queue-hygiene pass without
+// dispatching. Used when polecat dispatch is deferred on pressure.
+//
+// The --cleanup-only flag may not exist in the installed gt binary; an "unknown
+// flag" response is logged and ignored rather than treated as a failure.
+func (d *Daemon) dispatchQueuedWorkCleanupOnly() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gt", "scheduler", "run", "--cleanup-only")
+	setSysProcAttr(cmd)
+	cmd.Dir = d.config.TownRoot
+	cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads")), "GT_DAEMON=1")
+	out, err := cmd.CombinedOutput()
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		d.logger.Printf("Scheduler cleanup-only timed out after 2m")
+	case err != nil && strings.Contains(string(out), "unknown flag"):
+		d.logger.Printf("Scheduler cleanup-only unavailable in this gt build (--cleanup-only unknown flag); skipping queue hygiene")
+	case err != nil:
+		d.logger.Printf("Scheduler cleanup-only failed: %v (output: %s)", err, string(out))
+	case len(out) > 0:
+		d.logger.Printf("Scheduler cleanup-only: %s", string(out))
+	}
+}
+
 func (d *Daemon) dispatchQueuedWork() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()

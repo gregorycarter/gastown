@@ -6,11 +6,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
@@ -284,6 +286,8 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 					state.HeartbeatCount)
 			}
 
+			printPatrolHeartbeats(state)
+
 			// Check if binary is newer than process
 			if binaryModTime, err := getBinaryModTime(); err == nil {
 				fmt.Printf("  Binary: %s\n", binaryModTime.Format("2006-01-02 15:04:05"))
@@ -302,6 +306,46 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// printPatrolHeartbeats renders the patrol heartbeat: label ages the daemon
+// observed on its last pass, Mayor first. These come from the parking detector
+// — the Mayor is included when it keeps a heartbeat, even though it is never
+// auto-restarted.
+func printPatrolHeartbeats(state *daemon.State) {
+	if len(state.PatrolHeartbeats) == 0 {
+		return
+	}
+
+	identities := make([]string, 0, len(state.PatrolHeartbeats))
+	for identity := range state.PatrolHeartbeats {
+		identities = append(identities, identity)
+	}
+	sort.Slice(identities, func(i, j int) bool {
+		if (identities[i] == constants.RoleMayor) != (identities[j] == constants.RoleMayor) {
+			return identities[i] == constants.RoleMayor
+		}
+		return identities[i] < identities[j]
+	})
+
+	fmt.Printf("  Patrol heartbeats (as of last daemon pass):\n")
+	for _, identity := range identities {
+		ts := state.PatrolHeartbeats[identity]
+		if ts.IsZero() {
+			continue
+		}
+		line := fmt.Sprintf("    %-28s %s (%s ago)", identity,
+			ts.Format("15:04:05"), time.Since(ts).Round(time.Second))
+		if rec, parked := state.PatrolParking[identity]; parked {
+			line += fmt.Sprintf("  %s parked, nudged %s ago",
+				style.Bold.Render("⚠"), time.Since(rec.NudgedAt).Round(time.Second))
+		}
+		fmt.Println(line)
+	}
+	if !state.MayorNudgeQueueSince.IsZero() {
+		fmt.Printf("    %-28s non-empty since %s\n", "mayor nudge queue",
+			state.MayorNudgeQueueSince.Format("15:04:05"))
+	}
 }
 
 // getBinaryModTime returns the modification time of the current executable

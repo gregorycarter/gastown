@@ -109,6 +109,24 @@ func TestHasActiveWork(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "hooked work bead counts as active work",
+			stores: map[string]beadsdk.Storage{
+				"hq": &searchStorage{results: map[string][]*beadsdk.Issue{
+					"hooked": {{ID: "bt-j6uu"}},
+				}},
+			},
+			want: true,
+		},
+		{
+			name: "hooked work bead behind a patrol wisp still counts",
+			stores: map[string]beadsdk.Storage{
+				"hq": &searchStorage{results: map[string][]*beadsdk.Issue{
+					"hooked": {{ID: "hq-wisp-34zi"}, {ID: "bt-j6uu"}},
+				}},
+			},
+			want: true,
+		},
+		{
 			name: "active work in second store only",
 			stores: map[string]beadsdk.Storage{
 				"hq":  &searchStorage{results: map[string][]*beadsdk.Issue{}},

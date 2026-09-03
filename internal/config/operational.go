@@ -20,6 +20,7 @@ const (
 	DefaultHungSessionThreshold    = 30 * time.Minute
 	DefaultStartupNudgeVerifyDelay = 25 * time.Second
 	DefaultStartupNudgeMaxRetries  = 2
+	DefaultMinHandoffCooldown      = 2 * time.Minute
 )
 
 // Nudge defaults.
@@ -57,6 +58,21 @@ const (
 	DefaultPressureCPUThreshold   = 0.0
 	DefaultPressureMemThresholdGB = 0.0
 	DefaultPressureMaxSessions    = 0
+
+	// Hysteresis and minimum-guarantee defaults. Both apply only when the
+	// CPU tier is enabled.
+	DefaultPressureCPUExitRatio       = 0.8
+	DefaultPressureMinWorkingPolecats = 1
+
+	// Patrol handoff guard defaults (gt handoff for deacon/witness/refinery).
+	DefaultPatrolHandoffRSSMB       = 1024
+	DefaultPatrolHandoffMaxAge      = 8 * time.Hour
+	DefaultPatrolHandoffMinInterval = 20 * time.Minute
+
+	// Patrol parking detector defaults, ~3x each role's backoff-max.
+	DefaultPatrolParkedAfterWitness  = 15 * time.Minute
+	DefaultPatrolParkedAfterDeacon   = 45 * time.Minute
+	DefaultPatrolParkedAfterRefinery = 60 * time.Minute
 )
 
 // Deacon defaults.
@@ -210,6 +226,14 @@ func (s *SessionThresholds) StartupNudgeMaxRetriesV() int {
 		return *s.StartupNudgeMaxRetries
 	}
 	return DefaultStartupNudgeMaxRetries
+}
+
+// MinHandoffCooldownD returns the configured or default minimum handoff cooldown.
+func (s *SessionThresholds) MinHandoffCooldownD() time.Duration {
+	if s != nil {
+		return ParseDurationOrDefault(s.MinHandoffCooldown, DefaultMinHandoffCooldown)
+	}
+	return DefaultMinHandoffCooldown
 }
 
 // --- Nudge accessors ---
@@ -445,6 +469,79 @@ func (d *DaemonThresholds) PressureMaxSessionsV() int {
 		return *d.PressureMaxSessions
 	}
 	return DefaultPressureMaxSessions
+}
+
+// PressureCPUExitRatioV returns the configured or default CPU-deferral exit ratio.
+func (d *DaemonThresholds) PressureCPUExitRatioV() float64 {
+	if d != nil && d.PressureCPUExitRatio != nil {
+		return *d.PressureCPUExitRatio
+	}
+	return DefaultPressureCPUExitRatio
+}
+
+// PressureMinWorkingPolecatsV returns the configured or default minimum number
+// of live polecat sessions that pressure deferral must never take us below.
+func (d *DaemonThresholds) PressureMinWorkingPolecatsV() int {
+	if d != nil && d.PressureMinWorkingPolecats != nil {
+		return *d.PressureMinWorkingPolecats
+	}
+	return DefaultPressureMinWorkingPolecats
+}
+
+// PatrolHandoffRSSMBV returns the configured or default patrol handoff RSS
+// ceiling in MB. A patrol agent whose RSS is below this is considered to have
+// plenty of context left.
+func (d *DaemonThresholds) PatrolHandoffRSSMBV() int {
+	if d != nil && d.PatrolHandoffRSSMB != nil {
+		return *d.PatrolHandoffRSSMB
+	}
+	return DefaultPatrolHandoffRSSMB
+}
+
+// PatrolHandoffMaxAgeD returns the configured or default patrol handoff session-age ceiling.
+func (d *DaemonThresholds) PatrolHandoffMaxAgeD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.PatrolHandoffMaxAge, DefaultPatrolHandoffMaxAge)
+	}
+	return DefaultPatrolHandoffMaxAge
+}
+
+// PatrolHandoffMinIntervalD returns the configured or default minimum interval
+// between handoffs for patrol roles (deacon, witness, refinery).
+func (d *DaemonThresholds) PatrolHandoffMinIntervalD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.PatrolHandoffMinInterval, DefaultPatrolHandoffMinInterval)
+	}
+	return DefaultPatrolHandoffMinInterval
+}
+
+// patrolParkedAfterD reads one role's parked threshold from the
+// patrol_parked_after map, falling back to the compiled-in default.
+// An explicit "0" (or "0s") disables the detector for that role.
+func (d *DaemonThresholds) patrolParkedAfterD(role string, fallback time.Duration) time.Duration {
+	if d == nil || d.PatrolParkedAfter == nil {
+		return fallback
+	}
+	raw, ok := d.PatrolParkedAfter[role]
+	if !ok || raw == "" {
+		return fallback
+	}
+	return ParseDurationOrDefault(raw, fallback)
+}
+
+// PatrolParkedAfterWitnessD returns the Witness parked threshold (default 15m).
+func (d *DaemonThresholds) PatrolParkedAfterWitnessD() time.Duration {
+	return d.patrolParkedAfterD("witness", DefaultPatrolParkedAfterWitness)
+}
+
+// PatrolParkedAfterDeaconD returns the Deacon parked threshold (default 45m).
+func (d *DaemonThresholds) PatrolParkedAfterDeaconD() time.Duration {
+	return d.patrolParkedAfterD("deacon", DefaultPatrolParkedAfterDeacon)
+}
+
+// PatrolParkedAfterRefineryD returns the Refinery parked threshold (default 60m).
+func (d *DaemonThresholds) PatrolParkedAfterRefineryD() time.Duration {
+	return d.patrolParkedAfterD("refinery", DefaultPatrolParkedAfterRefinery)
 }
 
 // --- Deacon accessors ---

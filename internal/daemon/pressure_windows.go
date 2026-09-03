@@ -1,7 +1,7 @@
 package daemon
 
-// loadAverage1Sysctl is a no-op on Windows — load average is not a standard metric.
-func loadAverage1Sysctl() float64 {
+// loadAverage5Sysctl is a no-op on Windows — load average is not a standard metric.
+func loadAverage5Sysctl() float64 {
 	return 0
 }
 

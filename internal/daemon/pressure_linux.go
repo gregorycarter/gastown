@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// loadAverage1Sysctl is a no-op on Linux — /proc/loadavg is used directly.
-func loadAverage1Sysctl() float64 {
+// loadAverage5Sysctl is a no-op on Linux — /proc/loadavg is used directly.
+func loadAverage5Sysctl() float64 {
 	return 0
 }
 

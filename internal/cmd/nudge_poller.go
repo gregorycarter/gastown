@@ -127,7 +127,7 @@ func runNudgePoller(cmd *cobra.Command, args []string) error {
 				continue // someone else drained it
 			}
 
-			formatted := nudge.FormatForInjection(drained)
+			formatted := nudge.FormatForInjectionForSession(drained, sessionName)
 			if err := t.NudgeSessionWithOpts(sessionName, formatted, nudgeOpts); err != nil {
 				fmt.Fprintf(os.Stderr, "nudge-poller: injection error for %s: %v\n", sessionName, err)
 				requeueDrainedNudges(townRoot, sessionName, "nudge-poller", drained)

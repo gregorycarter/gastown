@@ -22,6 +22,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // Priority levels for nudge delivery.
@@ -365,9 +366,53 @@ func RemoveKindByThread(townRoot, session, kind, threadID string) (int, error) {
 	return removed, nil
 }
 
+// PatrolReentryFooter is appended to nudges injected into a patrol-role
+// session (deacon, witness, refinery). A queued nudge is delivered exactly when
+// the agent is parked at its prompt — usually right after an await step
+// returned — and nothing else in the injected text tells it to resume. Without
+// this line the agent answers the nudge and parks again (hq-5uqry).
+const PatrolReentryFooter = "After handling this, continue your patrol loop: if you are not inside an await step, run gt prime --hook and re-enter it."
+
+// FormatForInjectionForSession formats queued nudges for a specific target
+// session, appending the patrol re-entry footer when that session runs a
+// patrol loop. Non-patrol sessions get the same output as FormatForInjection.
+func FormatForInjectionForSession(nudges []QueuedNudge, sessionName string) string {
+	footer := ""
+	if IsPatrolSession(sessionName) {
+		footer = PatrolReentryFooter
+	}
+	return FormatForInjectionWithFooter(nudges, footer)
+}
+
+// IsPatrolSession reports whether a tmux session name belongs to a role that
+// runs a patrol loop: deacon, witness or refinery.
+//
+// Matching is by session-name suffix rather than session.ParseSessionName so
+// the result does not depend on the prefix registry having been initialised —
+// the nudge poller and immediate-delivery paths run in short-lived processes
+// that may not have loaded it. Witness and refinery sessions are always
+// "<rigPrefix>-witness" / "<rigPrefix>-refinery"; the Deacon is a singleton
+// (the boot dog, hq-boot, has no patrol loop and is excluded).
+func IsPatrolSession(sessionName string) bool {
+	if sessionName == "" {
+		return false
+	}
+	if sessionName == session.DeaconSessionName() {
+		return true
+	}
+	return strings.HasSuffix(sessionName, "-"+string(session.RoleWitness)) ||
+		strings.HasSuffix(sessionName, "-"+string(session.RoleRefinery))
+}
+
 // FormatForInjection formats queued nudges as a system-reminder block
 // suitable for Claude Code hook output.
 func FormatForInjection(nudges []QueuedNudge) string {
+	return FormatForInjectionWithFooter(nudges, "")
+}
+
+// FormatForInjectionWithFooter is FormatForInjection with an extra trailing
+// instruction line inside the system-reminder block. An empty footer is omitted.
+func FormatForInjectionWithFooter(nudges []QueuedNudge, footer string) string {
 	if len(nudges) == 0 {
 		return ""
 	}
@@ -403,6 +448,11 @@ func FormatForInjection(nudges []QueuedNudge) string {
 			b.WriteString(fmt.Sprintf("  [from %s] %s\n", n.Sender, n.Message))
 		}
 		b.WriteString("\nThis is a background notification. Continue current work unless the nudge is higher priority.\n")
+	}
+
+	if footer != "" {
+		b.WriteString(footer)
+		b.WriteString("\n")
 	}
 
 	b.WriteString("</system-reminder>\n")

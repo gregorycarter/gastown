@@ -115,6 +115,9 @@ type TownSettings struct {
 	// All values are optional — omitted values use compiled-in defaults.
 	Operational *OperationalConfig `json:"operational,omitempty"`
 
+	// Workflow holds town-level workflow settings (currently formulas_dir).
+	Workflow *WorkflowConfig `json:"workflow,omitempty"`
+
 	// DisabledPatrols lists patrol names to disable at the town level.
 	// This provides a simple way to turn off individual daemon patrol dogs
 	// without editing mayor/daemon.json. Patrol names match the keys used
@@ -275,6 +278,11 @@ type SessionThresholds struct {
 
 	// StartupNudgeMaxRetries is max retries for startup nudge (default 3).
 	StartupNudgeMaxRetries *int `json:"startup_nudge_max_retries,omitempty"`
+
+	// MinHandoffCooldown is the minimum time between handoffs for the same
+	// component (default "2m"). Patrol roles use
+	// operational.daemon.patrol_handoff_min_interval instead.
+	MinHandoffCooldown string `json:"min_handoff_cooldown,omitempty"`
 }
 
 // NudgeThresholds configures nudge queue and delivery timeouts.
@@ -386,6 +394,40 @@ type DaemonThresholds struct {
 	// PressureMaxSessions is the maximum number of concurrent agent tmux
 	// sessions before new non-infrastructure spawns are deferred. Disabled by default (0 = unlimited).
 	PressureMaxSessions *int `json:"pressure_max_sessions,omitempty"`
+
+	// PressureCPUExitRatio is the fraction of PressureCPUThreshold that
+	// load/core must fall below before an engaged CPU deferral clears
+	// (default 0.8). Enter/exit hysteresis stops a host hovering at the
+	// threshold from flipping the gate on every tick.
+	PressureCPUExitRatio *float64 `json:"pressure_cpu_exit_ratio,omitempty"`
+
+	// PressureMinWorkingPolecats is the number of live polecat sessions below
+	// which polecat dispatch is never deferred on pressure (default 1).
+	// A saturated host that has stopped producing work cannot recover by
+	// refusing to start any.
+	PressureMinWorkingPolecats *int `json:"pressure_min_working_polecats,omitempty"`
+
+	// PatrolHandoffRSSMB is the agent-process RSS (in MB) below which a patrol
+	// role's `gt handoff` is treated as unnecessary and skipped (default 1024).
+	// Patrol formulas mandate a handoff every cycle; this guard makes the
+	// decision mechanical instead of an LLM judgement call.
+	PatrolHandoffRSSMB *int `json:"patrol_handoff_rss_mb,omitempty"`
+
+	// PatrolHandoffMaxAge is the session age below which a patrol role's
+	// `gt handoff` is skipped (default "8h"). Both this and
+	// PatrolHandoffRSSMB must be under threshold for a skip.
+	PatrolHandoffMaxAge string `json:"patrol_handoff_max_age,omitempty"`
+
+	// PatrolHandoffMinInterval is the minimum time between handoffs for
+	// patrol roles (default "20m"). Non-patrol roles use
+	// operational.session.min_handoff_cooldown.
+	PatrolHandoffMinInterval string `json:"patrol_handoff_min_interval,omitempty"`
+
+	// PatrolParkedAfter is the per-role heartbeat age after which an idle
+	// patrol agent is considered parked (its await loop is not running).
+	// Keys: "witness" (default "15m"), "deacon" (default "45m"),
+	// "refinery" (default "60m"). A role set to "0s" disables its detector.
+	PatrolParkedAfter map[string]string `json:"patrol_parked_after,omitempty"`
 }
 
 // DeaconThresholds configures deacon health-check and dispatch thresholds.
@@ -673,11 +715,20 @@ type RigConfig struct {
 	Beads       *BeadsConfig `json:"beads,omitempty"`
 }
 
-// WorkflowConfig represents workflow settings for a rig.
+// WorkflowConfig represents workflow settings for a rig or for the town.
 type WorkflowConfig struct {
 	// DefaultFormula is the formula to use when `gt formula run` is called without arguments.
 	// If empty, no default is set and a formula name must be provided.
 	DefaultFormula string `json:"default_formula,omitempty"`
+
+	// FormulasDir is an absolute path to a single pinned formula directory
+	// (town-level setting only). When set it is consulted before every other
+	// resolution tier, and is passed to `bd cook` / `bd formula show` as an
+	// explicit file path rather than relying on the working directory and the
+	// .beads redirect. Point it at a git-tracked directory so a formula fix
+	// lands in exactly one place. Empty means the historical behaviour:
+	// rig .beads/formulas, then town .beads/formulas, then embedded.
+	FormulasDir string `json:"formulas_dir,omitempty"`
 }
 
 // RigSettings represents per-rig behavioral configuration (settings/config.json).

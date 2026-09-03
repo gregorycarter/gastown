@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/style"
@@ -253,6 +254,24 @@ func verifyFormulaExists(formulaName, workDir, townRoot string) error {
 	if workDir == "" {
 		workDir = townRoot
 	}
+
+	// Pinned formula directory (workflow.formulas_dir): resolve by explicit
+	// file path so the answer does not depend on cwd or the .beads redirect.
+	pinnedDir := config.FormulasDir(townRoot)
+	for _, candidate := range []string{formulaName, "mol-" + formulaName} {
+		pinned := config.FormulaFileIn(pinnedDir, candidate)
+		if pinned == "" {
+			continue
+		}
+		if out, err := BdCmd("formula", "show", pinned).
+			AllowStale().
+			Dir(workDir).
+			WithGTRoot(townRoot).
+			Stderr(io.Discard).Output(); err == nil && len(out) > 0 {
+			return nil
+		}
+	}
+
 	// Try bd formula show (handles all formula file formats)
 	// Use Output() instead of Run() to detect bd exit 0 bug:
 	// when formula not found, bd may exit 0 but produce empty stdout.
