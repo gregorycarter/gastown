@@ -226,6 +226,13 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 		description += fmt.Sprintf("\nworker: %s", worker)
 	}
 
+	// SHA-keyed rejection memory (hq-tx4md): refuse a resubmission of the exact
+	// commit the merge gate already refused, and clear the record when the head
+	// has moved on so the Refinery sees a genuinely new candidate.
+	if err := guardRejectedCandidate(sourceBD, config.CloseOnMergeEnabledForTown(townRoot), issueID, commitSHA); err != nil {
+		return err
+	}
+
 	// Verify before either an idempotent success or a new MR registration.
 	// Refinery's later branch check is local-ref based, so missing/stale pushes
 	// must fail here instead of producing a delayed refinery rejection.

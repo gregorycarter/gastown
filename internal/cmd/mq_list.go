@@ -77,6 +77,9 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Rejection memory is read once per source bead across the whole listing.
+	rejectedMemo := newRejectionMemo(b, closeOnMergeForRig(r.Path))
+
 	// Apply additional filters and calculate scores
 	now := time.Now()
 	type scoredIssue struct {
@@ -202,9 +205,15 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		// Determine display status
 		displayStatus := issue.Status
 		if issue.Status == "open" {
-			if beads.HasUnresolvedBlockers(issue) {
+			switch {
+			case beads.HasUnresolvedBlockers(issue):
 				displayStatus = "blocked"
-			} else {
+			case rejectedMemo.isRejectedCandidate(fields):
+				// hq-tx4md: an MR whose head is the SHA the gate already
+				// refused cannot merge. Showing it as "ready" is what made a
+				// dead queue entry read as healthy pending work.
+				displayStatus = "rejected-candidate"
+			default:
 				displayStatus = "ready"
 			}
 		}
@@ -214,6 +223,8 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		switch displayStatus {
 		case "ready":
 			styledStatus = style.Success.Render("ready")
+		case "rejected-candidate":
+			styledStatus = style.Error.Render("rejected-candidate")
 		case "in_progress":
 			styledStatus = style.Warning.Render("active")
 		case "blocked":

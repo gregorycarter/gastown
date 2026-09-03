@@ -1666,6 +1666,18 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// distinguishes genuinely new submissions from idempotent retries.
 		commitSHA, _ = g.Rev("HEAD")
 
+		// SHA-keyed rejection memory (hq-tx4md): the merge gate already refused
+		// this exact commit, so submitting it again just re-queues a candidate
+		// that cannot merge. Treated as an MR failure so the session, worktree
+		// and hook are preserved and the polecat can push a real fix.
+		if rejErr := guardRejectedCandidate(rejectionMemoryFor(sourceBD, bd),
+			config.CloseOnMergeEnabledForTown(townRoot), issueID, commitSHA); rejErr != nil {
+			mrFailed = true
+			doneErrors = append(doneErrors, rejErr.Error())
+			style.PrintWarning("%s", rejErr.Error())
+			goto notifyWitness
+		}
+
 		// Resume: skip MR creation if already completed in a previous run (gt-aufru).
 		// Mirrors the push checkpoint pattern above. Without this, every retry
 		// re-attempts bd.Create which hits unique constraints or creates duplicates.
