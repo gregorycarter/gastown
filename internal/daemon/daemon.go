@@ -90,6 +90,12 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	bootLastSpawned time.Time
 
+	// pressureCPUDeferred is the CPU-pressure hysteresis flag: once the gate
+	// engages, it stays engaged until load/core drops below
+	// threshold * pressure_cpu_exit_ratio.
+	// Only accessed from the heartbeat goroutine - no sync needed.
+	pressureCPUDeferred bool
+
 	// Restart tracking with exponential backoff to prevent crash loops
 	restartTracker *RestartTracker
 
@@ -931,7 +937,10 @@ func (d *Daemon) heartbeat(state *State) {
 	// Check patrol config - can be disabled in mayor/daemon.json
 	// Pressure-gated: refineries consume API credits, defer when system is loaded.
 	if d.isPatrolActive("refinery") {
-		if p := d.checkPressure("refinery"); !p.OK {
+		// CPU pressure does not defer the Refinery — it is the merge path, and
+		// deferring it while a CI train saturates the host stalls exactly the
+		// work that ends the load. Memory and session-count tiers still apply.
+		if p := d.checkPressure(constants.RoleRefinery); !p.OK {
 			d.logger.Printf("Deferring refinery spawn: %s", p.Reason)
 		} else {
 			d.ensureRefineriesRunning()
@@ -1000,8 +1009,23 @@ func (d *Daemon) heartbeat(state *State) {
 	// 14. Dispatch scheduled work (capacity-controlled polecat dispatch).
 	// Shells out to `gt scheduler run` to avoid circular import between daemon and cmd.
 	// Pressure-gated: polecats are the primary resource consumers.
-	if p := d.checkPressure("polecat"); !p.OK {
-		d.logger.Printf("Deferring polecat dispatch: %s", p.Reason)
+	if p := d.checkPressure(constants.RolePolecat); !p.OK {
+		// Minimum-working guarantee: a host under load that has stopped
+		// producing work cannot recover by refusing to start any. Dispatch
+		// anyway while fewer than pressure_min_working_polecats sessions live.
+		minWorking := d.loadOperationalConfig().GetDaemonConfig().PressureMinWorkingPolecatsV()
+		working, counted := d.countLivePolecatSessions()
+		if minWorking > 0 && counted && working < minWorking {
+			d.logger.Printf("Dispatching polecat work despite pressure (%s): %d live polecat session(s) < minimum %d",
+				p.Reason, working, minWorking)
+			d.dispatchQueuedWork()
+		} else {
+			d.logger.Printf("Deferring polecat dispatch: %s", p.Reason)
+			// Queue hygiene is not dispatch: skipping the scheduler entirely
+			// also freezes stale-context cleanup and reservation-TTL expiry,
+			// so a saturated host accumulates queue debris it cannot clear.
+			d.dispatchQueuedWorkCleanupOnly()
+		}
 	} else {
 		d.dispatchQueuedWork()
 	}
@@ -3101,6 +3125,61 @@ func (d *Daemon) pruneStaleBranches() {
 // is released on process death, and dispatchSingleBead's label swap retry logic
 // prevents double-dispatch on the next cycle. The batch_size config (default: 1)
 // limits how many beads are in-flight per heartbeat, reducing the timeout window.
+// countLivePolecatSessions counts polecat worktrees across all known rigs that
+// currently have a live tmux session. The second return value is false when the
+// count could not be established (tmux unreachable), in which case callers must
+// not treat "0 working" as fact.
+func (d *Daemon) countLivePolecatSessions() (int, bool) {
+	sessions, err := d.tmux.ListSessions()
+	if err != nil {
+		return 0, false
+	}
+	live := make(map[string]bool, len(sessions))
+	for _, name := range sessions {
+		live[name] = true
+	}
+
+	count := 0
+	for _, rigName := range d.getKnownRigs() {
+		prefix := session.PrefixFor(rigName)
+		names, err := listPolecatWorktrees(filepath.Join(d.config.TownRoot, rigName, "polecats"))
+		if err != nil {
+			continue // rig has no polecats directory
+		}
+		for _, polecatName := range names {
+			if live[session.PolecatSessionName(prefix, polecatName)] {
+				count++
+			}
+		}
+	}
+	return count, true
+}
+
+// dispatchQueuedWorkCleanupOnly runs the scheduler's queue-hygiene pass without
+// dispatching. Used when polecat dispatch is deferred on pressure.
+//
+// The --cleanup-only flag may not exist in the installed gt binary; an "unknown
+// flag" response is logged and ignored rather than treated as a failure.
+func (d *Daemon) dispatchQueuedWorkCleanupOnly() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gt", "scheduler", "run", "--cleanup-only")
+	setSysProcAttr(cmd)
+	cmd.Dir = d.config.TownRoot
+	cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads")), "GT_DAEMON=1")
+	out, err := cmd.CombinedOutput()
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		d.logger.Printf("Scheduler cleanup-only timed out after 2m")
+	case err != nil && strings.Contains(string(out), "unknown flag"):
+		d.logger.Printf("Scheduler cleanup-only unavailable in this gt build (--cleanup-only unknown flag); skipping queue hygiene")
+	case err != nil:
+		d.logger.Printf("Scheduler cleanup-only failed: %v (output: %s)", err, string(out))
+	case len(out) > 0:
+		d.logger.Printf("Scheduler cleanup-only: %s", string(out))
+	}
+}
+
 func (d *Daemon) dispatchQueuedWork() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()

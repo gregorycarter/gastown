@@ -58,6 +58,11 @@ const (
 	DefaultPressureMemThresholdGB = 0.0
 	DefaultPressureMaxSessions    = 0
 
+	// Hysteresis and minimum-guarantee defaults. Both apply only when the
+	// CPU tier is enabled.
+	DefaultPressureCPUExitRatio       = 0.8
+	DefaultPressureMinWorkingPolecats = 1
+
 	// Patrol handoff guard defaults (gt handoff for deacon/witness/refinery).
 	DefaultPatrolHandoffRSSMB       = 1024
 	DefaultPatrolHandoffMaxAge      = 8 * time.Hour
@@ -444,6 +449,23 @@ func (d *DaemonThresholds) PressureMaxSessionsV() int {
 		return *d.PressureMaxSessions
 	}
 	return DefaultPressureMaxSessions
+}
+
+// PressureCPUExitRatioV returns the configured or default CPU-deferral exit ratio.
+func (d *DaemonThresholds) PressureCPUExitRatioV() float64 {
+	if d != nil && d.PressureCPUExitRatio != nil {
+		return *d.PressureCPUExitRatio
+	}
+	return DefaultPressureCPUExitRatio
+}
+
+// PressureMinWorkingPolecatsV returns the configured or default minimum number
+// of live polecat sessions that pressure deferral must never take us below.
+func (d *DaemonThresholds) PressureMinWorkingPolecatsV() int {
+	if d != nil && d.PressureMinWorkingPolecats != nil {
+		return *d.PressureMinWorkingPolecats
+	}
+	return DefaultPressureMinWorkingPolecats
 }
 
 // PatrolHandoffRSSMBV returns the configured or default patrol handoff RSS

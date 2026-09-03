@@ -378,6 +378,18 @@ type DaemonThresholds struct {
 	// sessions before new non-infrastructure spawns are deferred. Disabled by default (0 = unlimited).
 	PressureMaxSessions *int `json:"pressure_max_sessions,omitempty"`
 
+	// PressureCPUExitRatio is the fraction of PressureCPUThreshold that
+	// load/core must fall below before an engaged CPU deferral clears
+	// (default 0.8). Enter/exit hysteresis stops a host hovering at the
+	// threshold from flipping the gate on every tick.
+	PressureCPUExitRatio *float64 `json:"pressure_cpu_exit_ratio,omitempty"`
+
+	// PressureMinWorkingPolecats is the number of live polecat sessions below
+	// which polecat dispatch is never deferred on pressure (default 1).
+	// A saturated host that has stopped producing work cannot recover by
+	// refusing to start any.
+	PressureMinWorkingPolecats *int `json:"pressure_min_working_polecats,omitempty"`
+
 	// PatrolHandoffRSSMB is the agent-process RSS (in MB) below which a patrol
 	// role's `gt handoff` is treated as unnecessary and skipped (default 1024).
 	// Patrol formulas mandate a handoff every cycle; this guard makes the

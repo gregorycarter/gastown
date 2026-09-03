@@ -8,22 +8,22 @@ import (
 	"github.com/steveyegge/gastown/internal/util"
 )
 
-// loadAverage1Sysctl returns the 1-minute load average via sysctl on macOS.
-func loadAverage1Sysctl() float64 {
+// loadAverage5Sysctl returns the 5-minute load average via sysctl on macOS.
+func loadAverage5Sysctl() float64 {
 	cmd := exec.Command("sysctl", "-n", "vm.loadavg")
 	util.SetDetachedProcessGroup(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return 0
 	}
-	// Output format: "{ 1.23 4.56 7.89 }"
+	// Output format: "{ 1.23 4.56 7.89 }" — field 1 is the 5-minute average.
 	s := strings.TrimSpace(string(out))
 	s = strings.Trim(s, "{ }")
 	fields := strings.Fields(s)
-	if len(fields) < 1 {
+	if len(fields) < 2 {
 		return 0
 	}
-	v, err := strconv.ParseFloat(fields[0], 64)
+	v, err := strconv.ParseFloat(fields[1], 64)
 	if err != nil {
 		return 0
 	}
