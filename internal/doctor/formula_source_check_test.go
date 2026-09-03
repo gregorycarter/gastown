@@ -80,8 +80,10 @@ func TestResolveBeadsRedirect(t *testing.T) {
 		t.Errorf("no redirect file = %q, want empty", got)
 	}
 
+	// Redirect targets are relative to the directory CONTAINING .beads,
+	// matching beads.ResolveBeadsDir — this is the live bridge_town_core shape.
 	target := filepath.Join(base, "rig", "mayor", "rig", ".beads")
-	if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte("../mayor/rig/.beads\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte("mayor/rig/.beads\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if got := resolveBeadsRedirect(beadsDir); got != filepath.Clean(target) {
@@ -104,5 +106,55 @@ func TestFormulaSourceCheckCleanTown(t *testing.T) {
 	res := c.Run(&CheckContext{TownRoot: town})
 	if res.Status != StatusOK {
 		t.Errorf("status = %v (%s), want OK", res.Status, res.Message)
+	}
+}
+
+func TestResolveBeadsRedirectFollowsChain(t *testing.T) {
+	base := t.TempDir()
+	first := filepath.Join(base, "rig", ".beads")
+	second := filepath.Join(base, "rig", "mayor", "rig", ".beads")
+	final := filepath.Join(base, "canonical", ".beads")
+	for _, d := range []string{first, second, final} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(first, "redirect"), []byte("mayor/rig/.beads\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(second, "redirect"), []byte(final+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := resolveBeadsRedirect(first); got != filepath.Clean(final) {
+		t.Errorf("chained redirect = %q, want %q", got, final)
+	}
+}
+
+func TestRegisteredRigNames(t *testing.T) {
+	town := t.TempDir()
+	if got := registeredRigNames(town); got != nil {
+		t.Errorf("missing rigs.json = %v, want nil", got)
+	}
+
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"version":1,"rigs":{"bridge_town_core":{"prefix":"bt"},"alpha":{}}}`
+	if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := registeredRigNames(town)
+	if len(got) != 2 || got[0] != "alpha" || got[1] != "bridge_town_core" {
+		t.Errorf("registered rigs = %v, want [alpha bridge_town_core]", got)
+	}
+
+	// A directory that merely looks like a rig must not be picked up.
+	if err := os.MkdirAll(filepath.Join(town, "events", ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := registeredRigNames(town); len(got) != 2 {
+		t.Errorf("unregistered directory should not appear: %v", got)
 	}
 }

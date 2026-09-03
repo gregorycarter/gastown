@@ -3,6 +3,7 @@ package doctor
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,27 +105,47 @@ func formulaTiersFor(townRoot, rigName string) []formulaTier {
 	return unique
 }
 
+// redirectChainMaxDepth bounds redirect following, matching beads.ResolveBeadsDir.
+const redirectChainMaxDepth = 3
+
 // resolveBeadsRedirect reads a .beads/redirect file and returns the absolute
 // directory it points at, or "" when there is no redirect. This is the
 // directory `bd cook` actually reads formulas from when run with the rig as
 // its working directory.
+//
+// Redirect targets are relative to the PARENT of the .beads directory, not to
+// .beads itself (see beads.ResolveBeadsDir), and may chain. This reimplements
+// that resolution rather than calling ResolveBeadsDir because that function
+// deletes a self-pointing redirect file as a side effect, which a read-only
+// doctor check must not do.
 func resolveBeadsRedirect(beadsDir string) string {
-	data, err := os.ReadFile(filepath.Join(beadsDir, "redirect"))
-	if err != nil {
+	current := filepath.Clean(beadsDir)
+	start := current
+
+	for depth := 0; depth < redirectChainMaxDepth; depth++ {
+		data, err := os.ReadFile(filepath.Join(current, "redirect"))
+		if err != nil {
+			break
+		}
+		target := strings.TrimSpace(string(data))
+		if target == "" {
+			break
+		}
+		if !filepath.IsAbs(target) {
+			// Relative to the directory containing .beads.
+			target = filepath.Join(filepath.Dir(current), target)
+		}
+		target = filepath.Clean(target)
+		if target == current {
+			break // Self-pointing redirect.
+		}
+		current = target
+	}
+
+	if current == start {
 		return ""
 	}
-	target := strings.TrimSpace(string(data))
-	if target == "" {
-		return ""
-	}
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(beadsDir, target)
-	}
-	target = filepath.Clean(target)
-	if target == filepath.Clean(beadsDir) {
-		return ""
-	}
-	return target
+	return current
 }
 
 // formulaVariant is one tier's copy of a formula.
@@ -200,7 +221,7 @@ func (c *FormulaSourceCheck) Run(ctx *CheckContext) *CheckResult {
 
 	rigs := []string{ctx.RigName}
 	if ctx.RigName == "" {
-		rigs = formulaCheckRigNames(ctx.TownRoot)
+		rigs = registeredRigNames(ctx.TownRoot)
 	}
 	if len(rigs) == 0 {
 		rigs = []string{""} // Town-only comparison (pinned vs town).
@@ -229,16 +250,26 @@ func (c *FormulaSourceCheck) Run(ctx *CheckContext) *CheckResult {
 	return result
 }
 
-// formulaCheckRigNames returns the rig names under a town root, reusing the
-// same rig discovery the redirect checks use.
-func formulaCheckRigNames(townRoot string) []string {
-	dirs, err := findRigDirs(townRoot)
+// registeredRigNames returns the rigs registered in mayor/rigs.json.
+//
+// The directory heuristic used elsewhere (findRigDirs) also matches any
+// directory that merely has a .beads or a mayor/rig — events/, tool checkouts —
+// which would make these checks report missing agent beads for things that are
+// not rigs. The registry is the authority on what a rig is.
+func registeredRigNames(townRoot string) []string {
+	data, err := os.ReadFile(filepath.Join(townRoot, "mayor", "rigs.json"))
 	if err != nil {
 		return nil
 	}
-	rigs := make([]string, 0, len(dirs))
-	for _, dir := range dirs {
-		rigs = append(rigs, filepath.Base(dir))
+	var parsed struct {
+		Rigs map[string]json.RawMessage `json:"rigs"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil
+	}
+	rigs := make([]string, 0, len(parsed.Rigs))
+	for name := range parsed.Rigs {
+		rigs = append(rigs, name)
 	}
 	sort.Strings(rigs)
 	return rigs

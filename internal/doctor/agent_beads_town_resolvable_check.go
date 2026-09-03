@@ -54,7 +54,7 @@ func (c *AgentBeadsTownResolvableCheck) Run(ctx *CheckContext) *CheckResult {
 
 	rigNames := []string{ctx.RigName}
 	if ctx.RigName == "" {
-		rigNames = formulaCheckRigNames(ctx.TownRoot)
+		rigNames = registeredRigNames(ctx.TownRoot)
 	}
 
 	var missingInTown []string
