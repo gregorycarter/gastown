@@ -100,6 +100,12 @@ type Daemon struct {
 	// per rig. Only accessed from the heartbeat goroutine - no sync needed.
 	rigHeadWarned map[string]time.Time
 
+	// patrolLastRun records when each patrol's health check last ran, so a
+	// configured daemon.json patrol `interval` is actually honoured instead of
+	// being parsed and ignored.
+	// Only accessed from the heartbeat goroutine - no sync needed.
+	patrolLastRun map[string]time.Time
+
 	// Restart tracking with exponential backoff to prevent crash loops
 	restartTracker *RestartTracker
 
@@ -904,7 +910,9 @@ func (d *Daemon) heartbeat(state *State) {
 	// 1. Ensure Deacon is running (restart if dead)
 	// Check patrol config - can be disabled in mayor/daemon.json
 	if d.isPatrolActive("deacon") {
-		d.ensureDeaconRunning()
+		if d.patrolDue("deacon") {
+			d.ensureDeaconRunning()
+		}
 	} else {
 		d.logger.Printf("Deacon patrol disabled in config, skipping")
 		// Kill leftover deacon/boot sessions from before patrol was disabled.
@@ -930,7 +938,9 @@ func (d *Daemon) heartbeat(state *State) {
 	// 4. Ensure Witnesses are running for all rigs (restart if dead)
 	// Check patrol config - can be disabled in mayor/daemon.json
 	if d.isPatrolActive("witness") {
-		d.ensureWitnessesRunning()
+		if d.patrolDue("witness") {
+			d.ensureWitnessesRunning()
+		}
 	} else {
 		d.logger.Printf("Witness patrol disabled in config, skipping")
 		// Kill leftover witness sessions from before patrol was disabled. (hq-2mstj)
@@ -944,7 +954,9 @@ func (d *Daemon) heartbeat(state *State) {
 		// CPU pressure does not defer the Refinery — it is the merge path, and
 		// deferring it while a CI train saturates the host stalls exactly the
 		// work that ends the load. Memory and session-count tiers still apply.
-		if p := d.checkPressure(constants.RoleRefinery); !p.OK {
+		if !d.patrolDue("refinery") {
+			// Not due yet under the configured daemon.json interval.
+		} else if p := d.checkPressure(constants.RoleRefinery); !p.OK {
 			d.logger.Printf("Deferring refinery spawn: %s", p.Reason)
 		} else {
 			d.ensureRefineriesRunning()
@@ -1435,6 +1447,42 @@ func (d *Daemon) ensureBootRunning() {
 	d.logger.Println("Boot spawned successfully")
 }
 
+// patrolDue reports whether a patrol's health check should run this heartbeat,
+// honouring the optional `interval` in mayor/daemon.json. Without an interval
+// (the default) every heartbeat runs the check, as before.
+//
+// Calling this records the run, so call it exactly once per heartbeat per
+// patrol and only when the patrol is active.
+func (d *Daemon) patrolDue(patrol string) bool {
+	interval := GetPatrolInterval(d.patrolConfig, patrol)
+	if interval <= 0 {
+		return true
+	}
+	if d.patrolLastRun == nil {
+		d.patrolLastRun = make(map[string]time.Time)
+	}
+	if last, ok := d.patrolLastRun[patrol]; ok {
+		if since := time.Since(last); since < interval {
+			d.logger.Printf("%s patrol check not due (%s since last, interval %s)",
+				patrol, since.Round(time.Second), interval)
+			return false
+		}
+	}
+	d.patrolLastRun[patrol] = time.Now()
+	return true
+}
+
+// hookedScanLimit bounds the hooked-bead scan in hasActiveWork. Patrol wisps
+// are skipped, so one row is not enough to tell "only wisps are hooked" from
+// "a polecat holds work".
+const hookedScanLimit = 25
+
+// isWispBeadID reports whether an ID belongs to a molecule wisp rather than a
+// real work bead. Wisp IDs always carry the "-wisp-" infix.
+func isWispBeadID(id string) bool {
+	return strings.Contains(id, "-wisp-")
+}
+
 // hasActiveWork returns true if any bead store has in_progress or hooked beads.
 // These are the only states Boot can meaningfully act on: in_progress work may be
 // stuck, and hooked work is waiting on a polecat that may have died.
@@ -1451,16 +1499,32 @@ func (d *Daemon) hasActiveWork() bool {
 	defer cancel()
 
 	for name, store := range d.beadsStores {
-		for _, rawStatus := range []string{"in_progress"} {
+		// "hooked" counts as active work: a hooked bead is a polecat's work,
+		// and a polecat that dies holding it is exactly what Boot and the
+		// Deacon stale-heartbeat nudge exist to notice. Counting only
+		// in_progress suppressed those nudges for the whole time polecats held
+		// their work (§11h).
+		//
+		// Patrol wisps are excluded: every patrol role always has one hooked,
+		// so counting them would make hasActiveWork permanently true and
+		// defeat the idle guard entirely.
+		for _, rawStatus := range []string{"in_progress", "hooked"} {
 			s := beadsdk.Status(rawStatus)
-			filter := beadsdk.IssueFilter{Status: &s, Limit: 1}
+			limit := 1
+			if rawStatus == "hooked" {
+				limit = hookedScanLimit // need enough rows to see past the wisps
+			}
+			filter := beadsdk.IssueFilter{Status: &s, Limit: limit}
 			issues, err := store.SearchIssues(ctx, "", filter)
 			if err != nil {
 				d.logger.Printf("hasActiveWork: %s/%s query failed: %v — assuming work present",
 					name, rawStatus, err)
 				return true // conservative: don't suppress Boot on query failure
 			}
-			if len(issues) > 0 {
+			for _, issue := range issues {
+				if rawStatus == "hooked" && isWispBeadID(issue.ID) {
+					continue
+				}
 				return true
 			}
 		}

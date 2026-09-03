@@ -134,7 +134,9 @@ type PatrolConfig struct {
 	// Enabled controls whether this patrol runs during heartbeat.
 	Enabled bool `json:"enabled"`
 
-	// Interval is how often to run this patrol (not used yet).
+	// Interval is the minimum time between health checks for this patrol.
+	// Honoured for the deacon, witness and refinery patrols (see
+	// Daemon.patrolDue); empty or unparsable means "every heartbeat".
 	Interval string `json:"interval,omitempty"`
 
 	// Agent is the agent type for this patrol (not used yet).
@@ -382,6 +384,36 @@ func GetPatrolRigs(config *DaemonPatrolConfig, patrol string) []string {
 		}
 	}
 	return nil // All rigs
+}
+
+// GetPatrolInterval returns the configured minimum interval between health
+// checks for a patrol, or 0 when unset or unparsable ("every heartbeat").
+//
+// Only the patrols with a PatrolConfig (deacon, witness, refinery, handler)
+// carry an interval; the dog patrols have their own cadence fields.
+func GetPatrolInterval(config *DaemonPatrolConfig, patrol string) time.Duration {
+	if config == nil || config.Patrols == nil {
+		return 0
+	}
+	var pc *PatrolConfig
+	switch patrol {
+	case constants.RoleRefinery:
+		pc = config.Patrols.Refinery
+	case constants.RoleWitness:
+		pc = config.Patrols.Witness
+	case constants.RoleDeacon:
+		pc = config.Patrols.Deacon
+	case "handler":
+		pc = config.Patrols.Handler
+	}
+	if pc == nil || pc.Interval == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(pc.Interval)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
 }
 
 // loadDisabledPatrolsFromTownSettings loads the disabled_patrols list from
