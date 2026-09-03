@@ -243,6 +243,9 @@ type autoFeedResult struct {
 	Rejected   []autoFeedRejection
 	Enqueued   int
 	OpsWorking int
+	// DirectMode is set when scheduler.max_polecats <= 0, where contexts are
+	// never consumed and feeding the queue would only accumulate them.
+	DirectMode bool
 }
 
 // autoFeedScheduler tops the dispatch queue up to the configured floor from
@@ -272,6 +275,7 @@ func autoFeedScheduler(townRoot string, floorOverride int, dryRun bool) (*autoFe
 	if schedulerCfg.GetMaxPolecats() <= 0 {
 		// Direct dispatch: contexts are never consumed, so feeding the queue
 		// would just accumulate open context beads.
+		result.DirectMode = true
 		return result, nil
 	}
 
@@ -384,6 +388,11 @@ func runSchedulerFeed(cmd *cobra.Command, args []string) error {
 
 	if result.Floor <= 0 {
 		fmt.Println("Auto-feed is off (scheduler.queue_floor=0). Enable with: gt config set scheduler.queue_floor 6")
+		return nil
+	}
+
+	if result.DirectMode {
+		fmt.Println("Auto-feed does nothing in direct dispatch mode (scheduler.max_polecats <= 0).")
 		return nil
 	}
 
