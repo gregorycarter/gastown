@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -420,7 +421,37 @@ type scheduledContextAssessment struct {
 	found          bool
 	blocked        bool
 	blockedUnknown bool
+	blockers       []string
 	ready          bool
+}
+
+// pauseReason explains, in one short phrase, why `gt scheduler list` shows a
+// row as paused. "Scheduled, 0 ready" with no reason is the shape that hid
+// every silent stall; every non-ready row must be able to say why.
+func (a scheduledContextAssessment) pauseReason() string {
+	if a.ready {
+		return ""
+	}
+	if a.fields != nil && a.fields.DispatchFailures >= maxDispatchFailures {
+		return "respawn-limit"
+	}
+	if a.blockedUnknown {
+		return "blocked-unknown (bd blocked query failed)"
+	}
+	if a.blocked {
+		if len(a.blockers) > 0 {
+			return "blocked-by " + strings.Join(a.blockers, ",")
+		}
+		return "blocked-by <unknown>"
+	}
+	if !a.found {
+		return "work bead not found"
+	}
+	assignee := strings.TrimSpace(a.info.Assignee)
+	if assignee == "" {
+		assignee = "<none>"
+	}
+	return fmt.Sprintf("status=%s assignee=%s", a.info.Status, assignee)
 }
 
 func beadsForContextRecord(rec slingContextRecord) *beads.Beads {
@@ -481,11 +512,15 @@ func cleanupStaleContexts(townRoot string) error {
 	return nil
 }
 
-// beadStatusInfo holds batch-fetched bead status, title, and labels.
+// beadStatusInfo holds batch-fetched bead status, title, labels, assignee and
+// priority. Assignee and Priority are what separate a genuinely stalled
+// context from a working one, and what orders the dispatch queue.
 type beadStatusInfo struct {
-	Status string
-	Title  string
-	Labels []string
+	Status   string
+	Title    string
+	Labels   []string
+	Assignee string
+	Priority int
 }
 
 func beadStatusInfoFromBeadInfo(info *beadInfo) beadStatusInfo {
@@ -493,9 +528,10 @@ func beadStatusInfoFromBeadInfo(info *beadInfo) beadStatusInfo {
 		return beadStatusInfo{}
 	}
 	return beadStatusInfo{
-		Status: info.Status,
-		Title:  info.Title,
-		Labels: info.Labels,
+		Status:   info.Status,
+		Title:    info.Title,
+		Labels:   info.Labels,
+		Assignee: info.Assignee,
 	}
 }
 
@@ -523,19 +559,23 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 			continue
 		}
 		var items []struct {
-			ID     string   `json:"id"`
-			Status string   `json:"status"`
-			Title  string   `json:"title"`
-			Labels []string `json:"labels"`
+			ID       string   `json:"id"`
+			Status   string   `json:"status"`
+			Title    string   `json:"title"`
+			Labels   []string `json:"labels"`
+			Assignee string   `json:"assignee"`
+			Priority int      `json:"priority"`
 		}
 		if err := json.Unmarshal(out, &items); err != nil {
 			continue
 		}
 		for _, item := range items {
 			result[item.ID] = beadStatusInfo{
-				Status: item.Status,
-				Title:  item.Title,
-				Labels: item.Labels,
+				Status:   item.Status,
+				Title:    item.Title,
+				Labels:   item.Labels,
+				Assignee: item.Assignee,
+				Priority: item.Priority,
 			}
 		}
 	}
@@ -621,7 +661,11 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 	})
 
 	workBeadInfo := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
-	blockedWorkIDs, blockedUnknownIDs, blockedErr := listBlockedWorkBeadIDStates(townRoot, workBeadIDs)
+	blockers, blockedUnknownIDs, blockedErr := listBlockedWorkBeadBlockersWithRunner(townRoot, workBeadIDs, runBlockedWorkQuery)
+	blockedWorkIDs := make(map[string]bool, len(blockers))
+	for id := range blockers {
+		blockedWorkIDs[id] = true
+	}
 
 	seenWork := make(map[string]bool)
 	assessments := make([]scheduledContextAssessment, 0, len(candidates))
@@ -637,11 +681,40 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 		candidate.found = found
 		candidate.blocked = blockedWorkIDs[workBeadID]
 		candidate.blockedUnknown = blockedUnknownIDs[workBeadID]
+		candidate.blockers = blockers[workBeadID]
 		candidate.ready = isScheduledWorkBeadReady(workBeadID, info, found, blockedWorkIDs, blockedUnknownIDs)
 		assessments = append(assessments, candidate)
 	}
 
+	// Re-order by work-bead priority now that `bd show` has been read. The
+	// first sort above only had EnqueuedAt, which is what dedup needs to be
+	// deterministic; dispatch order is a different question, and a P0 must
+	// not wait behind a P3 that happened to be enqueued first.
+	sortScheduledContextAssessments(assessments)
+
 	return assessments, blockedErr
+}
+
+// sortScheduledContextAssessments orders the queue for dispatch and display:
+// priority ascending, then oldest enqueued first, then context ID.
+func sortScheduledContextAssessments(assessments []scheduledContextAssessment) {
+	sort.SliceStable(assessments, func(i, j int) bool {
+		a, b := assessments[i], assessments[j]
+		if a.info.Priority != b.info.Priority {
+			return a.info.Priority < b.info.Priority
+		}
+		ae, be := "", ""
+		if a.fields != nil {
+			ae = a.fields.EnqueuedAt
+		}
+		if b.fields != nil {
+			be = b.fields.EnqueuedAt
+		}
+		if ae != be {
+			return ae < be
+		}
+		return a.context.issue.ID < b.context.issue.ID
+	})
 }
 
 // getReadySlingContexts queries for sling context beads whose work beads are ready.
@@ -883,7 +956,20 @@ func listBlockedWorkBeadIDStates(townRoot string, workBeadIDs []string) (map[str
 }
 
 func listBlockedWorkBeadIDStatesWithRunner(townRoot string, workBeadIDs []string, query blockedWorkQuery) (map[string]bool, map[string]bool, error) {
-	blockedIDs := make(map[string]bool)
+	blockers, blockedUnknownIDs, err := listBlockedWorkBeadBlockersWithRunner(townRoot, workBeadIDs, query)
+	blockedIDs := make(map[string]bool, len(blockers))
+	for id := range blockers {
+		blockedIDs[id] = true
+	}
+	return blockedIDs, blockedUnknownIDs, err
+}
+
+// listBlockedWorkBeadBlockersWithRunner returns, for each blocked work bead,
+// the IDs that block it. The blocker list is what lets `gt scheduler list`
+// name the blocker and lets the orphan-wisp sweep recognise a molecule wisp
+// as the only thing in the way.
+func listBlockedWorkBeadBlockersWithRunner(townRoot string, workBeadIDs []string, query blockedWorkQuery) (map[string][]string, map[string]bool, error) {
+	blockers := make(map[string][]string)
 	blockedUnknownIDs := make(map[string]bool)
 	idsByBeadsDir := groupBeadIDsByResolvedBeadsDir(townRoot, workBeadIDs)
 	failCount := 0
@@ -899,7 +985,8 @@ func listBlockedWorkBeadIDStatesWithRunner(townRoot string, workBeadIDs []string
 			continue
 		}
 		var blockedBeads []struct {
-			ID string `json:"id"`
+			ID        string   `json:"id"`
+			BlockedBy []string `json:"blocked_by"`
 		}
 		if err := json.Unmarshal(blockedOut, &blockedBeads); err != nil {
 			failCount++
@@ -910,13 +997,15 @@ func listBlockedWorkBeadIDStatesWithRunner(townRoot string, workBeadIDs []string
 			continue
 		}
 		for _, b := range blockedBeads {
-			blockedIDs[b.ID] = true
+			if _, seen := blockers[b.ID]; !seen {
+				blockers[b.ID] = b.BlockedBy
+			}
 		}
 	}
 	if failCount == len(idsByBeadsDir) && failCount > 0 {
-		return blockedIDs, blockedUnknownIDs, fmt.Errorf("all %d bd blocked queries failed (last: %w)", failCount, lastErr)
+		return blockers, blockedUnknownIDs, fmt.Errorf("all %d bd blocked queries failed (last: %w)", failCount, lastErr)
 	}
-	return blockedIDs, blockedUnknownIDs, nil
+	return blockers, blockedUnknownIDs, nil
 }
 
 func markBlockedUnknown(blockedUnknownIDs map[string]bool, ids []string) {
@@ -931,5 +1020,20 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 	if !found || blockedWorkIDs[workBeadID] || blockedUnknownIDs[workBeadID] {
 		return false
 	}
-	return info.Status == "open"
+	if info.Status == "open" {
+		return true
+	}
+	// An in_progress bead with nobody on it is not work in flight — it is a
+	// stall. cleanupStaleContexts deliberately keeps such contexts open
+	// (the polecat may still be alive), so without this the context sat in
+	// the queue as "scheduled, 0 ready" forever after a Mayor claim, a
+	// `bd update --claim`, or a polecat that died mid-bead.
+	if info.Status == "in_progress" {
+		assignee := strings.TrimSpace(info.Assignee)
+		if assignee == "" {
+			return true
+		}
+		return isHookedAgentDeadFn(assignee)
+	}
+	return false
 }

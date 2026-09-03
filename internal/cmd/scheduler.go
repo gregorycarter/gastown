@@ -130,6 +130,9 @@ type scheduledBeadInfo struct {
 	Status    string `json:"status"`
 	TargetRig string `json:"target_rig"`
 	Blocked   bool   `json:"blocked,omitempty"`
+	// Reason explains why a blocked row is not dispatchable:
+	// "blocked-by <ids>", "status=<s> assignee=<a>", or "respawn-limit".
+	Reason string `json:"reason,omitempty"`
 }
 
 func runSchedulerStatus(cmd *cobra.Command, args []string) error {
@@ -254,6 +257,9 @@ func runSchedulerList(cmd *cobra.Command, args []string) error {
 				indicator = "⏸"
 			}
 			fmt.Printf("    %s %s: %s\n", indicator, b.ID, b.Title)
+			if b.Blocked && b.Reason != "" {
+				fmt.Printf("        %s %s\n", style.Dim.Render("why:"), b.Reason)
+			}
 		}
 		fmt.Println()
 	}
@@ -400,6 +406,7 @@ func scheduledBeadInfosFromAssessments(assessments []scheduledContextAssessment)
 		if !ok {
 			continue
 		}
+		bead.Reason = assessment.pauseReason()
 		result = append(result, bead)
 	}
 
