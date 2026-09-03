@@ -602,10 +602,12 @@ func beadStatusInfoFromBeadInfo(info *beadInfo) beadStatusInfo {
 		return beadStatusInfo{}
 	}
 	return beadStatusInfo{
-		Status:   info.Status,
-		Title:    info.Title,
-		Labels:   info.Labels,
-		Assignee: info.Assignee,
+		Status:    info.Status,
+		Title:     info.Title,
+		Labels:    info.Labels,
+		Assignee:  info.Assignee,
+		Priority:  info.Priority,
+		CreatedAt: info.CreatedAt,
 	}
 }
 
