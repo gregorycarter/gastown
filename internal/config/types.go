@@ -321,6 +321,14 @@ type DaemonThresholds struct {
 	// unlike dogs, they should not persist when idle.
 	PolecatIdleSessionTimeout string `json:"polecat_idle_session_timeout,omitempty"`
 
+	// PolecatIdleSessionTimeoutPendingMR is the idle timeout for a polecat
+	// whose agent bead still points at a non-terminal merge request
+	// (default "60m"). A rejected MR is delivered by nudging the polecat's
+	// session; reaping it at the normal 15m threshold means the rejection
+	// arrives at a dead session and the work is stranded. Only applies while
+	// the MR is open — a terminal MR falls back to the normal timeout.
+	PolecatIdleSessionTimeoutPendingMR string `json:"polecat_idle_session_timeout_pending_mr,omitempty"`
+
 	// PolecatSelfTerminate controls whether polecats kill their own session after
 	// gt done completes (default false). When true, polecats terminate 3 seconds
 	// after work submission instead of transitioning to IDLE. This gives fresh

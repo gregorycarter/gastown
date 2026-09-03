@@ -807,6 +807,7 @@ type AgentBeadInfo struct {
 	HookBead   string // From DB column (hook_bead)
 	RoleType   string // Parsed from description: role_type
 	Rig        string // Parsed from description: rig
+	ActiveMR   string // Parsed from description: active_mr
 	LastUpdate string `json:"updated_at"`
 	// Note: RoleBead field removed - role definitions are now config-based
 }
@@ -879,6 +880,7 @@ func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
 	if fields != nil {
 		info.RoleType = fields.RoleType
 		info.Rig = fields.Rig
+		info.ActiveMR = fields.ActiveMR
 	}
 
 	info.State = beads.ResolveAgentState(issue.Description, issue.AgentState)

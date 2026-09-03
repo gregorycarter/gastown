@@ -39,6 +39,7 @@ const (
 	DefaultMassDeathThreshold              = 3
 	DefaultDogIdleSessionTimeout           = 1 * time.Hour
 	DefaultPolecatIdleSessionTimeout       = 15 * time.Minute
+	DefaultPolecatIdleSessionTimeoutPendMR = 60 * time.Minute
 	DefaultDogIdleRemoveTimeout            = 4 * time.Hour
 	DefaultStaleWorkingTimeout             = 2 * time.Hour
 	DefaultMaxDogPoolSize                  = 4
@@ -320,6 +321,15 @@ func (d *DaemonThresholds) PolecatIdleSessionTimeoutD() time.Duration {
 		return ParseDurationOrDefault(d.PolecatIdleSessionTimeout, DefaultPolecatIdleSessionTimeout)
 	}
 	return DefaultPolecatIdleSessionTimeout
+}
+
+// PolecatIdleSessionTimeoutPendingMRD returns the configured or default idle
+// timeout for a polecat holding a non-terminal merge request.
+func (d *DaemonThresholds) PolecatIdleSessionTimeoutPendingMRD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.PolecatIdleSessionTimeoutPendingMR, DefaultPolecatIdleSessionTimeoutPendMR)
+	}
+	return DefaultPolecatIdleSessionTimeoutPendMR
 }
 
 // DogIdleRemoveTimeoutD returns the configured or default dog idle remove timeout.

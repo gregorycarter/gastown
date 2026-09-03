@@ -2969,6 +2969,14 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 		return false // Heartbeat is fresh — polecat is active
 	}
 
+	// A polecat holding an open MR gets a longer leash. Its session is where
+	// a rejection is delivered (Manager.notifyWorkerRejected nudges it), so
+	// reaping at the normal 15m threshold sends the rejection to a dead
+	// session and strands the work.
+	if d.holdForPendingMR(rigName, polecatName, staleDuration) {
+		return false
+	}
+
 	state := hb.EffectiveState()
 
 	// Explicitly idle or exiting — safe to reap
@@ -3031,6 +3039,54 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 		return d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, "working-no-hook")
 	}
 	return false
+}
+
+// holdForPendingMR reports whether an otherwise-idle polecat must be kept
+// alive because its agent bead still points at a non-terminal merge request.
+//
+// Only consulted for polecats already past the normal idle threshold, so the
+// agent-bead lookup is rare. Fails open: a lookup error or a terminal MR
+// means the normal timeout applies.
+func (d *Daemon) holdForPendingMR(rigName, polecatName string, staleDuration time.Duration) bool {
+	pendingTimeout := d.loadOperationalConfig().GetDaemonConfig().PolecatIdleSessionTimeoutPendingMRD()
+	if staleDuration >= pendingTimeout {
+		return false
+	}
+
+	prefix := beads.GetPrefixForRig(d.config.TownRoot, rigName)
+	info, err := d.getAgentBeadInfo(beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName))
+	if err != nil || info == nil || info.ActiveMR == "" {
+		return false
+	}
+	if d.isBeadTerminal(info.ActiveMR) {
+		return false
+	}
+
+	d.logger.Printf("Idle polecat %s/%s holds pending MR %s — holding session until idle %v (threshold %v)",
+		rigName, polecatName, info.ActiveMR, pendingTimeout, staleDuration.Truncate(time.Second))
+	return true
+}
+
+// isBeadTerminal reports whether a bead is closed or tombstoned. Unlike
+// isBeadClosed it also treats tombstones as terminal, and an unreadable bead
+// as non-terminal.
+func (d *Daemon) isBeadTerminal(beadID string) bool {
+	cmd := exec.Command(d.bdPath, "show", beadID, "--json") //nolint:gosec // G204: args are constructed internally
+	setSysProcAttr(cmd)
+	cmd.Dir = d.config.TownRoot
+	cmd.Env = bdReadOnlyRoutingEnv(d.config.TownRoot)
+
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	var issues []struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(output, &issues); err != nil || len(issues) == 0 {
+		return false
+	}
+	return beads.IssueStatus(issues[0].Status).IsTerminal()
 }
 
 // killIdlePolecat terminates an idle polecat session and cleans up.
