@@ -1503,6 +1503,29 @@ func (b *Beads) Ready() ([]*Issue, error) {
 	return issues, nil
 }
 
+// ReadyLimited returns ready issues, capped at limit rows.
+// limit <= 0 falls back to Ready() (bd's own default cap).
+func (b *Beads) ReadyLimited(limit int) ([]*Issue, error) {
+	if limit <= 0 {
+		return b.Ready()
+	}
+	if b.store != nil {
+		return b.storeReadyWithFilter(beadsdk.WorkFilter{Limit: limit})
+	}
+
+	out, err := b.run("ready", "--json", "-n", strconv.Itoa(limit))
+	if err != nil {
+		return nil, err
+	}
+
+	var issues []*Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd ready output: %w", err)
+	}
+
+	return issues, nil
+}
+
 // ReadyForMol returns ready steps within a specific molecule.
 // Delegates to bd ready --mol which uses beads' canonical blocking semantics
 // (blocked_issues_cache), handling all blocking types, transitive propagation,

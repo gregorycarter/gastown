@@ -34,6 +34,7 @@ Subcommands:
   gt scheduler status    # Show scheduler state
   gt scheduler list      # List all scheduled beads
   gt scheduler run       # Manual dispatch trigger
+  gt scheduler feed      # Top the queue up from bd ready
   gt scheduler pause     # Pause dispatch
   gt scheduler resume    # Resume dispatch
   gt scheduler clear     # Remove beads from scheduler
@@ -106,6 +107,10 @@ func init() {
 	schedulerRunCmd.Flags().IntVar(&schedulerRunBatch, "batch", 0, "Override batch size (0 = use config)")
 	schedulerRunCmd.Flags().BoolVar(&schedulerRunDryRun, "dry-run", false, "Preview what would dispatch")
 
+	// Feed flags
+	schedulerFeedCmd.Flags().IntVar(&schedulerFeedFloor, "floor", 0, "Override scheduler.queue_floor for this run")
+	schedulerFeedCmd.Flags().BoolVar(&schedulerFeedDryRun, "dry-run", false, "Print what would be enqueued; change nothing")
+
 	// Build command tree (flat — no intermediary "capacity" level)
 	schedulerCmd.AddCommand(schedulerStatusCmd)
 	schedulerCmd.AddCommand(schedulerListCmd)
@@ -113,6 +118,7 @@ func init() {
 	schedulerCmd.AddCommand(schedulerResumeCmd)
 	schedulerCmd.AddCommand(schedulerClearCmd)
 	schedulerCmd.AddCommand(schedulerRunCmd)
+	schedulerCmd.AddCommand(schedulerFeedCmd)
 
 	rootCmd.AddCommand(schedulerCmd)
 }

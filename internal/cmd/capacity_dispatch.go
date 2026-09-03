@@ -179,6 +179,14 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	}
 	defer func() { _ = fileLock.Unlock() }()
 
+	// Supply step: top the queue up from `bd ready` before planning, so
+	// dispatch never waits for a Mayor session to hand-pick work. No-op
+	// unless scheduler.queue_floor > 0. Failure here is non-fatal — a
+	// dispatch of what is already queued beats no dispatch at all.
+	if _, feedErr := autoFeedScheduler(townRoot, 0, false); feedErr != nil {
+		fmt.Fprintf(os.Stderr, "%s scheduler auto-feed failed: %v\n", style.Warning.Render("⚠"), feedErr)
+	}
+
 	dispatchPlan, err := buildSchedulerDispatchPlan(townRoot, batchOverride, true)
 	if err != nil {
 		return 0, fmt.Errorf("planning dispatch: %w", err)

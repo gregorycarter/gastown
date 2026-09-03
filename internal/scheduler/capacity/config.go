@@ -10,9 +10,10 @@ import "time"
 // API rate limits, memory, and CPU are shared resources across all rigs.
 //
 // Behavior is driven entirely by MaxPolecats:
-//   -1 (default): direct dispatch — gt sling works as before, near-zero overhead
-//    0:           direct dispatch (same as -1)
-//    N > 0:       deferred dispatch — labels/metadata applied, daemon dispatches
+//
+//	-1 (default): direct dispatch — gt sling works as before, near-zero overhead
+//	 0:           direct dispatch (same as -1)
+//	 N > 0:       deferred dispatch — labels/metadata applied, daemon dispatches
 type SchedulerConfig struct {
 	// MaxPolecats is the max concurrent polecats across ALL rigs.
 	// Includes both scheduler-dispatched and directly-slung polecats.
@@ -28,7 +29,63 @@ type SchedulerConfig struct {
 	// SpawnDelay is the delay between spawns to prevent Dolt lock contention.
 	// Default: "0s".
 	SpawnDelay string `json:"spawn_delay,omitempty"`
+
+	// QueueFloor is the minimum number of ready sling contexts the auto-feeder
+	// keeps in the queue. 0 (default) disables auto-feed entirely, preserving
+	// the historical behaviour where only `gt sling` and the convoy feeder
+	// enqueue work. N > 0 makes the daemon top the queue up from `bd ready`
+	// on every dispatch tick.
+	QueueFloor *int `json:"queue_floor,omitempty"`
+
+	// AutoFeedLabels is an allow-list of labels for auto-feed candidates.
+	// Empty (default) means any label is acceptable.
+	AutoFeedLabels []string `json:"autofeed_labels,omitempty"`
+
+	// AutoFeedExcludeLabels is a deny-list of labels. A ready bead carrying
+	// any of these is never auto-fed. nil means "use the defaults"; an
+	// explicitly empty JSON array disables exclusion.
+	AutoFeedExcludeLabels []string `json:"autofeed_exclude_labels,omitempty"`
+
+	// AutoFeedMaxOpsSlots caps how many currently-working polecats may be on
+	// ops-labelled beads (the exclude list plus ci-train-failure, watchdog,
+	// ci). Product work is what the factory exists for; ops work must not
+	// take every slot. P0/P1 beads bypass the cap. Default 1.
+	AutoFeedMaxOpsSlots *int `json:"autofeed_max_ops_slots,omitempty"`
 }
+
+// DefaultAutoFeedExcludeLabels are labels that mark work the auto-feeder must
+// never dispatch on its own: operator dispositions, control-plane/policy
+// changes, and the agent-lifecycle roles. Kept in sync with the rig board's
+// OPS_LABELS so the board and the feeder agree on what "dispatchable product"
+// means.
+var DefaultAutoFeedExcludeLabels = []string{
+	"deep-dive",
+	"needs-operator",
+	"needs-operator-rollout",
+	"live-validation",
+	"gt-fork",
+	"control-plane",
+	"policy",
+	"patrol",
+	"refinery",
+	"witness",
+}
+
+// OpsLabels are labels that mark a bead as operations work rather than
+// product work. The auto-feeder limits how many slots these may occupy
+// concurrently (AutoFeedMaxOpsSlots).
+var OpsLabels = func() []string {
+	labels := make([]string, 0, len(DefaultAutoFeedExcludeLabels)+3)
+	labels = append(labels, DefaultAutoFeedExcludeLabels...)
+	return append(labels, "ci-train-failure", "watchdog", "ci")
+}()
+
+// DefaultQueueFloor is the auto-feed floor when unset: 0 = feature off.
+const DefaultQueueFloor = 0
+
+// DefaultAutoFeedMaxOpsSlots is the default cap on concurrently-working
+// ops-labelled beads chosen by the auto-feeder.
+const DefaultAutoFeedMaxOpsSlots = 1
 
 // DefaultSchedulerConfig returns a SchedulerConfig with sensible defaults.
 // MaxPolecats=-1 means direct dispatch (no scheduler overhead).
@@ -56,6 +113,47 @@ func (c *SchedulerConfig) GetBatchSize() int {
 		return 1
 	}
 	return *c.BatchSize
+}
+
+// GetQueueFloor returns QueueFloor or the default (0, auto-feed off).
+// Negative values are clamped to 0.
+func (c *SchedulerConfig) GetQueueFloor() int {
+	if c == nil || c.QueueFloor == nil {
+		return DefaultQueueFloor
+	}
+	if *c.QueueFloor < 0 {
+		return 0
+	}
+	return *c.QueueFloor
+}
+
+// GetAutoFeedLabels returns the auto-feed allow-list (nil = allow any label).
+func (c *SchedulerConfig) GetAutoFeedLabels() []string {
+	if c == nil {
+		return nil
+	}
+	return c.AutoFeedLabels
+}
+
+// GetAutoFeedExcludeLabels returns the auto-feed deny-list. An unset field
+// yields the defaults; an explicitly empty list disables exclusion.
+func (c *SchedulerConfig) GetAutoFeedExcludeLabels() []string {
+	if c == nil || c.AutoFeedExcludeLabels == nil {
+		return DefaultAutoFeedExcludeLabels
+	}
+	return c.AutoFeedExcludeLabels
+}
+
+// GetAutoFeedMaxOpsSlots returns the ops-slot cap or the default (1).
+// Negative values are clamped to 0 (no ops work auto-fed).
+func (c *SchedulerConfig) GetAutoFeedMaxOpsSlots() int {
+	if c == nil || c.AutoFeedMaxOpsSlots == nil {
+		return DefaultAutoFeedMaxOpsSlots
+	}
+	if *c.AutoFeedMaxOpsSlots < 0 {
+		return 0
+	}
+	return *c.AutoFeedMaxOpsSlots
 }
 
 // GetSpawnDelay returns SpawnDelay as a duration, defaulting to 0s.
