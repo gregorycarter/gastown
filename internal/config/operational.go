@@ -20,6 +20,7 @@ const (
 	DefaultHungSessionThreshold    = 30 * time.Minute
 	DefaultStartupNudgeVerifyDelay = 25 * time.Second
 	DefaultStartupNudgeMaxRetries  = 2
+	DefaultMinHandoffCooldown      = 2 * time.Minute
 )
 
 // Nudge defaults.
@@ -56,6 +57,11 @@ const (
 	DefaultPressureCPUThreshold   = 0.0
 	DefaultPressureMemThresholdGB = 0.0
 	DefaultPressureMaxSessions    = 0
+
+	// Patrol handoff guard defaults (gt handoff for deacon/witness/refinery).
+	DefaultPatrolHandoffRSSMB       = 1024
+	DefaultPatrolHandoffMaxAge      = 8 * time.Hour
+	DefaultPatrolHandoffMinInterval = 20 * time.Minute
 )
 
 // Deacon defaults.
@@ -209,6 +215,14 @@ func (s *SessionThresholds) StartupNudgeMaxRetriesV() int {
 		return *s.StartupNudgeMaxRetries
 	}
 	return DefaultStartupNudgeMaxRetries
+}
+
+// MinHandoffCooldownD returns the configured or default minimum handoff cooldown.
+func (s *SessionThresholds) MinHandoffCooldownD() time.Duration {
+	if s != nil {
+		return ParseDurationOrDefault(s.MinHandoffCooldown, DefaultMinHandoffCooldown)
+	}
+	return DefaultMinHandoffCooldown
 }
 
 // --- Nudge accessors ---
@@ -425,6 +439,33 @@ func (d *DaemonThresholds) PressureMaxSessionsV() int {
 		return *d.PressureMaxSessions
 	}
 	return DefaultPressureMaxSessions
+}
+
+// PatrolHandoffRSSMBV returns the configured or default patrol handoff RSS
+// ceiling in MB. A patrol agent whose RSS is below this is considered to have
+// plenty of context left.
+func (d *DaemonThresholds) PatrolHandoffRSSMBV() int {
+	if d != nil && d.PatrolHandoffRSSMB != nil {
+		return *d.PatrolHandoffRSSMB
+	}
+	return DefaultPatrolHandoffRSSMB
+}
+
+// PatrolHandoffMaxAgeD returns the configured or default patrol handoff session-age ceiling.
+func (d *DaemonThresholds) PatrolHandoffMaxAgeD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.PatrolHandoffMaxAge, DefaultPatrolHandoffMaxAge)
+	}
+	return DefaultPatrolHandoffMaxAge
+}
+
+// PatrolHandoffMinIntervalD returns the configured or default minimum interval
+// between handoffs for patrol roles (deacon, witness, refinery).
+func (d *DaemonThresholds) PatrolHandoffMinIntervalD() time.Duration {
+	if d != nil {
+		return ParseDurationOrDefault(d.PatrolHandoffMinInterval, DefaultPatrolHandoffMinInterval)
+	}
+	return DefaultPatrolHandoffMinInterval
 }
 
 // --- Deacon accessors ---

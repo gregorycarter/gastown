@@ -275,6 +275,11 @@ type SessionThresholds struct {
 
 	// StartupNudgeMaxRetries is max retries for startup nudge (default 3).
 	StartupNudgeMaxRetries *int `json:"startup_nudge_max_retries,omitempty"`
+
+	// MinHandoffCooldown is the minimum time between handoffs for the same
+	// component (default "2m"). Patrol roles use
+	// operational.daemon.patrol_handoff_min_interval instead.
+	MinHandoffCooldown string `json:"min_handoff_cooldown,omitempty"`
 }
 
 // NudgeThresholds configures nudge queue and delivery timeouts.
@@ -372,6 +377,22 @@ type DaemonThresholds struct {
 	// PressureMaxSessions is the maximum number of concurrent agent tmux
 	// sessions before new non-infrastructure spawns are deferred. Disabled by default (0 = unlimited).
 	PressureMaxSessions *int `json:"pressure_max_sessions,omitempty"`
+
+	// PatrolHandoffRSSMB is the agent-process RSS (in MB) below which a patrol
+	// role's `gt handoff` is treated as unnecessary and skipped (default 1024).
+	// Patrol formulas mandate a handoff every cycle; this guard makes the
+	// decision mechanical instead of an LLM judgement call.
+	PatrolHandoffRSSMB *int `json:"patrol_handoff_rss_mb,omitempty"`
+
+	// PatrolHandoffMaxAge is the session age below which a patrol role's
+	// `gt handoff` is skipped (default "8h"). Both this and
+	// PatrolHandoffRSSMB must be under threshold for a skip.
+	PatrolHandoffMaxAge string `json:"patrol_handoff_max_age,omitempty"`
+
+	// PatrolHandoffMinInterval is the minimum time between handoffs for
+	// patrol roles (default "20m"). Non-patrol roles use
+	// operational.session.min_handoff_cooldown.
+	PatrolHandoffMinInterval string `json:"patrol_handoff_min_interval,omitempty"`
 }
 
 // DeaconThresholds configures deacon health-check and dispatch thresholds.
