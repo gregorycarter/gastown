@@ -145,3 +145,10 @@ func TestSortScheduledContextAssessments(t *testing.T) {
 		}
 	}
 }
+
+func TestScheduledWorkBeadReady_AwaitingMergeHoldIsNotReady(t *testing.T) {
+	info := beadStatusInfo{Status: "in_progress", Assignee: "", Labels: []string{"awaiting-merge:bt-wisp-abc12"}}
+	if isScheduledWorkBeadReady("bt-1", info, true, nil, nil) {
+		t.Fatal("a bead held for merge (in_progress, unassigned, awaiting-merge:) must not be re-dispatched")
+	}
+}

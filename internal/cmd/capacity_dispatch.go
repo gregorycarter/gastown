@@ -1181,6 +1181,14 @@ func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool
 	// the queue as "scheduled, 0 ready" forever after a Mayor claim, a
 	// `bd update --claim`, or a polecat that died mid-bead.
 	if info.Status == "in_progress" {
+		// close_on_merge holds a submitted bead as in_progress + unassigned +
+		// awaiting-merge:<mr> until the Refinery lands it. That is work in
+		// flight, not a stall: never re-dispatch it while the MR is pending.
+		for _, l := range info.Labels {
+			if strings.HasPrefix(l, beads.AwaitingMergeLabelPrefix) {
+				return false
+			}
+		}
 		assignee := strings.TrimSpace(info.Assignee)
 		if assignee == "" {
 			return true
