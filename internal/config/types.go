@@ -110,16 +110,13 @@ type TownSettings struct {
 	// Added for hq-x0v7v.
 	Polecat *PolecatConfig `json:"polecat,omitempty"`
 
-	// Workflow configures town-level work lifecycle behaviour.
-	// workflow.close_on_merge gates the close-on-landed lifecycle (fork).
-	Workflow *TownWorkflowConfig `json:"workflow,omitempty"`
-
 	// Operational configures operational thresholds (timeouts, retries, intervals).
 	// These were previously hardcoded as Go constants throughout the codebase.
 	// All values are optional — omitted values use compiled-in defaults.
 	Operational *OperationalConfig `json:"operational,omitempty"`
 
-	// Workflow holds town-level workflow settings (currently formulas_dir).
+	// Workflow holds town-level workflow settings: formulas_dir (pinned formula
+	// source) and close_on_merge (close-on-landed lifecycle) — both fork additions.
 	Workflow *WorkflowConfig `json:"workflow,omitempty"`
 
 	// DisabledPatrols lists patrol names to disable at the town level.
@@ -733,6 +730,10 @@ type WorkflowConfig struct {
 	// lands in exactly one place. Empty means the historical behaviour:
 	// rig .beads/formulas, then town .beads/formulas, then embedded.
 	FormulasDir string `json:"formulas_dir,omitempty"`
+
+	// CloseOnMerge gates the close-on-landed lifecycle (fork, workflow.close_on_merge).
+	// Pointer so an absent key means "use DefaultCloseOnMerge".
+	CloseOnMerge *bool `json:"close_on_merge,omitempty"`
 }
 
 // RigSettings represents per-rig behavioral configuration (settings/config.json).

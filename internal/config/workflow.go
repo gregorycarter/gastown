@@ -16,12 +16,10 @@ import "sync"
 // See mayor/GAS_TOWN_DEV_CYCLE_REVIEW_2026-09-02.md item 6 (hq-19pxc, hq-tx4md).
 const DefaultCloseOnMerge = true
 
-// TownWorkflowConfig holds town-level workflow lifecycle settings.
-type TownWorkflowConfig struct {
-	// CloseOnMerge gates the close-on-landed lifecycle. Pointer so an absent
-	// key is distinguishable from an explicit false.
-	CloseOnMerge *bool `json:"close_on_merge,omitempty"`
-}
+// TownWorkflowConfig is the town-level workflow settings block; it is the same
+// type as WorkflowConfig (which also carries formulas_dir) so one JSON object
+// serves both fork additions.
+type TownWorkflowConfig = WorkflowConfig
 
 // GetCloseOnMerge returns the configured value or DefaultCloseOnMerge.
 func (c *TownWorkflowConfig) GetCloseOnMerge() bool {
