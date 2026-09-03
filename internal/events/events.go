@@ -63,6 +63,10 @@ const (
 	TypeEscalationClosed = "escalation_closed"
 	TypePatrolComplete   = "patrol_complete"
 
+	// TypePatrolParkedRestart records the daemon restarting a patrol session
+	// whose heartbeat: label stopped advancing while it sat idle at its prompt.
+	TypePatrolParkedRestart = "patrol_parked_restart"
+
 	// Merge queue events (emitted by refinery)
 	TypeMergeStarted = "merge_started"
 	TypeMerged       = "merged"

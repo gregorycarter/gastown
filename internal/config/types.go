@@ -393,6 +393,12 @@ type DaemonThresholds struct {
 	// patrol roles (default "20m"). Non-patrol roles use
 	// operational.session.min_handoff_cooldown.
 	PatrolHandoffMinInterval string `json:"patrol_handoff_min_interval,omitempty"`
+
+	// PatrolParkedAfter is the per-role heartbeat age after which an idle
+	// patrol agent is considered parked (its await loop is not running).
+	// Keys: "witness" (default "15m"), "deacon" (default "45m"),
+	// "refinery" (default "60m"). A role set to "0s" disables its detector.
+	PatrolParkedAfter map[string]string `json:"patrol_parked_after,omitempty"`
 }
 
 // DeaconThresholds configures deacon health-check and dispatch thresholds.

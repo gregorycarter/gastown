@@ -945,6 +945,13 @@ func (d *Daemon) heartbeat(state *State) {
 	// 6. Ensure Mayor is running (restart if dead)
 	d.ensureMayorRunning()
 
+	// 6.4. Patrol parking detection: a patrol session can be alive, its agent
+	// process alive, and its patrol loop dead — the agent answered a nudge and
+	// stopped at its prompt instead of re-entering await. The heartbeat: label
+	// the await-* steps maintain is the only evidence, and nothing else reads
+	// it. Nudge once, restart if the nudge does not take. (hq-5uqry)
+	d.checkPatrolParking(state)
+
 	// 6.5. Handle Dog lifecycle: cleanup stuck dogs and dispatch plugins
 	// Pressure-gated: dog dispatch spawns new agent sessions.
 	if d.isPatrolActive("handler") {

@@ -62,6 +62,11 @@ const (
 	DefaultPatrolHandoffRSSMB       = 1024
 	DefaultPatrolHandoffMaxAge      = 8 * time.Hour
 	DefaultPatrolHandoffMinInterval = 20 * time.Minute
+
+	// Patrol parking detector defaults, ~3x each role's backoff-max.
+	DefaultPatrolParkedAfterWitness  = 15 * time.Minute
+	DefaultPatrolParkedAfterDeacon   = 45 * time.Minute
+	DefaultPatrolParkedAfterRefinery = 60 * time.Minute
 )
 
 // Deacon defaults.
@@ -466,6 +471,35 @@ func (d *DaemonThresholds) PatrolHandoffMinIntervalD() time.Duration {
 		return ParseDurationOrDefault(d.PatrolHandoffMinInterval, DefaultPatrolHandoffMinInterval)
 	}
 	return DefaultPatrolHandoffMinInterval
+}
+
+// patrolParkedAfterD reads one role's parked threshold from the
+// patrol_parked_after map, falling back to the compiled-in default.
+// An explicit "0" (or "0s") disables the detector for that role.
+func (d *DaemonThresholds) patrolParkedAfterD(role string, fallback time.Duration) time.Duration {
+	if d == nil || d.PatrolParkedAfter == nil {
+		return fallback
+	}
+	raw, ok := d.PatrolParkedAfter[role]
+	if !ok || raw == "" {
+		return fallback
+	}
+	return ParseDurationOrDefault(raw, fallback)
+}
+
+// PatrolParkedAfterWitnessD returns the Witness parked threshold (default 15m).
+func (d *DaemonThresholds) PatrolParkedAfterWitnessD() time.Duration {
+	return d.patrolParkedAfterD("witness", DefaultPatrolParkedAfterWitness)
+}
+
+// PatrolParkedAfterDeaconD returns the Deacon parked threshold (default 45m).
+func (d *DaemonThresholds) PatrolParkedAfterDeaconD() time.Duration {
+	return d.patrolParkedAfterD("deacon", DefaultPatrolParkedAfterDeacon)
+}
+
+// PatrolParkedAfterRefineryD returns the Refinery parked threshold (default 60m).
+func (d *DaemonThresholds) PatrolParkedAfterRefineryD() time.Duration {
+	return d.patrolParkedAfterD("refinery", DefaultPatrolParkedAfterRefinery)
 }
 
 // --- Deacon accessors ---

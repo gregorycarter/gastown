@@ -61,6 +61,37 @@ type State struct {
 
 	// HeartbeatCount is how many heartbeats have completed.
 	HeartbeatCount int64 `json:"heartbeat_count"`
+
+	// PatrolParking tracks patrol roles the parking detector has flagged,
+	// keyed by identity ("deacon", "<rig>/witness", "<rig>/refinery").
+	// A record is created when an un-park nudge is sent and removed when the
+	// role resumes or its session is restarted.
+	PatrolParking map[string]*PatrolParkingRecord `json:"patrol_parking,omitempty"`
+
+	// PatrolHeartbeats records the heartbeat: label value last observed for
+	// each patrol identity (and the Mayor, when it keeps one). Read by
+	// `gt daemon status`.
+	PatrolHeartbeats map[string]time.Time `json:"patrol_heartbeats,omitempty"`
+
+	// MayorNudgeQueueSince is when the Mayor's nudge queue was first seen
+	// non-empty. Zero when the queue is empty.
+	MayorNudgeQueueSince time.Time `json:"mayor_nudge_queue_since,omitempty"`
+}
+
+// PatrolParkingRecord is the daemon's memory of one un-park nudge.
+type PatrolParkingRecord struct {
+	// Identity is the patrol identity ("deacon", "<rig>/witness", …).
+	Identity string `json:"identity"`
+
+	// Session is the tmux session that was nudged.
+	Session string `json:"session"`
+
+	// NudgedAt is when the un-park nudge was delivered.
+	NudgedAt time.Time `json:"parked_nudged_at"`
+
+	// HeartbeatUnix is the heartbeat: label value at nudge time. The next
+	// heartbeat restarts the session only if this has not advanced.
+	HeartbeatUnix int64 `json:"heartbeat_unix"`
 }
 
 // StateFile returns the path to the state file.
