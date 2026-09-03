@@ -110,6 +110,10 @@ type TownSettings struct {
 	// Added for hq-x0v7v.
 	Polecat *PolecatConfig `json:"polecat,omitempty"`
 
+	// Workflow configures town-level work lifecycle behaviour.
+	// workflow.close_on_merge gates the close-on-landed lifecycle (fork).
+	Workflow *TownWorkflowConfig `json:"workflow,omitempty"`
+
 	// Operational configures operational thresholds (timeouts, retries, intervals).
 	// These were previously hardcoded as Go constants throughout the codebase.
 	// All values are optional — omitted values use compiled-in defaults.
