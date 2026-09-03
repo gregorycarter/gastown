@@ -25,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/witness"
 )
 
 // Common errors
@@ -828,6 +829,18 @@ func (m *Manager) postMergeMR(b *beads.Beads, mr *MergeRequest) (*PostMergeResul
 	result.SourceIssueID = sourceResult.WorkBeadID
 	result.SourceIssueClosed = sourceResult.Closed
 	result.SourceIssueNotFound = sourceResult.NotFound
+
+	// The bead landed: clear its respawn counter. The counter increments on
+	// every spawn and was reset only by hand (`gt sling respawn-reset`), so
+	// a bead that was legitimately dispatched three times — two rejections,
+	// or a nuke and a re-sling — hit "respawn limit reached" on its next
+	// dispatch even though nothing was wrong with it. Best effort: a merge
+	// must not fail because a counter file could not be written.
+	if workBeadID != "" {
+		if err := witness.ResetBeadRespawnCount(m.workDir, workBeadID); err != nil {
+			_, _ = fmt.Fprintf(m.output, "Warning: could not reset respawn count for %s: %v\n", workBeadID, err)
+		}
+	}
 
 	return result, nil
 }

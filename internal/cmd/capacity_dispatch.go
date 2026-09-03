@@ -476,6 +476,15 @@ func cleanupStaleContexts(townRoot string) error {
 			_ = beadsForContextRecord(ctx).CloseSlingContext(ctx.issue.ID, "invalid-context")
 			continue
 		}
+		// Forget failures older than the decay window before judging the
+		// breaker, so a context is not circuit-broken by three unrelated
+		// incidents spread across a day.
+		if decayDispatchFailures(fields, time.Now()) {
+			if err := beadsForContextRecord(ctx).UpdateSlingContextFields(ctx.issue.ID, fields); err != nil {
+				fmt.Fprintf(os.Stderr, "%s could not decay dispatch failures on %s: %v\n",
+					style.Dim.Render("○"), ctx.issue.ID, err)
+			}
+		}
 		if fields.DispatchFailures >= maxDispatchFailures {
 			_ = beadsForContextRecord(ctx).CloseSlingContext(ctx.issue.ID, "circuit-broken")
 			continue
@@ -871,14 +880,88 @@ func isDaemonDispatch() bool {
 	return os.Getenv("GT_DAEMON") == "1"
 }
 
-// recordDispatchFailure increments the dispatch failure counter on the sling context bead.
+// dispatchFailureDecay is how long a recorded dispatch failure counts toward
+// the circuit breaker. Failures older than this are forgotten: the breaker
+// exists to stop a bead that fails repeatedly *now*, not to accumulate
+// unrelated incidents over days.
+const dispatchFailureDecay = time.Hour
+
+// infraEscalationOnce tracks sling contexts that have already reported an
+// infrastructure dispatch failure, so a Dolt outage produces one line per
+// context per process instead of one per tick.
+var (
+	infraEscalationMu   sync.Mutex
+	infraEscalationSeen = map[string]bool{}
+)
+
+func shouldReportInfraFailure(contextID string) bool {
+	infraEscalationMu.Lock()
+	defer infraEscalationMu.Unlock()
+	if infraEscalationSeen[contextID] {
+		return false
+	}
+	infraEscalationSeen[contextID] = true
+	return true
+}
+
+// resetInfraEscalationStateForTest clears the once-per-context report map.
+func resetInfraEscalationStateForTest() {
+	infraEscalationMu.Lock()
+	defer infraEscalationMu.Unlock()
+	infraEscalationSeen = map[string]bool{}
+}
+
+// decayDispatchFailures zeroes a stale failure counter. Returns true when the
+// counter was reset.
+func decayDispatchFailures(fields *capacity.SlingContextFields, now time.Time) bool {
+	if fields == nil || fields.DispatchFailures == 0 || fields.LastFailureAt == "" {
+		return false
+	}
+	last, err := time.Parse(time.RFC3339, fields.LastFailureAt)
+	if err != nil {
+		return false
+	}
+	if now.Sub(last) < dispatchFailureDecay {
+		return false
+	}
+	fields.DispatchFailures = 0
+	fields.LastFailure = ""
+	fields.LastFailureAt = ""
+	return true
+}
+
+// recordDispatchFailure increments the dispatch failure counter on the sling
+// context bead — but only for failures the bead itself is responsible for.
+//
+// A respawn-limit refusal, a capacity/directory-cap refusal, or a bd/Dolt
+// transport error says nothing about the work. Counting those closed the
+// context as "circuit-broken" after three ticks and the bead silently left
+// the queue; the fix for a respawn limit is `gt sling respawn-reset`, and the
+// fix for a Dolt hiccup is to wait.
 func recordDispatchFailure(townBeads *beads.Beads, b capacity.PendingBead, dispatchErr error) {
 	if b.Context == nil {
 		return
 	}
 
+	class := classifyDispatchFailure(dispatchErr)
+	if !class.countsTowardCircuitBreaker() {
+		if shouldReportInfraFailure(b.ID) {
+			fmt.Printf("  %s Dispatch of %s deferred (%s, not counted against the circuit breaker): %v\n",
+				style.Warning.Render("⚠"), b.WorkBeadID, class, dispatchErr)
+			if class == dispatchFailureRespawnLimit {
+				fmt.Printf("      Reset with: gt sling respawn-reset %s\n", b.WorkBeadID)
+			}
+		}
+		return
+	}
+
+	// Decay before counting: three failures an hour apart are three
+	// incidents, not a broken bead.
+	decayDispatchFailures(b.Context, time.Now())
+
 	b.Context.DispatchFailures++
 	b.Context.LastFailure = dispatchErr.Error()
+	b.Context.LastFailureAt = time.Now().UTC().Format(time.RFC3339)
 
 	if err := townBeads.UpdateSlingContextFields(b.ID, b.Context); err != nil {
 		fmt.Printf("  %s Failed to record dispatch failure for %s: %v\n",

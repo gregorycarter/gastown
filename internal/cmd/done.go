@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -2397,6 +2398,19 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 	}
 
 doneStateUpdate:
+	// A clean COMPLETED exit means this bead was worked through to
+	// submission, so its per-bead respawn counter has served its purpose.
+	// The counter increments on every spawn and was reset only by hand, so
+	// the third legitimate dispatch of a bead (two rejections, or a nuke and
+	// a re-sling) failed with "respawn limit reached" and the scheduler
+	// circuit-broke its context. ESCALATED and DEFERRED deliberately keep
+	// their count: those are the spawn storms the breaker exists to stop.
+	if exitType == ExitCompleted && hookedBeadID != "" {
+		if err := witness.ResetBeadRespawnCount(townRoot, hookedBeadID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: couldn't reset respawn count for %s: %v\n", hookedBeadID, err)
+		}
+	}
+
 	// Clear hook_bead on the agent bead (gt-qbh). The hq-l6mm5 refactor made
 	// SetHookBead/ClearHookBead no-ops, but the witness still reads the
 	// hook_bead field from the agent bead snapshot. If the hooked bead is a

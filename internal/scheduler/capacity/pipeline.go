@@ -38,6 +38,10 @@ type SlingContextFields struct {
 	Mode             string `json:"mode,omitempty"`
 	DispatchFailures int    `json:"dispatch_failures,omitempty"`
 	LastFailure      string `json:"last_failure,omitempty"`
+	// LastFailureAt is when LastFailure was recorded (RFC3339). The
+	// dispatch-failure counter decays when this is old: three unrelated
+	// failures spread over a day must not add up to a circuit break.
+	LastFailureAt string `json:"last_failure_at,omitempty"`
 }
 
 // LabelSlingContext is the label used to identify sling context beads.
