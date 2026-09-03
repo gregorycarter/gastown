@@ -17,11 +17,12 @@ import (
 )
 
 var (
-	schedulerStatusJSON bool
-	schedulerListJSON   bool
-	schedulerClearBead  string
-	schedulerRunBatch   int
-	schedulerRunDryRun  bool
+	schedulerStatusJSON     bool
+	schedulerListJSON       bool
+	schedulerClearBead      string
+	schedulerRunBatch       int
+	schedulerRunDryRun      bool
+	schedulerRunCleanupOnly bool
 )
 
 var schedulerCmd = &cobra.Command{
@@ -89,7 +90,15 @@ but can be run ad-hoc. Useful for testing or when the daemon is not running.
 
   gt scheduler run                  # Dispatch using config defaults
   gt scheduler run --batch 5        # Dispatch up to 5
-  gt scheduler run --dry-run        # Preview what would dispatch`,
+  gt scheduler run --dry-run        # Preview what would dispatch
+  gt scheduler run --cleanup-only   # Queue hygiene only, no dispatch
+
+--cleanup-only runs the cleanup half of a tick and dispatches nothing:
+closes stale and circuit-broken sling contexts, expires admission
+reservations past their TTL, and closes orphaned mol-polecat-work wisps
+whose polecat session is gone. The daemon calls this when the pressure
+gate defers dispatch, so a saturated host does not also freeze queue
+hygiene. Safe to run at any time; combine with --dry-run to preview.`,
 	RunE: runSchedulerRun,
 }
 
@@ -106,6 +115,7 @@ func init() {
 	// Run flags
 	schedulerRunCmd.Flags().IntVar(&schedulerRunBatch, "batch", 0, "Override batch size (0 = use config)")
 	schedulerRunCmd.Flags().BoolVar(&schedulerRunDryRun, "dry-run", false, "Preview what would dispatch")
+	schedulerRunCmd.Flags().BoolVar(&schedulerRunCleanupOnly, "cleanup-only", false, "Run queue hygiene (stale contexts, reservation TTL, orphaned wisps) without dispatching")
 
 	// Feed flags
 	schedulerFeedCmd.Flags().IntVar(&schedulerFeedFloor, "floor", 0, "Override scheduler.queue_floor for this run")
@@ -382,6 +392,10 @@ func runSchedulerRun(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return err
+	}
+
+	if schedulerRunCleanupOnly {
+		return runSchedulerQueueHygiene(townRoot, schedulerRunDryRun)
 	}
 
 	_, err = dispatchScheduledWork(townRoot, detectActor(), schedulerRunBatch, schedulerRunDryRun)

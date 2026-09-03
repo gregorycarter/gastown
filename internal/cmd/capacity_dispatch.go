@@ -165,6 +165,54 @@ func buildSchedulerDispatchPlan(townRoot string, batchOverride int, cleanup bool
 	}, nil
 }
 
+// runSchedulerQueueHygiene performs the cleanup half of a dispatch tick with
+// no dispatching: stale/circuit-broken context closure, admission-reservation
+// TTL expiry, and the orphaned-wisp sweep.
+//
+// The pressure gate skips `gt scheduler run` entirely when the host is loaded,
+// which also froze queue hygiene — so a saturated host accumulated stale
+// contexts, expired reservations that still counted against capacity, and
+// orphaned wisps precisely when it could least afford them. The daemon calls
+// this instead of the full run when it defers dispatch.
+func runSchedulerQueueHygiene(townRoot string, dryRun bool) error {
+	if dryRun {
+		assessments, err := assessScheduledContexts(townRoot)
+		if err != nil {
+			return fmt.Errorf("assessing scheduled contexts: %w", err)
+		}
+		fmt.Printf("Would clean %d scheduled context(s)\n", len(assessments))
+		sweepOrphanWispBlockers(townRoot, assessments, true)
+		return nil
+	}
+
+	runtimeDir := filepath.Join(townRoot, ".runtime")
+	_ = os.MkdirAll(runtimeDir, 0755)
+	fileLock := flock.New(filepath.Join(runtimeDir, "scheduler-dispatch.lock"))
+	locked, err := fileLock.TryLock()
+	if err != nil {
+		return fmt.Errorf("acquiring dispatch lock: %w", err)
+	}
+	if !locked {
+		// A full dispatch is running; it does this cleanup itself.
+		return nil
+	}
+	defer func() { _ = fileLock.Unlock() }()
+
+	if err := cleanupStaleContexts(townRoot); err != nil {
+		return fmt.Errorf("cleaning stale scheduler contexts: %w", err)
+	}
+	if err := cleanupStalePolecatAdmissionReservations(townRoot, time.Now()); err != nil {
+		return fmt.Errorf("cleaning stale polecat admission reservations: %w", err)
+	}
+
+	assessments, err := assessScheduledContexts(townRoot)
+	if err != nil {
+		return fmt.Errorf("assessing scheduled contexts: %w", err)
+	}
+	sweepOrphanWispBlockers(townRoot, assessments, false)
+	return nil
+}
+
 // dispatchScheduledWork is the main dispatch loop for the capacity scheduler.
 // Called by both `gt scheduler run` and the daemon heartbeat.
 func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun bool) (int, error) {

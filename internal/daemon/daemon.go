@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -2891,23 +2892,54 @@ func (d *Daemon) reapIdlePolecats() {
 	opCfg := d.loadOperationalConfig().GetDaemonConfig()
 	idleTimeout := opCfg.PolecatIdleSessionTimeoutD()
 
+	var reaped atomic.Int64
 	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
-		d.reapRigIdlePolecats(rigName, idleTimeout)
+		reaped.Add(int64(d.reapRigIdlePolecats(rigName, idleTimeout)))
 		return nil
 	})
+
+	// Reaping kills the session but leaves the work bead's mol-polecat-work
+	// wisp bonded, which drops the bead out of `bd ready` and out of the
+	// scheduler's ready set. Run queue hygiene once per cycle that reaped
+	// anything so the freed work becomes dispatchable again.
+	if reaped.Load() > 0 {
+		d.runSchedulerCleanup()
+	}
+}
+
+// runSchedulerCleanup runs the scheduler's queue hygiene without dispatching:
+// stale contexts, admission-reservation TTL, and orphaned wisps.
+func (d *Daemon) runSchedulerCleanup() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gt", "scheduler", "run", "--cleanup-only")
+	setSysProcAttr(cmd)
+	cmd.Dir = d.config.TownRoot
+	cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads")), "GT_DAEMON=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		d.logger.Printf("Scheduler cleanup failed: %v (output: %s)", err, string(out))
+	} else if len(out) > 0 {
+		d.logger.Printf("Scheduler cleanup: %s", string(out))
+	}
 }
 
 // reapRigIdlePolecats checks all polecats in a rig and kills idle sessions.
-func (d *Daemon) reapRigIdlePolecats(rigName string, timeout time.Duration) {
+// Returns the number of sessions reaped.
+func (d *Daemon) reapRigIdlePolecats(rigName string, timeout time.Duration) int {
 	polecatsDir := filepath.Join(d.config.TownRoot, rigName, "polecats")
 	polecats, err := listPolecatWorktrees(polecatsDir)
 	if err != nil {
-		return // No polecats directory
+		return 0 // No polecats directory
 	}
 
+	reaped := 0
 	for _, polecatName := range polecats {
-		d.reapIdlePolecat(rigName, polecatName, timeout)
+		if d.reapIdlePolecat(rigName, polecatName, timeout) {
+			reaped++
+		}
 	}
+	return reaped
 }
 
 // reapIdlePolecat checks a single polecat and kills it if idle too long.
@@ -2917,32 +2949,31 @@ func (d *Daemon) reapRigIdlePolecats(rigName string, timeout time.Duration) {
 //     hooked work (agent_state=idle in beads). This catches polecats that completed
 //     gt done — persistentPreRun resets heartbeat to "working" on every gt sub-command,
 //     so after gt done finishes the heartbeat shows "working" with a stale timestamp.
-func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Duration) {
+func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Duration) bool {
 	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
 
 	// Only check sessions that are actually alive
 	alive, err := d.tmux.HasSession(sessionName)
 	if err != nil || !alive {
-		return
+		return false
 	}
 
 	// Read heartbeat to check state and idle duration
 	hb := polecat.ReadSessionHeartbeat(d.config.TownRoot, sessionName)
 	if hb == nil {
-		return // No heartbeat file — can't determine state
+		return false // No heartbeat file — can't determine state
 	}
 
 	staleDuration := time.Since(hb.Timestamp)
 	if staleDuration < timeout {
-		return // Heartbeat is fresh — polecat is active
+		return false // Heartbeat is fresh — polecat is active
 	}
 
 	state := hb.EffectiveState()
 
 	// Explicitly idle or exiting — safe to reap
 	if state == polecat.HeartbeatIdle || state == polecat.HeartbeatExiting {
-		d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, string(state))
-		return
+		return d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, string(state))
 	}
 
 	// Heartbeat says "working" but is stale — check if polecat actually has hooked work.
@@ -2960,16 +2991,16 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 			// spurious lookup errors while the polecat is actively working (GH#3342).
 			assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 			if d.hasAssignedOpenWork(rigName, assignee) {
-				return
+				return false
 			}
 			// No assigned work and agent not running — safe to reap.
 			// Use 3x threshold (not 2x) to avoid killing polecats during transient
 			// infrastructure degradation when the agent process is alive but not
 			// detectable (e.g. long thinking sessions, slow process inspection).
 			if staleDuration >= timeout*3 || !d.tmux.IsAgentAlive(sessionName) && staleDuration >= timeout*2 {
-				d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, "working-bead-lookup-failed")
+				return d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, "working-bead-lookup-failed")
 			}
-			return
+			return false
 		}
 
 		// If polecat has hooked work that is still open, it might be stuck (not idle).
@@ -2977,7 +3008,7 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 		// But if the hook_bead is closed, the work is done and this is just an idle
 		// polecat with a stale hook reference — safe to reap.
 		if info.HookBead != "" && !d.isBeadClosed(info.HookBead) {
-			return
+			return false
 		}
 
 		// Fallback: agent bead hook_bead may be stale (updateAgentHookBead is a
@@ -2988,28 +3019,29 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 		// while the polecat is actively working on a newly-slung bead.
 		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 		if d.hasAssignedOpenWork(rigName, assignee) {
-			return
+			return false
 		}
 
 		// No hooked work + stale heartbeat — but check if the agent process
 		// is still actively running before reaping. A failed gt sling rollback
 		// can clear the hook while the agent is still working (GH#3342).
 		if d.tmux.IsAgentAlive(sessionName) {
-			return
+			return false
 		}
-		d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, "working-no-hook")
+		return d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, "working-no-hook")
 	}
+	return false
 }
 
 // killIdlePolecat terminates an idle polecat session and cleans up.
-func (d *Daemon) killIdlePolecat(rigName, polecatName, sessionName string, idleDuration, timeout time.Duration, reason string) {
+func (d *Daemon) killIdlePolecat(rigName, polecatName, sessionName string, idleDuration, timeout time.Duration, reason string) bool {
 	d.logger.Printf("Reaping idle polecat %s/%s (state=%s, idle %v, threshold %v)",
 		rigName, polecatName, reason, idleDuration.Truncate(time.Second), timeout)
 
 	// Kill the tmux session (and all descendant processes)
 	if err := d.tmux.KillSessionWithProcesses(sessionName); err != nil {
 		d.logger.Printf("Warning: failed to kill idle polecat session %s: %v", sessionName, err)
-		return
+		return false
 	}
 
 	// Clean up heartbeat file
@@ -3022,6 +3054,7 @@ func (d *Daemon) killIdlePolecat(rigName, polecatName, sessionName string, idleD
 		events.SessionDeathPayload(sessionName, fmt.Sprintf("%s/polecats/%s", rigName, polecatName),
 			fmt.Sprintf("idle-reap: %s, idle %v (threshold %v)", reason, idleDuration.Truncate(time.Second), timeout),
 			"daemon"))
+	return true
 }
 
 // cleanupOrphanedProcesses kills orphaned claude subagent processes.
