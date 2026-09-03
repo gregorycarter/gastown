@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // MQ command flags
@@ -33,6 +34,7 @@ var (
 	mqRejectReason string
 	mqRejectNotify bool
 	mqRejectStdin  bool // Read reason from stdin
+	mqRejectNoResl bool // Suppress re-dispatch when the worker session is dead
 
 	// List command flags
 	mqListReady  bool
@@ -354,6 +356,7 @@ func init() {
 	mqRejectCmd.Flags().StringVarP(&mqRejectReason, "reason", "r", "", "Reason for rejection (required unless --stdin)")
 	mqRejectCmd.Flags().BoolVar(&mqRejectNotify, "notify", false, "Send mail notification to worker")
 	mqRejectCmd.Flags().BoolVar(&mqRejectStdin, "stdin", false, "Read reason from stdin (avoids shell quoting issues)")
+	mqRejectCmd.Flags().BoolVar(&mqRejectNoResl, "no-resling", false, "Do not re-dispatch the source bead when the worker session is dead (workflow.close_on_merge only)")
 
 	// Status flags
 	mqStatusCmd.Flags().BoolVar(&mqStatusJSON, "json", false, "Output as JSON")
@@ -507,7 +510,17 @@ func runMQReject(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	result, err := mgr.RejectMR(mrIDOrBranch, mqRejectReason, mqRejectNotify)
+	townRoot, townErr := workspace.FindFromCwd()
+	if townErr != nil {
+		townRoot = ""
+	}
+	closeOnMerge := config.CloseOnMergeEnabledForTown(townRoot)
+
+	result, err := mgr.RejectMRWithOptions(mrIDOrBranch, mqRejectReason, refinery.RejectOptions{
+		Notify:       mqRejectNotify,
+		NoResling:    mqRejectNoResl,
+		CloseOnMerge: closeOnMerge,
+	})
 	if err != nil {
 		return fmt.Errorf("rejecting MR: %w", err)
 	}
@@ -517,7 +530,11 @@ func runMQReject(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Reason: %s\n", mqRejectReason)
 
 	if result.IssueID != "" {
-		fmt.Printf("  Issue:  %s %s\n", result.IssueID, style.Dim.Render("(not closed - work not done)"))
+		if closeOnMerge {
+			fmt.Printf("  Issue:  %s %s\n", result.IssueID, style.Dim.Render("(rejection recorded; reopened if it was closed)"))
+		} else {
+			fmt.Printf("  Issue:  %s %s\n", result.IssueID, style.Dim.Render("(not closed - work not done)"))
+		}
 	}
 
 	if mqRejectNotify {

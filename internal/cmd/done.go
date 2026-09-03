@@ -1667,6 +1667,18 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// distinguishes genuinely new submissions from idempotent retries.
 		commitSHA, _ = g.Rev("HEAD")
 
+		// SHA-keyed rejection memory (hq-tx4md): the merge gate already refused
+		// this exact commit, so submitting it again just re-queues a candidate
+		// that cannot merge. Treated as an MR failure so the session, worktree
+		// and hook are preserved and the polecat can push a real fix.
+		if rejErr := guardRejectedCandidate(rejectionMemoryFor(sourceBD, bd),
+			config.CloseOnMergeEnabledForTown(townRoot), issueID, commitSHA); rejErr != nil {
+			mrFailed = true
+			doneErrors = append(doneErrors, rejErr.Error())
+			style.PrintWarning("%s", rejErr.Error())
+			goto notifyWitness
+		}
+
 		// Resume: skip MR creation if already completed in a previous run (gt-aufru).
 		// Mirrors the push checkpoint pattern above. Without this, every retry
 		// re-attempts bd.Create which hits unique constraints or creates duplicates.
@@ -2390,9 +2402,14 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 			if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
-			} else if err := hookBd.Close(hookedBeadID); err != nil {
-				// Non-fatal: warn but continue
-				fmt.Fprintf(os.Stderr, "Warning: couldn't close hooked bead %s: %v\n", hookedBeadID, err)
+			} else if !applyMRHoldOrClose(hookBd, townRoot, exitType, hookedBeadID, hookedBead) {
+				// Submission is not completion (hq-19pxc): when an MR is in the
+				// queue applyMRHoldOrClose parks the bead instead and the
+				// Refinery's post-merge receipt is the single close point.
+				if err := hookBd.Close(hookedBeadID); err != nil {
+					// Non-fatal: warn but continue
+					fmt.Fprintf(os.Stderr, "Warning: couldn't close hooked bead %s: %v\n", hookedBeadID, err)
+				}
 			}
 		}
 	}

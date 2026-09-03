@@ -631,6 +631,10 @@ Supported keys:
   polecat.target_clean_policy When to delete <polecat>/target/ on reuse
                               ("per_bead", "every_n_beads:<N>", "never";
                               default: per_bead)
+  workflow.close_on_merge     Hold a submitted source bead open (in_progress +
+                              awaiting-merge:<mr>) until the post-merge receipt
+                              closes it; rejections reopen and re-dispatch it
+                              (true/false, default: true)
   maintenance.window          Maintenance window start time in HH:MM (e.g., "03:00")
   maintenance.interval        How often: "daily", "weekly", "monthly", or duration
   maintenance.threshold       Commit count threshold (default: 1000)
@@ -677,6 +681,7 @@ Supported keys:
   scheduler.spawn_delay       Delay between spawns
   polecat.target_clean_policy When to delete <polecat>/target/ on reuse
                               (per_bead, every_n_beads:<N>, never)
+  workflow.close_on_merge     Close-on-landed lifecycle enabled (true/false)
   maintenance.window          Maintenance window start time (HH:MM)
   maintenance.interval        How often: daily, weekly, monthly, or duration
   maintenance.threshold       Commit count threshold
@@ -792,6 +797,16 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 			townSettings.Scheduler = capacity.DefaultSchedulerConfig()
 		}
 		townSettings.Scheduler.SpawnDelay = value
+
+	case "workflow.close_on_merge":
+		b, err := parseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid value for %s: %w (expected true/false)", key, err)
+		}
+		if townSettings.Workflow == nil {
+			townSettings.Workflow = &config.TownWorkflowConfig{}
+		}
+		townSettings.Workflow.CloseOnMerge = &b
 
 	case "polecat.target_clean_policy":
 		// Validate the policy string parses cleanly. Storage form is the raw input
@@ -910,6 +925,9 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 
 	case "scheduler.autofeed_exclude_labels":
 		value = strings.Join(townSettings.Scheduler.GetAutoFeedExcludeLabels(), ",")
+
+	case "workflow.close_on_merge":
+		value = strconv.FormatBool(townSettings.CloseOnMergeEnabled())
 
 	case "polecat.target_clean_policy":
 		if townSettings.Polecat != nil && townSettings.Polecat.TargetCleanPolicy != "" {

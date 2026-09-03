@@ -28,6 +28,13 @@ type workBeadCloser interface {
 	ForceCloseWithReason(reason string, ids ...string) error
 }
 
+// workBeadLabelUpdater is the optional label-editing half of workBeadCloser.
+// It is a separate interface so existing fakes keep compiling: a closer that
+// cannot update labels simply skips the awaiting-merge cleanup.
+type workBeadLabelUpdater interface {
+	Update(id string, opts beads.UpdateOptions) error
+}
+
 type issueReader interface {
 	Show(id string) (*beads.Issue, error)
 }
@@ -74,8 +81,25 @@ func closeMergedWorkBead(work workBeadCloser, agent issueReader, out io.Writer, 
 		return result
 	}
 
+	// Drop the awaiting-merge hold before closing. gt done parks a submitted
+	// source bead as in_progress + awaiting-merge:<mr> (workflow.close_on_merge);
+	// this is the receipt that releases it, so a closed bead never keeps a
+	// pending-merge marker that gt doctor and the convoy feeder would still read.
+	if updater, ok := work.(workBeadLabelUpdater); ok {
+		if held := beads.AwaitingMergeLabels(issue); len(held) > 0 {
+			if err := updater.Update(workBeadID, beads.UpdateOptions{RemoveLabels: held}); err != nil {
+				logf("[Refinery] Warning: could not clear %v on %s: %v\n", held, workBeadID, err)
+			}
+		}
+	}
+
+	// The first line must keep the "Merged in " prefix: convoy merge-blocks
+	// resolution (internal/convoy/operations.go, beads.go:491) treats it as the
+	// proof that a blocker actually landed. The landed SHA goes on the next
+	// line so the close reason answers "merged what, via which MR".
 	closeReason := fmt.Sprintf("Merged in %s", req.MRID)
 	if req.MergeCommit != "" {
+		closeReason = fmt.Sprintf("%s\nmerged %s via %s", closeReason, req.MergeCommit, req.MRID)
 		closeReason = fmt.Sprintf("%s\ntarget_branch: %s\ncommit_sha: %s", closeReason, req.Target, req.MergeCommit)
 	}
 
