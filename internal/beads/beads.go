@@ -2085,6 +2085,19 @@ func (b *Beads) CloseWithReason(reason string, ids ...string) error {
 	return b.closeWithOptions(closeOptions{reason: reason, withReason: true}, ids...)
 }
 
+// CloseWithReasonForce closes issues that the current actor does not own.
+//
+// bd refuses to close a bead assigned to someone else ("reclaim or use --force
+// to override"), which is right for ordinary work: one agent must not close
+// another's. It is wrong for operator-run lifecycle repair, where the assignee
+// is a dormant agent that will never close the bead itself.
+//
+// Use this ONLY for internal lifecycle artifacts, after independently proving
+// the owning agent is not running. Never use it to close product work.
+func (b *Beads) CloseWithReasonForce(reason string, ids ...string) error {
+	return b.closeWithOptions(closeOptions{reason: reason, withReason: true, force: true}, ids...)
+}
+
 // ForceCloseWithReason closes one or more issues with --force, bypassing
 // dependency checks. Used by gt done where the polecat is about to be nuked
 // and open molecule wisps should not block issue closure.

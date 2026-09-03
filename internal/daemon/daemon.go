@@ -1782,6 +1782,13 @@ func (d *Daemon) ensureWitnessRunning(rigName string) {
 	if err := mgr.Start(false, "", nil); err != nil {
 		if err == witness.ErrAlreadyRunning {
 			// Already running - this is the expected case
+			// A live session is NOT proof of health: Start() returns
+			// ErrAlreadyRunning before it reaches its poller-start call, so a
+			// nudge-poller that died is never replaced and the agent goes
+			// silently mute (hq-uatq2). StartPoller is idempotent.
+			if pollerErr := mgr.EnsureNudgePoller(); pollerErr != nil {
+				d.logger.Printf("Witness for %s: could not ensure nudge poller: %v", rigName, pollerErr)
+			}
 			d.logger.Printf("Witness for %s already running, skipping spawn", rigName)
 			return
 		}
@@ -1873,6 +1880,13 @@ func (d *Daemon) ensureRefineryRunning(rigName string) {
 	if err := mgr.Start(false, ""); err != nil {
 		if errors.Is(err, refinery.ErrAlreadyRunning) {
 			// Already running - this is the expected case when fix is working
+			// A live session is NOT proof of health: Start() returns
+			// ErrAlreadyRunning before it reaches its poller-start call, so a
+			// nudge-poller that died is never replaced and the agent goes
+			// silently mute (hq-uatq2). StartPoller is idempotent.
+			if pollerErr := mgr.EnsureNudgePoller(); pollerErr != nil {
+				d.logger.Printf("Refinery for %s: could not ensure nudge poller: %v", rigName, pollerErr)
+			}
 			d.logger.Printf("Refinery for %s already running, skipping spawn", rigName)
 			return
 		}

@@ -160,7 +160,7 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	var beadsDir string
 	if awaitEventAgentBead != "" {
 		var wdErr error
-		beadsDir, wdErr = resolveAgentTrackingBeadsDir()
+		beadsDir, wdErr = resolveAgentTrackingBeadsDirFor(awaitEventAgentBead)
 		if wdErr == nil {
 			labels, labErr := getAgentLabels(awaitEventAgentBead, beadsDir)
 			if labErr != nil {
@@ -242,7 +242,10 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	if awaitEventAgentBead != "" && beadsDir != "" {
 		// Always update heartbeat (both event and timeout) so witness doesn't
 		// think we're dead during long idle periods.
-		_ = updateAgentHeartbeat(awaitEventAgentBead, beadsDir)
+		if hbErr := updateAgentHeartbeat(awaitEventAgentBead, beadsDir); hbErr != nil && !awaitEventQuiet {
+			fmt.Printf("%s Failed to update heartbeat: %v\n",
+				style.Dim.Render("⚠"), hbErr)
+		}
 
 		if result.Reason == "timeout" {
 			newIdle := idleCycles + 1

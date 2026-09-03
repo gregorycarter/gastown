@@ -52,3 +52,58 @@ func resolveAgentTrackingBeadsDir() (string, error) {
 	}
 	return beadsDir, nil
 }
+
+// agentBeadExistsIn reports whether agentBead can be read from beadsDir.
+func agentBeadExistsIn(agentBead, beadsDir string) bool {
+	if agentBead == "" || beadsDir == "" {
+		return false
+	}
+	_, err := getAllAgentLabels(agentBead, beadsDir)
+	return err == nil
+}
+
+// townAgentTrackingBeadsDir returns the town-level beads dir, or "" if not found.
+func townAgentTrackingBeadsDir() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	townRoot := beads.FindTownRoot(cwd)
+	if townRoot == "" {
+		return ""
+	}
+	return beads.ResolveBeadsDir(beads.GetTownBeadsPath(townRoot))
+}
+
+// resolveAgentTrackingBeadsDirFor resolves the beads database holding agentBead.
+//
+// Agent beads are TOWN-owned. That is the codebase's own contract: every
+// singular agent-bead operation routes through Beads.agentBeadTarget(), which
+// returns ForAgentBead() -- a client rooted unconditionally at the town.
+// GetAgentBead, UpdateAgentState, ClearAgentActiveMRIfMatches and the rest all
+// honour it.
+//
+// This resolver did not, and that is hq-dpkp8. It walked up from the CURRENT
+// DIRECTORY instead. For a rig-scoped role (Refinery, Witness) the cwd resolves
+// to the rig database, which holds no agent beads, so every agent-state read and
+// write failed with "no issue found". The idle-count failure warns; the
+// heartbeat failure is discarded by its caller, so the loop kept running and
+// looked healthy while the heartbeat never advanced -- 44h on the Refinery,
+// 105h on the Witness (2026-09-01).
+//
+// Resolve to the town database first, matching ForAgentBead. Fall back to the
+// cwd-local database only when the bead is genuinely not town-side, so an
+// isolated or test layout that keeps agent beads rig-side still works.
+func resolveAgentTrackingBeadsDirFor(agentBead string) (string, error) {
+	local, localErr := resolveAgentTrackingBeadsDir()
+
+	if townDir := townAgentTrackingBeadsDir(); townDir != "" {
+		if agentBead == "" || agentBeadExistsIn(agentBead, townDir) {
+			return townDir, nil
+		}
+	}
+	if localErr != nil {
+		return "", localErr
+	}
+	return local, nil
+}

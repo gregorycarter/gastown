@@ -823,6 +823,66 @@ func (r *Router) queryAgentsFromDir(beadsDir string) ([]*agentBead, error) {
 	return r.queryAgentsInDir(beadsDir, "")
 }
 
+// lifecycleSubjectPrefixes identify protocol/lifecycle mail by subject. These
+// messages report state; they do not ask for anything.
+var lifecycleSubjectPrefixes = []string{
+	"polecat_started",
+	"polecat_done",
+	"work_done",
+	"start_work",
+	"nudge",
+	"lifecycle:",
+	"merged",
+	"merge_ready",
+	"merge_failed",
+}
+
+// replyReminderExemptPrefixes are subjects that must never earn a "remember to
+// reply" nudge, on top of the lifecycle set.
+//
+// "re:" is the load-bearing entry. An agent answering a receipt typically uses
+// `gt mail send`, not a threaded reply, so its message is TypeNotification
+// rather than TypeReply and the existing TypeReply guard misses it entirely.
+// That reply then earns its own reminder, which is answered with another
+// receipt, and so on.
+var replyReminderExemptPrefixes = []string{
+	"re:",
+	"ack",
+	"receipt",
+	"fyi",
+	"no action",
+	"health_ok",
+	"health_check",
+}
+
+// isReplyReminderExempt reports whether msg is terminal by construction: a
+// protocol receipt or lifecycle notification that carries no request.
+//
+// bt-ahq0: on 2026-08-27, 11:00-17:00Z, MERGED receipts between the Witness and
+// Refinery produced 28 + 34 mails in reply chains ("Remember to reply to ...
+// RE: MERGED toast" x19), each one a durable Dolt bead, and 131 of 165 Refinery
+// turns ended turn_aborted after 72 interrupting prompts. Agents began writing
+// "please do not acknowledge or reply" into message bodies to break the cycle by
+// hand. Reminding someone to reply to "MERGED" is the defect: the message is the
+// end of the exchange, not the start of one.
+func isReplyReminderExempt(msg *Message) bool {
+	if msg == nil {
+		return true
+	}
+	subject := strings.ToLower(strings.TrimSpace(msg.Subject))
+	for _, prefix := range lifecycleSubjectPrefixes {
+		if strings.HasPrefix(subject, prefix) {
+			return true
+		}
+	}
+	for _, prefix := range replyReminderExemptPrefixes {
+		if strings.HasPrefix(subject, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // shouldBeWisp determines if a message should be stored as a wisp.
 // Returns true if:
 // - Message.Wisp is explicitly set
@@ -833,18 +893,7 @@ func (r *Router) shouldBeWisp(msg *Message) bool {
 	}
 	// Auto-detect protocol/lifecycle messages by subject prefix
 	subjectLower := strings.ToLower(msg.Subject)
-	wispPrefixes := []string{
-		"polecat_started",
-		"polecat_done",
-		"work_done",
-		"start_work",
-		"nudge",
-		"lifecycle:",
-		"merged",
-		"merge_ready",
-		"merge_failed",
-	}
-	for _, prefix := range wispPrefixes {
+	for _, prefix := range lifecycleSubjectPrefixes {
 		if strings.HasPrefix(subjectLower, prefix) {
 			return true
 		}
@@ -1806,6 +1855,9 @@ func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	}
 	if msg.Type == TypeReply {
 		return // Already a reply — reminder would be redundant
+	}
+	if isReplyReminderExempt(msg) {
+		return // Terminal receipt / lifecycle notice — nothing to reply to (bt-ahq0)
 	}
 	if !senderCanReceiveReply(msg.From) {
 		return

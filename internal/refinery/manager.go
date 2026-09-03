@@ -706,8 +706,11 @@ func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool) (*Merg
 	if closeResult.AgentBead != "" {
 		mr.AgentBead = closeResult.AgentBead
 	}
+	if closeResult.TerminalSnapshotErr != nil {
+		_, _ = fmt.Fprintf(m.output, "Warning: could not persist terminal MR snapshot for %s: %v (a failed active_mr clear may not be repairable)\n", closeResult.AgentBead, closeResult.TerminalSnapshotErr)
+	}
 	if closeResult.AgentActiveMRClearErr != nil {
-		_, _ = fmt.Fprintf(m.output, "Warning: failed to clear agent bead %s active_mr: %v\n", closeResult.AgentBead, closeResult.AgentActiveMRClearErr)
+		_, _ = fmt.Fprintf(m.output, "Warning: failed to clear agent bead %s active_mr: %v\n  repair with: gt polecat reconcile <rig>/<polecat> --dry-run\n", closeResult.AgentBead, closeResult.AgentActiveMRClearErr)
 	}
 
 	// Update in-memory state for return value
@@ -788,8 +791,11 @@ func (m *Manager) postMergeMR(b *beads.Beads, mr *MergeRequest) (*PostMergeResul
 	if closeResult.AgentBead != "" {
 		mr.AgentBead = closeResult.AgentBead
 	}
+	if closeResult.TerminalSnapshotErr != nil {
+		_, _ = fmt.Fprintf(m.output, "Warning: could not persist terminal MR snapshot for %s: %v (a failed active_mr clear may not be repairable)\n", closeResult.AgentBead, closeResult.TerminalSnapshotErr)
+	}
 	if closeResult.AgentActiveMRClearErr != nil {
-		_, _ = fmt.Fprintf(m.output, "Warning: failed to clear agent bead %s active_mr: %v\n", closeResult.AgentBead, closeResult.AgentActiveMRClearErr)
+		_, _ = fmt.Fprintf(m.output, "Warning: failed to clear agent bead %s active_mr: %v\n  repair with: gt polecat reconcile <rig>/<polecat> --dry-run\n", closeResult.AgentBead, closeResult.AgentActiveMRClearErr)
 	}
 	if closeResult.AlreadyTerminal {
 		_, _ = fmt.Fprintf(m.output, "  %s MR already closed\n", style.Dim.Render("—"))
@@ -843,3 +849,29 @@ func (m *Manager) notifyWorkerRejected(mr *MergeRequest, reason string) {
 
 // Town root is computed in Start() as filepath.Dir(m.rig.Path) and passed
 // through to callers — no filesystem-inference function needed (ZFC gt-qago).
+
+// EnsureNudgePoller starts the nudge-queue poller for this refinery if one is not
+// already running. StartPoller is idempotent, so calling this on a healthy
+// refinery is a no-op.
+//
+// This exists because Start() returns ErrAlreadyRunning BEFORE it reaches its
+// poller-start call. A live tmux session was therefore treated as proof that the
+// refinery was fully healthy, and a poller that had died was never replaced --
+// silently, since tmux still showed the session. For non-Claude runtimes the
+// poller IS the nudge delivery path, so losing it mutes the agent while every
+// surface-level health signal stays green (hq-uatq2).
+//
+// Observed 2026-08-31: gt nudge-poller bt-witness had been up 4d09h while the
+// Witness bead heartbeat was 4d08h stale; the daemon logged "already running,
+// skipping spawn" on every tick and never repaired it.
+func (m *Manager) EnsureNudgePoller() error {
+	sessionID := m.SessionName()
+	townRoot := filepath.Dir(m.rig.Path)
+	if sessionID == "" || townRoot == "" {
+		return nil
+	}
+	if _, err := nudge.StartPoller(townRoot, sessionID); err != nil {
+		return fmt.Errorf("ensuring nudge poller for %s: %w", sessionID, err)
+	}
+	return nil
+}

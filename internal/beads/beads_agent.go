@@ -708,6 +708,14 @@ func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
 // wisps table (fallback existence source). Issues take precedence for duplicate
 // IDs so labels/type are preserved for doctor validation.
 func (b *Beads) ListAgentBeads() (map[string]*Issue, error) {
+	// Agent beads are town-owned (see ForAgentBead). Route bulk listing the same
+	// way GetAgentBead does, or a rig-rooted client silently returns an empty map
+	// instead of the agents that exist in the town database. The returned target
+	// carries noRoute=true, so this delegation terminates without recursion.
+	if target := b.agentBeadTarget(); target != b {
+		return target.ListAgentBeads()
+	}
+
 	// Query issues table first. Issues include labels and type metadata used by
 	// doctor checks (for example, validating gt:agent labels).
 	// Agent beads are type=agent (infrastructure), hidden by bd list default filter.
@@ -752,6 +760,11 @@ func mergeAgentBeadSources(issuesByID, wispsByID map[string]*Issue) map[string]*
 // ListAgentBeadsFromWisps queries the wisps table for agent beads.
 // Returns nil, nil if the wisps table doesn't exist yet or has no agent beads.
 func (b *Beads) ListAgentBeadsFromWisps() (map[string]*Issue, error) {
+	// Same routing parity as ListAgentBeads: agent beads live in the town db.
+	if target := b.agentBeadTarget(); target != b {
+		return target.ListAgentBeadsFromWisps()
+	}
+
 	out, err := b.run("mol", "wisp", "list", "--json")
 	if err != nil {
 		return nil, nil // Wisps table may not exist yet

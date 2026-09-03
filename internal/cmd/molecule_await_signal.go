@@ -133,7 +133,7 @@ func init() {
 
 func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 	// Find beads directory (rig-local for bead operations)
-	beadsDir, err := resolveAgentTrackingBeadsDir()
+	beadsDir, err := resolveAgentTrackingBeadsDirFor(awaitSignalAgentBead)
 	if err != nil {
 		return fmt.Errorf("not in a beads workspace: %w", err)
 	}

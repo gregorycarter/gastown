@@ -401,3 +401,29 @@ func (m *Manager) Stop() error {
 	// Kill the tmux session
 	return t.KillSession(sessionID)
 }
+
+// EnsureNudgePoller starts the nudge-queue poller for this witness if one is not
+// already running. StartPoller is idempotent, so calling this on a healthy
+// witness is a no-op.
+//
+// This exists because Start() returns ErrAlreadyRunning BEFORE it reaches its
+// poller-start call. A live tmux session was therefore treated as proof that the
+// witness was fully healthy, and a poller that had died was never replaced --
+// silently, since tmux still showed the session. For non-Claude runtimes the
+// poller IS the nudge delivery path, so losing it mutes the agent while every
+// surface-level health signal stays green (hq-uatq2).
+//
+// Observed 2026-08-31: gt nudge-poller bt-witness had been up 4d09h while the
+// Witness bead heartbeat was 4d08h stale; the daemon logged "already running,
+// skipping spawn" on every tick and never repaired it.
+func (m *Manager) EnsureNudgePoller() error {
+	sessionID := m.SessionName()
+	townRoot := m.townRoot()
+	if sessionID == "" || townRoot == "" {
+		return nil
+	}
+	if _, err := nudge.StartPoller(townRoot, sessionID); err != nil {
+		return fmt.Errorf("ensuring nudge poller for %s: %w", sessionID, err)
+	}
+	return nil
+}

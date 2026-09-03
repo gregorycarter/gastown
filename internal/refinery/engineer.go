@@ -1711,8 +1711,11 @@ func (e *Engineer) closeMRWithReason(mr *MRInfo, closeReason string, mergeCommit
 	if result.Closed {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Closed MR bead: %s (%s)\n", mr.ID, closeReason)
 	}
+	if result.TerminalSnapshotErr != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not persist terminal MR snapshot for %s: %v (a failed active_mr clear may not be repairable)\n", result.AgentBead, result.TerminalSnapshotErr)
+	}
 	if result.AgentActiveMRClearErr != nil {
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to clear agent bead %s active_mr: %v\n", result.AgentBead, result.AgentActiveMRClearErr)
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to clear agent bead %s active_mr: %v\n  repair with: gt polecat reconcile <rig>/<polecat> --dry-run\n", result.AgentBead, result.AgentActiveMRClearErr)
 	}
 	return nil
 }
