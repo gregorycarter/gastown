@@ -81,6 +81,7 @@ type schedulerDispatchPlan struct {
 	SpawnDelay  time.Duration
 	Capacity    polecatCapacitySnapshot
 	Scheduled   []scheduledBeadInfo
+	Assessments []scheduledContextAssessment
 	Ready       []capacity.PendingBead
 	Plan        capacity.DispatchPlan
 }
@@ -119,6 +120,19 @@ func buildSchedulerDispatchPlan(townRoot string, batchOverride int, cleanup bool
 		return nil, blockedErr
 	}
 
+	// Orphan-wisp unblock: a mol-polecat-work wisp left bonded to its work
+	// bead by a killed polecat keeps the bead in `bd blocked` forever, so
+	// the queue reports "N scheduled, 0 ready" and `bd ready` hides it too.
+	// Closing the wisp is the operator's known remedy; do it here, guarded.
+	if cleanup && !state.Paused && maxPolecats > 0 {
+		if closed := sweepOrphanWispBlockers(townRoot, assessments, false); closed > 0 {
+			assessments, blockedErr = assessScheduledContexts(townRoot)
+			if blockedErr != nil {
+				return nil, blockedErr
+			}
+		}
+	}
+
 	snapshot, err := polecatCapacitySnapshotForTownNoCleanup(townRoot)
 	if cleanup {
 		snapshot, err = polecatCapacitySnapshotForTown(townRoot)
@@ -145,6 +159,7 @@ func buildSchedulerDispatchPlan(townRoot string, batchOverride int, cleanup bool
 		SpawnDelay:  spawnDelay,
 		Capacity:    snapshot,
 		Scheduled:   scheduledBeadInfosFromAssessments(assessments),
+		Assessments: assessments,
 		Ready:       ready,
 		Plan:        dispatchPlan,
 	}, nil
@@ -158,6 +173,7 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		if err != nil {
 			return 0, fmt.Errorf("planning dispatch: %w", err)
 		}
+		sweepOrphanWispBlockers(townRoot, dispatchPlan.Assessments, true)
 		dispatchPlan.Plan = validateDryRunDispatchPlan(townRoot, dispatchPlan.Plan)
 		printSchedulerDryRunPlan(dispatchPlan)
 		return 0, nil
@@ -525,11 +541,12 @@ func cleanupStaleContexts(townRoot string) error {
 // priority. Assignee and Priority are what separate a genuinely stalled
 // context from a working one, and what orders the dispatch queue.
 type beadStatusInfo struct {
-	Status   string
-	Title    string
-	Labels   []string
-	Assignee string
-	Priority int
+	Status    string
+	Title     string
+	Labels    []string
+	Assignee  string
+	Priority  int
+	CreatedAt string
 }
 
 func beadStatusInfoFromBeadInfo(info *beadInfo) beadStatusInfo {
@@ -568,23 +585,25 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 			continue
 		}
 		var items []struct {
-			ID       string   `json:"id"`
-			Status   string   `json:"status"`
-			Title    string   `json:"title"`
-			Labels   []string `json:"labels"`
-			Assignee string   `json:"assignee"`
-			Priority int      `json:"priority"`
+			ID        string   `json:"id"`
+			Status    string   `json:"status"`
+			Title     string   `json:"title"`
+			Labels    []string `json:"labels"`
+			Assignee  string   `json:"assignee"`
+			Priority  int      `json:"priority"`
+			CreatedAt string   `json:"created_at"`
 		}
 		if err := json.Unmarshal(out, &items); err != nil {
 			continue
 		}
 		for _, item := range items {
 			result[item.ID] = beadStatusInfo{
-				Status:   item.Status,
-				Title:    item.Title,
-				Labels:   item.Labels,
-				Assignee: item.Assignee,
-				Priority: item.Priority,
+				Status:    item.Status,
+				Title:     item.Title,
+				Labels:    item.Labels,
+				Assignee:  item.Assignee,
+				Priority:  item.Priority,
+				CreatedAt: item.CreatedAt,
 			}
 		}
 	}

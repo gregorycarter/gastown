@@ -235,6 +235,13 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 		}
 	}
 
+	// Detach and burn any molecule still bonded to the bead. Without this
+	// the mol-polecat-work wisp stays bonded after the hook is cleared, so
+	// the bead is reopened but sits in `bd blocked`, invisible to both
+	// `bd ready` and the scheduler. `gt polecat nuke` and `gt done` already
+	// do this; unsling did not.
+	detachOrphanedMolecule(hookedB, hookedBeadID, "unslung: cleaning stale molecule")
+
 	// Log unhook event
 	_ = events.LogFeed(events.TypeUnhook, agentID, events.UnhookPayload(hookedBeadID))
 
