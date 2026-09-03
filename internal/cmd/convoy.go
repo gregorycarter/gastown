@@ -1720,6 +1720,14 @@ func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 		return false
 	}
 
+	// Neither are beads whose work is already in the merge queue. Under
+	// workflow.close_on_merge a submitted source bead is held in_progress with
+	// no assignee, which the liveness test below would otherwise read as an
+	// orphaned molecule and re-sling on top of a pending MR.
+	if awaitingMergeBlocksDispatch(t) {
+		return false
+	}
+
 	// Open issues with no assignee are trivially ready
 	if status == "open" && t.Assignee == "" {
 		return true

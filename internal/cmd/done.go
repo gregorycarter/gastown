@@ -2389,9 +2389,14 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 			if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
-			} else if err := hookBd.Close(hookedBeadID); err != nil {
-				// Non-fatal: warn but continue
-				fmt.Fprintf(os.Stderr, "Warning: couldn't close hooked bead %s: %v\n", hookedBeadID, err)
+			} else if !applyMRHoldOrClose(hookBd, townRoot, exitType, hookedBeadID, hookedBead) {
+				// Submission is not completion (hq-19pxc): when an MR is in the
+				// queue applyMRHoldOrClose parks the bead instead and the
+				// Refinery's post-merge receipt is the single close point.
+				if err := hookBd.Close(hookedBeadID); err != nil {
+					// Non-fatal: warn but continue
+					fmt.Fprintf(os.Stderr, "Warning: couldn't close hooked bead %s: %v\n", hookedBeadID, err)
+				}
 			}
 		}
 	}
