@@ -3820,3 +3820,80 @@ func TestBranchPushedToRemote_NoPushURL(t *testing.T) {
 		t.Errorf("BranchPushedToRemote unpushed = %d, want >= 1", unpushed)
 	}
 }
+
+// vswlGit runs a git command in dir for the VerifySubmittedWorkLanded tests.
+func vswlGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func vswlCommitFile(t *testing.T, dir, name, content, msg string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	vswlGit(t, dir, "add", name)
+	vswlGit(t, dir, "commit", "-q", "-m", msg)
+	return vswlGit(t, dir, "rev-parse", "HEAD")
+}
+
+func TestVerifySubmittedWorkLanded_AcceptsRebasedPatchEquivalentSeries(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	// Submitted work: two commits on a polecat branch off the current main.
+	vswlGit(t, localDir, "checkout", "-q", "-b", "polecat/x")
+	vswlCommitFile(t, localDir, "a.txt", "a\n", "polecat: add a")
+	submitted := vswlCommitFile(t, localDir, "b.txt", "b\n", "polecat: add b")
+
+	// Main moves on, then the Refinery lands the series by sequential rebase
+	// (cherry-pick produces new commit IDs with identical patches).
+	vswlGit(t, localDir, "checkout", "-q", mainBranch)
+	vswlCommitFile(t, localDir, "other.txt", "other\n", "unrelated main commit")
+	vswlGit(t, localDir, "cherry-pick", submitted+"~1", submitted)
+	vswlGit(t, localDir, "push", "-q", "origin", mainBranch)
+
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", mainBranch, submitted); err == nil {
+		t.Fatalf("exact ancestry should fail after rebase")
+	}
+	if err := g.VerifySubmittedWorkLanded("origin", mainBranch, submitted); err != nil {
+		t.Fatalf("patch-equivalent series should be accepted: %v", err)
+	}
+}
+
+func TestVerifySubmittedWorkLanded_RejectsUnlandedAndEmptyWork(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	// Series with one landed and one unlanded commit -> reject.
+	vswlGit(t, localDir, "checkout", "-q", "-b", "polecat/y")
+	landed := vswlCommitFile(t, localDir, "c.txt", "c\n", "polecat: add c")
+	unlanded := vswlCommitFile(t, localDir, "d.txt", "d\n", "polecat: add d")
+	vswlGit(t, localDir, "checkout", "-q", mainBranch)
+	vswlGit(t, localDir, "cherry-pick", landed)
+	vswlGit(t, localDir, "push", "-q", "origin", mainBranch)
+	if err := g.VerifySubmittedWorkLanded("origin", mainBranch, unlanded); err == nil {
+		t.Fatalf("series with an unlanded commit must be rejected")
+	}
+
+	// Empty commit on the submitted side: git cherry omits it, so the
+	// comparison is incomplete and must fail closed.
+	vswlGit(t, localDir, "checkout", "-q", "-b", "polecat/z")
+	vswlGit(t, localDir, "commit", "-q", "--allow-empty", "-m", "polecat: empty")
+	empty := vswlGit(t, localDir, "rev-parse", "HEAD")
+	vswlGit(t, localDir, "checkout", "-q", mainBranch)
+	if err := g.VerifySubmittedWorkLanded("origin", mainBranch, empty); err == nil {
+		t.Fatalf("empty-commit series must be rejected")
+	}
+
+	// Exact ancestry still passes through the fast path.
+	if err := g.VerifySubmittedWorkLanded("origin", mainBranch, vswlGit(t, localDir, "rev-parse", "HEAD")); err != nil {
+		t.Fatalf("exact ancestor should pass: %v", err)
+	}
+}

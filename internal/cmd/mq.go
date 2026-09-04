@@ -198,6 +198,7 @@ type mqPostMergeManager interface {
 
 type mqPostMergeGit interface {
 	VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error
+	VerifySubmittedWorkLanded(remote, branch, commit string) error
 	PushRemoteBranchTip(remote, branch string) (string, error)
 	HasOpenPullRequest(ref git.PullRequestRef) bool
 	Rev(ref string) (string, error)
@@ -630,8 +631,12 @@ func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest) er
 	if commit == "" {
 		return fmt.Errorf("merge proof failed for MR %s: missing submitted commit_sha", mr.ID)
 	}
-	if err := rigGit.VerifyPushedCommitReachableFromPushTarget("origin", target, commit); err != nil {
-		return fmt.Errorf("merge proof failed for MR %s: target %s does not contain submitted head %s: %w", mr.ID, target, commit, err)
+	// Exact submitted-SHA ancestry is the fast path. After the Refinery's
+	// sequential rebase the landed commit IDs differ, so the proof also accepts a
+	// complete patch-equivalent series on the fetched target (bt-9or5). Anything
+	// less fails closed.
+	if err := rigGit.VerifySubmittedWorkLanded("origin", target, commit); err != nil {
+		return fmt.Errorf("merge proof failed for MR %s: target %s does not contain submitted head %s (exactly or as a complete patch-equivalent series): %w", mr.ID, target, commit, err)
 	}
 	return nil
 }

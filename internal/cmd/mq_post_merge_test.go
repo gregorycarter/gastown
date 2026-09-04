@@ -52,6 +52,11 @@ func (g *fakeMQPostMergeGit) VerifyPushedCommitReachableFromPushTarget(_, _, com
 	return g.verifyErr
 }
 
+func (g *fakeMQPostMergeGit) VerifySubmittedWorkLanded(_, _, commit string) error {
+	g.verifiedCommits = append(g.verifiedCommits, commit)
+	return g.verifyErr
+}
+
 func (g *fakeMQPostMergeGit) HasOpenPullRequest(git.PullRequestRef) bool {
 	return g.openPR
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/util"
+	"strconv"
 )
 
 var errNoComparisonRefs = errors.New("no comparison refs resolved")
@@ -2141,6 +2142,88 @@ func (g *Git) VerifyPushedCommitReachableFromPushTarget(remote, branch, commit s
 		return fmt.Errorf("verified_push_failed: commit %s not on %s/%s (remote tip %s)", shortSHA(commit), remote, branch, shortSHA(tip))
 	}
 	return nil
+}
+
+// VerifySubmittedWorkLanded proves that the work submitted at commit landed on
+// remote/branch even when the Refinery's sequential rebase changed commit IDs.
+//
+// Exact ancestry (VerifyPushedCommitReachableFromPushTarget) is the fast path.
+// Otherwise every commit exclusive to the submitted side must have a
+// patch-equivalent commit on the fetched target, as reported by `git cherry`.
+// The comparison fails closed: `git cherry` omits merge and empty commits, so
+// the number of cherry results must equal the number of submitted-side commits,
+// any "+" (patch not on target) rejects, and unexpected output rejects. This is
+// the same contract as bridge-town-core's scripts/verify_submitted_work_landed.sh
+// (bt-9or5); the two must be changed together.
+func (g *Git) VerifySubmittedWorkLanded(remote, branch, commit string) error {
+	exactErr := g.VerifyPushedCommitReachableFromPushTarget(remote, branch, commit)
+	if exactErr == nil {
+		return nil
+	}
+	commit = strings.TrimSpace(commit)
+	if commit == "" {
+		return exactErr
+	}
+	fetchTarget := g.pushTarget(remote)
+	if _, err := g.run("fetch", "--no-tags", fetchTarget, "refs/heads/"+branch); err != nil {
+		return fmt.Errorf("submitted_work_unproven: unable to fetch %s/%s: %w", remote, branch, err)
+	}
+	target, err := g.run("rev-parse", "--verify", "FETCH_HEAD^{commit}")
+	if err != nil {
+		return fmt.Errorf("submitted_work_unproven: unable to resolve fetched %s/%s: %w", remote, branch, err)
+	}
+	mergeBase, err := g.run("merge-base", commit, target)
+	if err != nil {
+		return fmt.Errorf("submitted_work_unproven: commit %s and %s/%s have no common ancestor: %w", shortSHA(commit), remote, branch, err)
+	}
+	countOut, err := g.run("rev-list", "--count", mergeBase+".."+commit)
+	if err != nil {
+		return fmt.Errorf("submitted_work_unproven: unable to count submitted commits for %s: %w", shortSHA(commit), err)
+	}
+	submittedCount, err := strconv.Atoi(strings.TrimSpace(countOut))
+	if err != nil || submittedCount <= 0 {
+		return fmt.Errorf("submitted_work_unproven: commit %s has no commits beyond the merge base with %s/%s (%w)", shortSHA(commit), remote, branch, exactErr)
+	}
+	cherryOut, err := g.Cherry(target, commit)
+	if err != nil {
+		return fmt.Errorf("submitted_work_unproven: unable to compare submitted patches with %s/%s: %w", remote, branch, err)
+	}
+	observed, equivalent := 0, 0
+	for _, line := range strings.Split(cherryOut, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 || len(fields[1]) != 40 || !isHexString(fields[1]) {
+			return fmt.Errorf("submitted_work_unproven: unexpected git cherry output %q; refusing proof", line)
+		}
+		observed++
+		switch fields[0] {
+		case "-":
+			equivalent++
+		case "+":
+			return fmt.Errorf("submitted_work_unproven: submitted commit %s has no patch-equivalent on %s/%s (%w)", shortSHA(fields[1]), remote, branch, exactErr)
+		default:
+			return fmt.Errorf("submitted_work_unproven: unexpected git cherry marker %q; refusing proof", fields[0])
+		}
+	}
+	if observed != submittedCount {
+		return fmt.Errorf("submitted_work_unproven: submitted series could not be compared completely (%d/%d commits; merge or empty commits are not accepted)", observed, submittedCount)
+	}
+	if equivalent == 0 {
+		return fmt.Errorf("submitted_work_unproven: no patch-equivalent commits found for %s on %s/%s (%w)", shortSHA(commit), remote, branch, exactErr)
+	}
+	return nil
+}
+
+func isHexString(s string) bool {
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return s != ""
 }
 
 func parseLSRemoteTip(out, branch string) string {
