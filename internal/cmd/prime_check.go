@@ -154,5 +154,13 @@ func runPrimeCheck(cmd *cobra.Command, info RoleInfo, beadID string) error {
 		}
 	}
 	result["policy_hashes"] = hashes
+	if isPatrolRole(string(info.Role)) {
+		if session, err := getCurrentTmuxSession(); err == nil {
+			if sample, err := samplePatrolHandoffState(session); err == nil {
+				rssLimit, maxAge := patrolHandoffThresholds()
+				result["patrol"] = map[string]interface{}{"rss_mb": sample.RSSMB, "process_age_seconds": int64(sample.Age.Seconds()), "handoff_would_skip": shouldSkipPatrolHandoff(sample, rssLimit, maxAge)}
+			}
+		}
+	}
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(result)
 }

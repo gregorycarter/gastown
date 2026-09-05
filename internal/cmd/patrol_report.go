@@ -92,6 +92,9 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 	}
 
 	// Close the current patrol root with the summary
+	if err := savePatrolContext(roleInfo.TownRoot, cfg.Assignee, patrolID, patrolReportSummary); err != nil {
+		style.PrintWarning("could not save bounded patrol context: %v", err)
+	}
 	b := cfg.Beads
 	if b == nil {
 		b = beads.New(cfg.BeadsDir)

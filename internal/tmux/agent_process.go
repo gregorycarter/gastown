@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // AgentPID returns the PID of the agent runtime process (claude, codex, …)
@@ -125,4 +126,42 @@ func (t *Tmux) AgentRSSMB(session string) (int, error) {
 		return 0, err
 	}
 	return ProcessRSSMB(pid)
+}
+
+// ProcessAge measures the current process, not its long-lived tmux container.
+func ProcessAge(pid string) (time.Duration, error) {
+	clean, ok := normalizeProcessID(pid)
+	if !ok {
+		return 0, fmt.Errorf("invalid process ID %q", pid)
+	}
+	out, err := exec.Command("ps", "-o", "etime=", "-p", clean).Output()
+	if err != nil {
+		return 0, err
+	}
+	return parseElapsedTime(strings.TrimSpace(string(out)))
+}
+
+func parseElapsedTime(value string) (time.Duration, error) {
+	var days int
+	if left, right, ok := strings.Cut(value, "-"); ok {
+		var err error
+		days, err = strconv.Atoi(left)
+		if err != nil || days < 0 {
+			return 0, fmt.Errorf("invalid elapsed time %q", value)
+		}
+		value = right
+	}
+	parts := strings.Split(value, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, fmt.Errorf("invalid elapsed time %q", value)
+	}
+	seconds := 0
+	for _, part := range parts {
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("invalid elapsed time %q", value)
+		}
+		seconds = seconds*60 + n
+	}
+	return time.Duration(days*86400+seconds) * time.Second, nil
 }

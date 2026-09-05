@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -62,22 +63,22 @@ func samplePatrolHandoffState(session string) (patrolHandoffSample, error) {
 	}
 	t := tmux.NewTmuxWithSocket(tmux.SocketFromEnv())
 
-	rssMB, err := t.AgentRSSMB(session)
+	pid, err := t.AgentPID(session)
+	if err != nil {
+		return patrolHandoffSample{}, err
+	}
+	rssMB, err := tmux.ProcessRSSMB(pid)
 	if err != nil {
 		return patrolHandoffSample{}, err
 	}
 
-	created, err := t.GetSessionCreatedUnix(session)
+	age, err := tmux.ProcessAge(pid)
 	if err != nil {
 		return patrolHandoffSample{}, err
 	}
-	if created <= 0 {
-		return patrolHandoffSample{}, fmt.Errorf("session %s has no creation time", session)
-	}
-
 	return patrolHandoffSample{
 		RSSMB: rssMB,
-		Age:   time.Since(time.Unix(created, 0)),
+		Age:   age,
 	}, nil
 }
 
@@ -88,28 +89,38 @@ func samplePatrolHandoffState(session string) (patrolHandoffSample, error) {
 // refinery) and --force was not given. Any sampling failure falls through to a
 // normal handoff: a guard that cannot observe the agent must not block it.
 func maybeSkipPatrolHandoff(force bool) bool {
-	if force {
+	if !isPatrolRole(currentRoleName()) {
 		return false
 	}
-	if !isPatrolRole(currentRoleName()) {
+	audit := func(reason string, sample patrolHandoffSample) {
+		_ = events.LogAudit("patrol_handoff_decision", os.Getenv("GT_ROLE"), map[string]interface{}{
+			"reason": reason, "rss_mb": sample.RSSMB, "process_age_seconds": int64(sample.Age.Seconds()),
+		})
+	}
+	if force {
+		audit("forced", patrolHandoffSample{})
 		return false
 	}
 
 	session, err := getCurrentTmuxSession()
 	if err != nil || session == "" {
+		audit("session_unobservable", patrolHandoffSample{})
 		return false
 	}
 
 	sample, err := samplePatrolHandoffState(session)
 	if err != nil {
+		audit("process_unobservable", patrolHandoffSample{})
 		return false
 	}
 
 	rssLimitMB, maxAge := patrolHandoffThresholds()
 	if !shouldSkipPatrolHandoff(sample, rssLimitMB, maxAge) {
+		audit("rss_or_process_age_limit", sample)
 		return false
 	}
 
 	fmt.Println(formatPatrolHandoffSkip(sample))
+	audit("skipped_healthy", sample)
 	return true
 }

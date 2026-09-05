@@ -114,3 +114,22 @@ func TestPrimeCheckMRDescription(t *testing.T) {
 		t.Fatal("invalid receipt accepted")
 	}
 }
+
+func TestPatrolContextBoundedAndDurable(t *testing.T) {
+	root := t.TempDir()
+	if err := savePatrolContext(root, "rig/witness", "hq-patrol", strings.Repeat("a", 10000)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, ".runtime/patrol-state/rig-witness.json")
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) > 1600 {
+		t.Fatalf("length=%d err=%v", len(data), err)
+	}
+	if err := savePatrolContext(root, "rig/witness", "hq-next", "new observations"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(path)
+	if !strings.Contains(string(data), "hq-next") {
+		t.Fatal("checkpoint not refreshed")
+	}
+}
