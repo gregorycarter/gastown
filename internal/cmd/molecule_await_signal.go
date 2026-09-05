@@ -25,6 +25,8 @@ var (
 	awaitSignalBackoffMax  string
 	awaitSignalQuiet       bool
 	awaitSignalAgentBead   string
+	awaitSignalEventScope  string
+	awaitSignalDebounce    time.Duration
 )
 
 var moleculeAwaitSignalCmd = &cobra.Command{
@@ -94,6 +96,10 @@ type AwaitSignalResult struct {
 }
 
 func init() {
+	for _, command := range []*cobra.Command{moleculeAwaitSignalCmd, moleculeAwaitSignalShortcutCmd} {
+		command.Flags().StringVar(&awaitSignalEventScope, "event-scope", "auto", "auto filters Deacon/Witness events; all preserves the unfiltered feed")
+		command.Flags().DurationVar(&awaitSignalDebounce, "debounce", 3*time.Second, "Coalesce relevant patrol events; direct messages and failures wake immediately")
+	}
 	moleculeAwaitSignalCmd.Flags().StringVar(&awaitSignalTimeout, "timeout", "60s",
 		"Maximum time to wait for signal (e.g., 30s, 5m)")
 	moleculeAwaitSignalCmd.Flags().StringVar(&awaitSignalBackoffBase, "backoff-base", "",
@@ -132,6 +138,12 @@ func init() {
 }
 
 func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
+	if awaitSignalEventScope != "auto" && awaitSignalEventScope != "all" {
+		return fmt.Errorf("--event-scope must be auto or all")
+	}
+	if awaitSignalDebounce < 0 || awaitSignalDebounce > 30*time.Second {
+		return fmt.Errorf("--debounce must be between 0s and 30s")
+	}
 	// Find beads directory (rig-local for bead operations)
 	beadsDir, err := resolveAgentTrackingBeadsDirFor(awaitSignalAgentBead)
 	if err != nil {
@@ -222,7 +234,14 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	result, err := waitForActivitySignal(ctx, townRoot)
+	policy := patrolWakePolicy{}
+	if awaitSignalEventScope != "all" {
+		cwd, _ := os.Getwd()
+		if info, roleErr := GetRoleWithContext(cwd, townRoot); roleErr == nil && (info.Role == RoleDeacon || info.Role == RoleWitness) {
+			policy = patrolWakePolicy{role: info.Role, rig: info.Rig, actor: strings.Trim(getAgentIdentity(info), "/"), debounce: awaitSignalDebounce}
+		}
+	}
+	result, err := waitForEventsFileFiltered(ctx, filepath.Join(townRoot, events.EventsFile), policy)
 	if err != nil {
 		return fmt.Errorf("feed subscription failed: %w", err)
 	}
@@ -370,6 +389,10 @@ func waitForActivitySignal(ctx context.Context, townRoot string) (*AwaitSignalRe
 // waitForEventsFile tails the events file for new lines.
 // This replaces the former bd activity --follow subprocess approach.
 func waitForEventsFile(ctx context.Context, eventsPath string) (*AwaitSignalResult, error) {
+	return waitForEventsFileFiltered(ctx, eventsPath, patrolWakePolicy{})
+}
+
+func waitForEventsFileFiltered(ctx context.Context, eventsPath string, policy patrolWakePolicy) (*AwaitSignalResult, error) {
 
 	f, err := os.OpenFile(eventsPath, os.O_RDONLY|os.O_CREATE, 0644)
 	if err != nil {
@@ -388,24 +411,48 @@ func waitForEventsFile(ctx context.Context, eventsPath string) (*AwaitSignalResu
 	reader := bufio.NewReader(f)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
+	var partial, pending string
+	var releaseAt time.Time
 
 	for {
 		select {
 		case <-ctx.Done():
+			if pending != "" {
+				return &AwaitSignalResult{Reason: "signal", Signal: pending}, nil
+			}
 			return &AwaitSignalResult{
 				Reason: "timeout",
 			}, nil
 		case <-ticker.C:
-			line, err := reader.ReadString('\n')
-			if err == nil && line != "" {
-				return &AwaitSignalResult{
-					Reason: "signal",
-					Signal: strings.TrimRight(line, "\n"),
-				}, nil
+			if pending != "" && !time.Now().Before(releaseAt) {
+				return &AwaitSignalResult{Reason: "signal", Signal: pending}, nil
 			}
-			// io.EOF means no new data yet — keep polling
-			if err != nil && err != io.EOF {
-				return nil, fmt.Errorf("reading events file: %w", err)
+			// Drain each burst in one tick; do not discard a partially written
+			// JSON line at EOF or spend one poll interval per ignored record.
+			for {
+				line, err := reader.ReadString('\n')
+				line = partial + line
+				partial = ""
+				if err == nil && line != "" {
+					if wake, urgent := policy.classify(line); wake {
+						if urgent || policy.debounce == 0 {
+							return &AwaitSignalResult{Reason: "signal", Signal: strings.TrimSpace(line)}, nil
+						}
+						if pending == "" {
+							releaseAt = time.Now().Add(policy.debounce)
+						}
+						pending = strings.TrimSpace(line)
+					}
+					continue
+				}
+				// io.EOF means no new data yet — keep polling
+				if err != nil && err != io.EOF {
+					return nil, fmt.Errorf("reading events file: %w", err)
+				}
+				if err == io.EOF {
+					partial = line
+					break
+				}
 			}
 		}
 	}

@@ -33,6 +33,8 @@ var primeDryRun bool
 var primeState bool
 var primeStateJSON bool
 var primeExplain bool
+var primeCheck bool
+var primeCheckBead string
 var primeStructuredSessionStartOutput bool
 
 // Prime's external injections are best-effort; role context should still
@@ -104,6 +106,8 @@ HOOK MODE (--hook):
 }
 
 func init() {
+	primeCmd.Flags().BoolVar(&primeCheck, "check", false, "Read-only compact identity, worktree and work-bead verification; no instructions or session setup")
+	primeCmd.Flags().StringVar(&primeCheckBead, "work-bead", "", "Bead/MR to verify with --check (workers default to the branch bead)")
 	primeCmd.Flags().BoolVar(&primeHookMode, "hook", false,
 		"Hook mode: read session ID from stdin JSON (for LLM runtime hooks)")
 	primeCmd.Flags().BoolVar(&primeDryRun, "dry-run", false,
@@ -138,6 +142,9 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	roleInfo, err := GetRoleWithContext(cwd, townRoot)
 	if err != nil {
 		return fmt.Errorf("detecting role: %w", err)
+	}
+	if primeCheck {
+		return runPrimeCheck(cmd, roleInfo, primeCheckBead)
 	}
 	if err := ensureRoleWorktreeIntegrity(cwd, townRoot, roleInfo.Role); err != nil {
 		return err
@@ -304,11 +311,17 @@ func runPrimeCompactResume(ctx RoleContext) {
 
 // validatePrimeFlags checks that CLI flag combinations are valid.
 func validatePrimeFlags() error {
+	if primeCheck && (primeState || primeHookMode || primeDryRun || primeExplain) {
+		return fmt.Errorf("--check cannot be combined with --state, --hook, --dry-run or --explain")
+	}
+	if primeCheckBead != "" && !primeCheck {
+		return fmt.Errorf("--work-bead requires --check")
+	}
 	if primeState && (primeHookMode || primeDryRun || primeExplain) {
 		return fmt.Errorf("--state cannot be combined with other flags (except --json)")
 	}
-	if primeStateJSON && !primeState {
-		return fmt.Errorf("--json requires --state")
+	if primeStateJSON && !primeState && !primeCheck {
+		return fmt.Errorf("--json requires --state or --check")
 	}
 	return nil
 }
