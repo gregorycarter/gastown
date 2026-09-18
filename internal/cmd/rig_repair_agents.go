@@ -57,7 +57,12 @@ func repairRigLifecycleIdentities(db rigIdentityStore, prefix, name string, out 
 		{beads.RefineryBeadIDWithPrefix(prefix, name), "refinery"},
 	} {
 		issue, fields, getErr := db.GetAgentBead(item.id)
-		if getErr == nil {
+		if getErr != nil {
+			return fmt.Errorf("inspect %s: %w", item.id, getErr)
+		}
+		// GetAgentBead represents a missing identity as (nil, nil, nil).
+		// An error is an unavailable/invalid store, never permission to create.
+		if issue != nil {
 			if fields == nil || fields.RoleType != item.role || fields.Rig != name || issue.Status != "open" {
 				return fmt.Errorf("existing identity %s is not the expected open role; refusing overwrite", item.id)
 			}

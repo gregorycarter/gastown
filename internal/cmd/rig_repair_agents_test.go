@@ -8,17 +8,31 @@ import (
 )
 
 type fakeRigIdentityStore struct {
-	issues  map[string]*beads.Issue
-	creates int
-	fail    bool
+	issues   map[string]*beads.Issue
+	creates  int
+	fail     bool
+	readFail bool
 }
 
 func (f *fakeRigIdentityStore) GetAgentBead(id string) (*beads.Issue, *beads.AgentFields, error) {
+	if f.readFail {
+		return nil, nil, fmt.Errorf("DB unavailable")
+	}
 	issue, ok := f.issues[id]
 	if !ok {
-		return nil, nil, fmt.Errorf("missing")
+		return nil, nil, nil
 	}
 	return issue, beads.ParseAgentFields(issue.Description), nil
+}
+
+func TestRepairRigLifecycleIdentitiesReadFailureDoesNotCreate(t *testing.T) {
+	db := &fakeRigIdentityStore{issues: map[string]*beads.Issue{}, readFail: true}
+	if err := repairRigLifecycleIdentities(db, "hisn", "hisn", io.Discard); err == nil {
+		t.Fatal("read failure accepted")
+	}
+	if db.creates != 0 {
+		t.Fatal("created after failed lookup")
+	}
 }
 func (f *fakeRigIdentityStore) CreateAgentBead(id, title string, fields *beads.AgentFields) (*beads.Issue, error) {
 	if f.fail {
