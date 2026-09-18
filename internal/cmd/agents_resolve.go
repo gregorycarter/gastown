@@ -108,9 +108,8 @@ func runAgentsResolve(cmd *cobra.Command, _ []string) error {
 		}
 		return fmt.Errorf("%s", message)
 	}
-	if rig != "" && agentBeadSourceIsTown(match.Source) && !agentsResolveJSON {
-		return fmt.Errorf("agent bead %s was found only in %s; patrol await/state commands require a rig-local agent bead", match.ID, match.Source)
-	}
+	// Canonical lifecycle identities are HQ-owned. A matched rig/role in HQ
+	// is valid in text mode too; JSON still exposes its exact provenance.
 
 	if agentsResolveJSON {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(agentsResolveResult{

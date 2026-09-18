@@ -257,9 +257,13 @@ func verifyFormulaExists(formulaName, workDir, townRoot string) error {
 
 	// Pinned formula directory (workflow.formulas_dir): resolve by explicit
 	// file path so the answer does not depend on cwd or the .beads redirect.
-	pinnedDir := config.FormulasDir(townRoot)
+	var pinnedError error
 	for _, candidate := range []string{formulaName, "mol-" + formulaName} {
-		pinned := config.FormulaFileIn(pinnedDir, candidate)
+		pinned, pinErr := config.PinnedFormulaFile(townRoot, config.FormulaRigFromPath(townRoot, workDir), candidate)
+		if pinErr != nil {
+			pinnedError = pinErr
+			continue
+		}
 		if pinned == "" {
 			continue
 		}
@@ -270,6 +274,10 @@ func verifyFormulaExists(formulaName, workDir, townRoot string) error {
 			Stderr(io.Discard).Output(); err == nil && len(out) > 0 {
 			return nil
 		}
+		return fmt.Errorf("pinned formula %s could not be verified; refusing fallback", pinned)
+	}
+	if pinnedError != nil {
+		return pinnedError
 	}
 
 	// Try bd formula show (handles all formula file formats)

@@ -23,6 +23,21 @@ When an agent runs `bd cook mol-polecat-work`, which version do they get?
 
 ## Three-Tier Resolution
 
+### Explicit pins in this fork
+
+`workflow.formulas_dir` in a rig's `settings/config.json` is an optional absolute
+directory that takes precedence over the town pin. Rendering, validation and
+`bd cook` use the same explicit file. A configured rig pin that is missing a
+requested formula fails closed: it must not execute another rig's town policy.
+Rigs without an override retain the historical town-pinned resolution order.
+Publish the complete role formula set before enabling a rig override.
+
+For a newly registered rig with missing lifecycle records, `gt rig repair-agents
+<rig>` repairs only its missing Witness/Refinery identities in HQ. It validates
+existing identities without resetting hooks, reopening closed roles, running
+doctor/GC or restarting services. Canonical rig-prefixed agent records are
+explicitly permitted in HQ; ordinary work-bead prefix rules are unchanged.
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     FORMULA RESOLUTION ORDER                     │

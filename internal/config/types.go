@@ -723,7 +723,7 @@ type WorkflowConfig struct {
 	DefaultFormula string `json:"default_formula,omitempty"`
 
 	// FormulasDir is an absolute path to a single pinned formula directory
-	// (town-level setting only). When set it is consulted before every other
+	// (town default, with an explicit per-rig override). When set it is consulted before every other
 	// resolution tier, and is passed to `bd cook` / `bd formula show` as an
 	// explicit file path rather than relying on the working directory and the
 	// .beads redirect. Point it at a git-tracked directory so a formula fix

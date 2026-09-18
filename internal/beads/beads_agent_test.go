@@ -551,6 +551,24 @@ func TestCreateAgentBead_UsesTownRootForCrossRigRoutes(t *testing.T) {
 	// Work bead status=hooked and assignee=<agent> is now the authoritative source.
 }
 
+func TestCreateAgentBead_CollapsedRigPrefixExplicitlyAllowedInHQ(t *testing.T) {
+	root := t.TempDir()
+	logPath := filepath.Join(root, "bd.log")
+	installMockBDCreateRecorder(t, logPath)
+	b := NewWithBeadsDir(root, filepath.Join(root, ".beads"))
+	_, err := b.CreateAgentBead("hisn-witness", "Hisn witness", &AgentFields{RoleType: "witness", Rig: "hisn", AgentState: "idle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "--id=hisn-witness") || !strings.Contains(string(data), "--force") {
+		t.Fatalf("canonical foreign-prefix creation not explicit: %s", data)
+	}
+}
+
 func TestCreateAgentBead_ParsesMockCreateOutput(t *testing.T) {
 	raw := []byte(`{"id":"pt-imported-polecat-shiny","title":"shiny","status":"open"}`)
 	var issue Issue

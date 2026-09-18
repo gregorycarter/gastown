@@ -1200,15 +1200,16 @@ func ensureFormulaRequiredVars(formulaName string, vars []string) []string {
 // directory, which follows the rig's .beads redirect — a different directory
 // from the one gt itself renders patrol steps out of.
 func CookFormula(formulaName, workDir, townRoot string) error {
-	if pinned := config.FormulaFileIn(config.FormulasDir(townRoot), formulaName); pinned != "" {
-		if err := BdCmd("cook", pinned).
+	pinned, pinErr := config.PinnedFormulaFile(townRoot, config.FormulaRigFromPath(townRoot, workDir), formulaName)
+	if pinErr != nil {
+		return pinErr
+	}
+	if pinned != "" {
+		return BdCmd("cook", pinned).
 			Dir(workDir).
 			WithAutoCommit().
 			WithGTRoot(townRoot).
-			Run(); err == nil {
-			return nil
-		}
-		// Fall through to name-based resolution below.
+			Run()
 	}
 
 	err := BdCmd("cook", formulaName).

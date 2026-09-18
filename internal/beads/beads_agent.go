@@ -238,7 +238,10 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 			"--type=task",
 			"--labels=gt:agent",
 		}
-		if NeedsForceForID(id) {
+		// Canonical agent identities live in HQ even when their ID carries a
+		// rig prefix (e.g. hisn-witness). This narrowly scoped system creation
+		// must explicitly permit that prefix; ordinary issue creation is unchanged.
+		if NeedsForceForID(id) || (fields != nil && fields.Rig != "") {
 			a = append(a, "--force")
 		}
 		// Default actor from BD_ACTOR env var for provenance tracking

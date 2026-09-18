@@ -47,7 +47,7 @@ type HealthReport struct {
 }
 
 // ResolveFormulaContent resolves formula content using the precedence defined
-// in docs/design/formula-resolution.md — pinned > rig > town > embedded.
+// in docs/design/formula-resolution.md — explicit rig pin > town pin > rig > town > embedded.
 //
 // Tier 0 (pinned): <workflow.formulas_dir>/<name>.formula.toml, when the town
 //
@@ -67,11 +67,14 @@ func ResolveFormulaContent(name, townRoot, rigName string) ([]byte, error) {
 		filename = filename + ".formula.toml"
 	}
 
-	// Tier 0: pinned formula directory (town setting)
-	if pinned := config.FormulaFileIn(config.FormulasDir(townRoot), name); pinned != "" {
-		if content, err := os.ReadFile(pinned); err == nil {
-			return content, nil
-		}
+	// Explicit rig pin, otherwise the historical town pin. Never render a
+	// different policy from the file handed to bd cook.
+	pinned, err := config.PinnedFormulaFile(townRoot, rigName, name)
+	if err != nil {
+		return nil, err
+	}
+	if pinned != "" {
+		return os.ReadFile(pinned)
 	}
 
 	// Tier 1: rig-level (most specific)
