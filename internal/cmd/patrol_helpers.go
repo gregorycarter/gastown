@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/style"
@@ -202,44 +203,53 @@ func autoSpawnPatrol(cfg PatrolConfig) (string, error) {
 	// This ensures bd targets the correct database (e.g., rig database
 	// instead of HQ) regardless of inherited BEADS_DIR. See gt-ctir.
 	resolvedBeadsDir := beads.ResolveBeadsDir(cfg.BeadsDir)
+	// Patrol records are HQ-owned, but their procedure is rig-owned. Resolving
+	// from the HQ cwd silently selected another rig's town-pinned procedure.
+	pinned, pinErr := pinnedPatrolFormula(cfg)
+	if pinErr != nil {
+		return "", pinErr
+	}
 
 	// Burn any existing patrol wisps for this role before creating a new one.
 	// Without this, each patrol cycle leaks a root wisp into the DB, producing
 	// ~500-700 orphans/day across all patrol formulas (gt-92jh).
-	burnPreviousPatrolWisps(cfg)
 
 	// Find the proto ID for the patrol molecule
-	cmdCatalog := exec.Command("gt", "formula", "list")
-	cmdCatalog.Dir = cfg.BeadsDir
-	var stdoutCatalog, stderrCatalog bytes.Buffer
-	cmdCatalog.Stdout = &stdoutCatalog
-	cmdCatalog.Stderr = &stderrCatalog
+	protoID := pinned
+	if protoID == "" {
+		cmdCatalog := exec.Command("gt", "formula", "list")
+		cmdCatalog.Dir = cfg.BeadsDir
+		var stdoutCatalog, stderrCatalog bytes.Buffer
+		cmdCatalog.Stdout = &stdoutCatalog
+		cmdCatalog.Stderr = &stderrCatalog
 
-	if err := cmdCatalog.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderrCatalog.String())
-		if errMsg != "" {
-			return "", fmt.Errorf("failed to list formulas: %s", errMsg)
+		if err := cmdCatalog.Run(); err != nil {
+			errMsg := strings.TrimSpace(stderrCatalog.String())
+			if errMsg != "" {
+				return "", fmt.Errorf("failed to list formulas: %s", errMsg)
+			}
+			return "", fmt.Errorf("failed to list formulas: %w", err)
 		}
-		return "", fmt.Errorf("failed to list formulas: %w", err)
-	}
 
-	// Find patrol molecule in formula list
-	// Format: "formula-name         description"
-	var protoID string
-	catalogLines := strings.Split(stdoutCatalog.String(), "\n")
-	for _, line := range catalogLines {
-		if strings.Contains(line, cfg.PatrolMolName) {
-			parts := strings.Fields(line)
-			if len(parts) > 0 {
-				protoID = parts[0]
-				break
+		// Find patrol molecule in formula list
+		// Format: "formula-name         description"
+		catalogLines := strings.Split(stdoutCatalog.String(), "\n")
+		for _, line := range catalogLines {
+			if strings.Contains(line, cfg.PatrolMolName) {
+				parts := strings.Fields(line)
+				if len(parts) > 0 {
+					protoID = parts[0]
+					break
+				}
 			}
 		}
-	}
 
-	if protoID == "" {
-		return "", fmt.Errorf("proto %s not found in catalog", cfg.PatrolMolName)
+		if protoID == "" {
+			return "", fmt.Errorf("proto %s not found in catalog", cfg.PatrolMolName)
+		}
 	}
+	// Resolve/validate before altering any previous role patrol.
+	burnPreviousPatrolWisps(cfg)
 
 	// Create the patrol wisp (root only — steps are read inline at prime time,
 	// not tracked as individual DB rows). Child wisps are reserved for pour=true
@@ -308,6 +318,15 @@ func autoSpawnPatrol(cfg PatrolConfig) (string, error) {
 	}
 
 	return patrolID, nil
+}
+
+func pinnedPatrolFormula(cfg PatrolConfig) (string, error) {
+	rigName := ""
+	parts := strings.Split(cfg.Assignee, "/")
+	if len(parts) == 2 && (parts[1] == "refinery" || parts[1] == "witness") {
+		rigName = parts[0]
+	}
+	return config.PinnedFormulaFile(cfg.BeadsDir, rigName, cfg.PatrolMolName)
 }
 
 func renderPatrolWispDescription(cfg PatrolConfig) (string, error) {

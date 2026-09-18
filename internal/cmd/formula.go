@@ -203,6 +203,16 @@ func runFormulaList(cmd *cobra.Command, args []string) error {
 // runFormulaShow delegates to bd formula show
 func runFormulaShow(cmd *cobra.Command, args []string) error {
 	formulaName := args[0]
+	if town, err := workspace.FindFromCwd(); err == nil && town != "" {
+		cwd, _ := os.Getwd()
+		pinned, err := config.PinnedFormulaFile(town, config.FormulaRigFromPath(town, cwd), formulaName)
+		if err != nil {
+			return err
+		}
+		if pinned != "" {
+			formulaName = pinned
+		}
+	}
 	bdArgs := []string{"formula", "show", formulaName}
 	if formulaShowJSON {
 		bdArgs = append(bdArgs, "--json")
