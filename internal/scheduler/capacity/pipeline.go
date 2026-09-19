@@ -18,17 +18,23 @@ type PendingBead struct {
 // SlingContextFields holds scheduling parameters stored on a sling context bead.
 // JSON-serialized as the context bead's description.
 type SlingContextFields struct {
-	Version          int    `json:"version"`
-	WorkBeadID       string `json:"work_bead_id"`
-	TargetRig        string `json:"target_rig"`
-	Formula          string `json:"formula,omitempty"`
-	Args             string `json:"args,omitempty"`
-	Vars             string `json:"vars,omitempty"`
-	EnqueuedAt       string `json:"enqueued_at"`
-	Merge            string `json:"merge,omitempty"`
-	Convoy           string `json:"convoy,omitempty"`
-	BaseBranch       string `json:"base_branch,omitempty"`
-	ResumeBranch     string `json:"resume_branch,omitempty"`
+	Version      int    `json:"version"`
+	WorkBeadID   string `json:"work_bead_id"`
+	TargetRig    string `json:"target_rig"`
+	Formula      string `json:"formula,omitempty"`
+	Args         string `json:"args,omitempty"`
+	Vars         string `json:"vars,omitempty"`
+	EnqueuedAt   string `json:"enqueued_at"`
+	Merge        string `json:"merge,omitempty"`
+	Convoy       string `json:"convoy,omitempty"`
+	BaseBranch   string `json:"base_branch,omitempty"`
+	ResumeBranch string `json:"resume_branch,omitempty"`
+	// ResumeMR is an opt-in same-worker recovery, not a fresh sling. These
+	// immutable identifiers are revalidated at enqueue, readiness and dispatch.
+	ResumeMR         string `json:"resume_mr,omitempty"`
+	ResumeWorker     string `json:"resume_worker,omitempty"`
+	ResumeHead       string `json:"resume_head,omitempty"`
+	ResumeReceipt    string `json:"resume_receipt,omitempty"`
 	NoMerge          bool   `json:"no_merge,omitempty"`
 	ReviewOnly       bool   `json:"review_only,omitempty"`
 	Account          string `json:"account,omitempty"`

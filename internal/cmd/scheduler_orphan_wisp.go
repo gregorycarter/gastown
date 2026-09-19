@@ -93,6 +93,11 @@ func sweepOrphanWispBlockers(townRoot string, assessments []scheduledContextAsse
 	var wispIDs []string
 	var pending []scheduledContextAssessment
 	for _, a := range assessments {
+		// Same-MR recovery must retain the original molecule, including its
+		// completed or partially completed steps. It is never orphan cleanup.
+		if a.fields != nil && a.fields.ResumeMR != "" {
+			continue
+		}
 		if a.ready || !a.blocked || len(a.blockers) == 0 {
 			continue
 		}

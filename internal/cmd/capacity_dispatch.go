@@ -281,6 +281,20 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	}
 
 	// Wire up the DispatchCycle
+	// Recovery admission is owned by the pressure-checked daemon tick. A
+	// manual scheduler run may still dispatch ordinary work, but cannot burn
+	// recovery retries or start a recovery around that pressure policy.
+	if !isDaemonDispatch() {
+		var admitted []capacity.PendingBead
+		for _, pending := range dispatchPlan.Plan.ToDispatch {
+			if pending.Context != nil && pending.Context.ResumeMR != "" {
+				dispatchPlan.Plan.Skipped++
+				continue
+			}
+			admitted = append(admitted, pending)
+		}
+		dispatchPlan.Plan.ToDispatch = admitted
+	}
 	successfulRigs := make(map[string]bool)
 	// Track polecat names from dispatch results, keyed by context bead ID.
 	polecatNames := make(map[string]string)
@@ -487,6 +501,7 @@ type scheduledContextAssessment struct {
 	blockedUnknown bool
 	blockers       []string
 	ready          bool
+	recoveryError  string
 }
 
 // pauseReason explains, in one short phrase, why `gt scheduler list` shows a
@@ -495,6 +510,9 @@ type scheduledContextAssessment struct {
 func (a scheduledContextAssessment) pauseReason() string {
 	if a.ready {
 		return ""
+	}
+	if a.recoveryError != "" {
+		return "recovery: " + a.recoveryError
 	}
 	if a.fields != nil && a.fields.DispatchFailures >= maxDispatchFailures {
 		return "respawn-limit"
@@ -578,6 +596,10 @@ func cleanupStaleContexts(townRoot string) error {
 	for i, ctx := range staleCheckContexts {
 		fields := staleCheckFields[i]
 		info, found := workBeadInfo[fields.WorkBeadID]
+		// A recovery deliberately retains the existing hooked/in-progress source.
+		if fields.ResumeMR != "" && found && (info.Status == "hooked" || info.Status == "in_progress") {
+			continue
+		}
 		if found && (info.Status == "hooked" || info.Status == "closed" || info.Status == "tombstone") {
 			_ = beadsForContextRecord(ctx).CloseSlingContext(ctx.issue.ID, "stale-work-bead")
 		}
@@ -761,6 +783,15 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 		candidate.blockedUnknown = blockedUnknownIDs[workBeadID]
 		candidate.blockers = blockers[workBeadID]
 		candidate.ready = isScheduledWorkBeadReady(workBeadID, info, found, blockedWorkIDs, blockedUnknownIDs)
+		if candidate.fields.ResumeMR != "" {
+			// This validates the original MR plus inherited dependencies directly;
+			// awaiting-merge and an existing molecule are not new-work blockers.
+			_, resumeErr := validateMQResumeContext(townRoot, candidate.fields)
+			candidate.ready = resumeErr == nil
+			if resumeErr != nil {
+				candidate.recoveryError = resumeErr.Error()
+			}
+		}
 		assessments = append(assessments, candidate)
 	}
 
@@ -844,6 +875,9 @@ func readySlingContextsFromAssessments(assessments []scheduledContextAssessment)
 func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResult, error) {
 	if b.Context == nil {
 		return nil, fmt.Errorf("missing sling context for %s", b.ID)
+	}
+	if b.Context.ResumeMR != "" {
+		return dispatchMQResume(townRoot, b.Context)
 	}
 
 	dp := capacity.ReconstructFromContext(b.Context)

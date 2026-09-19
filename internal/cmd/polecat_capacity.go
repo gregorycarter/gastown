@@ -14,7 +14,9 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/wisp"
 )
 
 const polecatAdmissionReservationTTL = 30 * time.Minute
@@ -113,7 +115,11 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 	if err != nil {
 		return nil, polecatCapacitySnapshot{}, err
 	}
-	if max <= 0 {
+	rigMax, err := configuredRigAdmissionMax(townRoot, rigName)
+	if err != nil {
+		return nil, polecatCapacitySnapshot{}, err
+	}
+	if max <= 0 && rigMax <= 0 {
 		return &polecatAdmissionHandle{disabled: true}, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}, nil
 	}
 
@@ -131,12 +137,23 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 	if err != nil {
 		return nil, polecatCapacitySnapshot{}, err
 	}
-	if snapshot.Free <= 0 {
+	if max > 0 && snapshot.Free <= 0 {
 		return nil, snapshot, &polecatCapacityAdmissionError{
 			Snapshot: snapshot,
 			Rig:      rigName,
 			Bead:     beadID,
 			Reason:   "configured scheduler.max_polecats capacity is full",
+		}
+	}
+	// Explicit local per-rig limits share the town reservation lock. A town
+	// cap increase must never increase Hisn's independently configured cap.
+	if rigMax > 0 {
+		used, err := occupiedRigAdmissionSlots(townRoot, rigName)
+		if err != nil {
+			return nil, snapshot, err
+		}
+		if used >= rigMax {
+			return nil, snapshot, &polecatCapacityAdmissionError{Snapshot: snapshot, Rig: rigName, Bead: beadID, Reason: fmt.Sprintf("rig %s max_polecats capacity is full (%d/%d)", rigName, used, rigMax)}
 		}
 	}
 
@@ -145,8 +162,80 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 		return nil, snapshot, err
 	}
 	snapshot.Reservations++
-	snapshot.Free--
+	if max > 0 {
+		snapshot.Free--
+	}
 	return &polecatAdmissionHandle{townRoot: townRoot, id: reservation.ID, path: path}, snapshot, nil
+}
+
+// Only explicitly configured local caps change admission. Missing config
+// keeps existing behavior for other rigs; malformed/blocked limits fail shut.
+func configuredRigAdmissionMax(townRoot, rigName string) (int, error) {
+	if rigName == "" {
+		return 0, nil
+	}
+	if filepath.Base(rigName) != rigName || rigName == "." || rigName == ".." {
+		return 0, fmt.Errorf("invalid rig name")
+	}
+	data, err := os.ReadFile(wisp.NewConfig(townRoot, rigName).ConfigPath())
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var cfg wisp.ConfigFile
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return 0, fmt.Errorf("invalid rig admission config: %w", err)
+	}
+	if cfg.Rig != rigName {
+		return 0, fmt.Errorf("rig admission config identity mismatch")
+	}
+	for _, key := range cfg.Blocked {
+		if key == "max_polecats" {
+			return 0, fmt.Errorf("rig max_polecats is explicitly blocked")
+		}
+	}
+	value, ok := cfg.Values["max_polecats"]
+	if !ok {
+		return 0, nil
+	}
+	number, ok := value.(float64)
+	if !ok || number < 1 || number != float64(int(number)) {
+		return 0, fmt.Errorf("explicit rig max_polecats must be a positive integer")
+	}
+	return int(number), nil
+}
+
+func occupiedRigAdmissionSlots(townRoot, rigName string) (int, error) {
+	registry, err := session.BuildPrefixRegistryFromFile(filepath.Join(townRoot, "mayor", "rigs.json"))
+	if err != nil {
+		return 0, err
+	}
+	if registry.RigForPrefix(registry.PrefixForRig(rigName)) != rigName {
+		return 0, fmt.Errorf("rig admission prefix mapping unavailable")
+	}
+	names, err := tmux.NewTmux().ListSessions()
+	if err != nil {
+		return 0, err
+	}
+	used := 0
+	for _, name := range names {
+		identity, err := session.ParseSessionNameWithRegistry(name, registry)
+		if err == nil && identity.Role == session.RolePolecat && identity.Rig == rigName {
+			used++
+		}
+	}
+	reservations, err := readPolecatAdmissionReservations(townRoot)
+	if err != nil {
+		return 0, err
+	}
+	for _, reservation := range reservations {
+		if reservation.Rig == rigName {
+			used++
+		}
+	}
+	return used, nil
 }
 
 func configuredSchedulerMaxPolecats(townRoot string) (int, error) {

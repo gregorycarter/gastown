@@ -76,6 +76,16 @@ type SessionStartOptions struct {
 	// If set, GT_AGENT is written to the tmux session environment table so that
 	// IsAgentAlive and waitForPolecatReady read the correct process names.
 	Agent string
+
+	// PreserveBranch/Head opt into strict existing-work recovery. Never mint
+	// a fresh branch or reap an existing session. BeforeLaunch verifies and
+	// hooks the exact source under the caller's admission/assignment locks.
+	PreserveBranch string
+	PreserveHead   string
+	BeforeLaunch   func() error
+	// StartupInstructions carry the validated same-MR recovery directions to
+	// both hook-capable and delayed-nudge runtimes without rebonding a formula.
+	StartupInstructions string
 }
 
 // SessionInfo contains information about a running polecat session.
@@ -344,6 +354,9 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		return fmt.Errorf("checking session: %w", err)
 	}
 	if running {
+		if opts.PreserveBranch != "" {
+			return fmt.Errorf("%w: preserving existing recovery session %s", ErrSessionRunning, sessionID)
+		}
 		if m.tmux.IsAgentAlive(sessionID) {
 			return fmt.Errorf("%w: %s", ErrSessionRunning, sessionID)
 		}
@@ -356,6 +369,11 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	workDir := opts.WorkDir
 	if workDir == "" {
 		workDir = m.clonePath(polecat)
+	}
+	if opts.PreserveBranch != "" {
+		if err := validatePreservedSession(workDir, opts); err != nil {
+			return err
+		}
 	}
 
 	// Validate issue exists and isn't tombstoned BEFORE creating session.
@@ -410,6 +428,10 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	}
 	beacon := session.FormatStartupBeacon(beaconConfig)
 	startupNudgeContent := runtime.StartupNudgeContent()
+	if opts.StartupInstructions != "" {
+		beacon += "\n\n" + opts.StartupInstructions
+		startupNudgeContent += "\n\n" + opts.StartupInstructions
+	}
 	startupPromptFallback := session.BuildStartupPrompt(beaconConfig, startupNudgeContent)
 
 	command := opts.Command
@@ -440,7 +462,11 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// working directory.
 	polecatGitBranch := ""
 	if g := git.NewGit(workDir); g != nil {
-		polecatGitBranch = m.ensureCanonicalSessionBranch(g, polecat, opts)
+		if opts.PreserveBranch != "" {
+			polecatGitBranch = opts.PreserveBranch
+		} else {
+			polecatGitBranch = m.ensureCanonicalSessionBranch(g, polecat, opts)
+		}
 	}
 	// Generate the GASTA run ID — the root identifier for all telemetry emitted
 	// by this polecat session and its subprocesses (bd, mail, …).
@@ -478,6 +504,11 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// Create session with command and env vars via -e flags so the initial
 	// shell — and Claude's subprocesses (notably bd) — inherit them from the start.
 	// See: https://github.com/anthropics/gastown/issues/280 (race condition fix)
+	if opts.PreserveBranch != "" {
+		if err := preparePreservedSession(workDir, opts); err != nil {
+			return err
+		}
+	}
 	if err := m.tmux.NewSessionWithCommandAndEnv(sessionID, workDir, command, envVars); err != nil {
 		return fmt.Errorf("creating session: %w", err)
 	}
@@ -490,7 +521,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	}
 
 	// Hook the issue to the polecat if provided via --issue flag
-	if opts.Issue != "" {
+	if opts.Issue != "" && opts.PreserveBranch == "" {
 		agentID := fmt.Sprintf("%s/polecats/%s", m.rig.Name, polecat)
 		if err := m.hookIssue(opts.Issue, agentID, workDir); err != nil {
 			style.PrintWarning("could not hook issue %s: %v", opts.Issue, err)
