@@ -1,12 +1,15 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/formula"
@@ -101,7 +104,10 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build step audit checklist
-	stepAudit := buildStepAudit(cfg.PatrolMolName, patrolReportSteps)
+	stepAudit, err := buildScopedStepAudit(roleInfo.TownRoot, roleInfo.Rig, cfg.BeadsDir, cfg.PatrolMolName, patrolReportSteps)
+	if err != nil {
+		return fmt.Errorf("resolving patrol audit formula: %w", err)
+	}
 
 	// Update the description with the patrol summary and step audit
 	desc := fmt.Sprintf("Patrol report: %s\n\n%s", patrolReportSummary, stepAudit)
@@ -191,7 +197,58 @@ func buildStepAudit(formulaName string, stepsFlag string) string {
 		return fmt.Sprintf("Steps: %s (unvalidated — formula parse error)", stepsFlag)
 	}
 
-	allStepIDs := f.GetAllIDs()
+	return formatStepAudit(f.GetAllIDs(), stepsFlag)
+}
+
+// Audit the same pinned, resolved formula used to instantiate this rig's patrol.
+// The embedded formula may describe different steps (Hisn has six, not fourteen).
+// Never silently substitute the embedded denominator when an explicit pin breaks.
+func buildScopedStepAudit(town, rig, workDir, name, stepsFlag string) (string, error) {
+	pinned, err := config.PinnedFormulaFile(town, rig, name)
+	if err != nil {
+		return "", err
+	}
+	if pinned == "" {
+		return buildStepAudit(name, stepsFlag), nil
+	}
+	data, err := BdCmd("cook", pinned, "--search-path", filepath.Dir(pinned)).Dir(workDir).Output()
+	if err != nil {
+		return "", err
+	}
+	ids, err := cookedPatrolStepIDs(data, name)
+	if err != nil {
+		return "", err
+	}
+	return formatStepAudit(ids, stepsFlag), nil
+}
+
+func cookedPatrolStepIDs(data []byte, name string) ([]string, error) {
+	type step struct {
+		ID       string            `json:"id"`
+		Children []json.RawMessage `json:"children"`
+	}
+	var cooked struct {
+		Formula string `json:"formula"`
+		Steps   []step `json:"steps"`
+	}
+	if err := json.Unmarshal(data, &cooked); err != nil || cooked.Formula != name || len(cooked.Steps) == 0 {
+		return nil, fmt.Errorf("invalid cooked patrol formula")
+	}
+	var ids []string
+	seen := make(map[string]bool)
+	for _, s := range cooked.Steps {
+		// Current patrol contracts are flat. Explicitly reject nested contracts
+		// rather than publish a partial denominator as complete evidence.
+		if s.ID == "" || seen[s.ID] || len(s.Children) != 0 {
+			return nil, fmt.Errorf("invalid or unsupported cooked patrol step")
+		}
+		seen[s.ID] = true
+		ids = append(ids, s.ID)
+	}
+	return ids, nil
+}
+
+func formatStepAudit(allStepIDs []string, stepsFlag string) string {
 	if len(allStepIDs) == 0 {
 		return ""
 	}
