@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 func checkRoleLocation(info RoleInfo) error {
@@ -142,16 +143,13 @@ func runPrimeCheck(cmd *cobra.Command, info RoleInfo, beadID string) error {
 	}
 	// Content hashes let callers detect policy changes without ingesting the
 	// documents on every write. No memory, mail, markers or hook state changes.
-	hashes := map[string]string{}
 	repoRoot, err := readGit("rev-parse", "--show-toplevel")
 	if err != nil {
 		return err
 	}
-	for _, path := range []string{filepath.Join(info.TownRoot, "CLAUDE.md"), filepath.Join(repoRoot, "AGENTS.md"), filepath.Join(info.TownRoot, ".beads", "formulas", "mol-"+string(info.Role)+"-patrol.formula.toml")} {
-		if data, err := os.ReadFile(path); err == nil {
-			sum := sha256.Sum256(data)
-			hashes[filepath.Base(path)] = hex.EncodeToString(sum[:8])
-		}
+	hashes, err := effectivePolicyHashes(info, repoRoot)
+	if err != nil {
+		return err
 	}
 	result["policy_hashes"] = hashes
 	if isPatrolRole(string(info.Role)) {
@@ -163,4 +161,45 @@ func runPrimeCheck(cmd *cobra.Command, info RoleInfo, beadID string) error {
 		}
 	}
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(result)
+}
+
+// Hash the same explicit rig override used by startup/cooking. Hashing only the
+// town formula hid Hisn policy edits from an otherwise successful fresh check.
+func effectivePolicyHashes(info RoleInfo, repoRoot string) (map[string]string, error) {
+	paths := map[string]string{
+		"CLAUDE.md": filepath.Join(info.TownRoot, "CLAUDE.md"),
+		"AGENTS.md": filepath.Join(repoRoot, "AGENTS.md"),
+	}
+	if info.Rig != "" {
+		paths["rig/AGENTS.md"] = filepath.Join(info.TownRoot, info.Rig, "AGENTS.md")
+	}
+	name := ""
+	switch info.Role {
+	case RoleWitness, RoleRefinery, RoleDeacon:
+		name = "mol-" + string(info.Role) + "-patrol"
+	case RolePolecat:
+		name = "mol-polecat-work"
+	}
+	if name != "" {
+		pinned, err := config.PinnedFormulaFile(info.TownRoot, info.Rig, name)
+		if err != nil {
+			return nil, err
+		}
+		if pinned != "" {
+			paths[name+".formula.toml"] = pinned
+		}
+	}
+	hashes := map[string]string{}
+	for label, filename := range paths {
+		data, err := os.ReadFile(filename)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading policy %s: %w", label, err)
+		}
+		sum := sha256.Sum256(data)
+		hashes[label] = hex.EncodeToString(sum[:8])
+	}
+	return hashes, nil
 }
