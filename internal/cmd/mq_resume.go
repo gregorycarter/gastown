@@ -202,7 +202,10 @@ func validateMQResumeDependencies(issue *beads.Issue, show func(string) (*beads.
 
 func mqResumeBeads(townRoot string) *beads.Beads {
 	root := filepath.Join(townRoot, "hisn", "mayor", "rig")
-	return beads.NewWithBeadsDir(root, beads.ResolveBeadsDir(root))
+	// Keep the stable worktree cwd, but pin the rig's actual database. The
+	// resolver follows redirects; it does not search upward from mayor/rig.
+	// Prefix-routed Show can mask a bad pin that unprefixed List/Create cannot.
+	return beads.NewWithBeadsDir(root, beads.ResolveBeadsDir(filepath.Join(townRoot, "hisn")))
 }
 
 func mqResumeGit(root string, args ...string) (string, error) {
