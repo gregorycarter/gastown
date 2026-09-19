@@ -1,6 +1,10 @@
 package tmux
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -303,6 +307,106 @@ Bypass Permissions mode
 				t.Fatalf("name = %q, want %q", gotName, tt.wantName)
 			}
 		})
+	}
+}
+
+func TestContainsBlockingStartupDialog_CodexComposer(t *testing.T) {
+	t.Parallel()
+	const trust = "Do you trust the contents of this directory?"
+	const composer = "› Ask Codex to do anything"
+	tests := []struct {
+		name    string
+		content string
+		blocked bool
+	}{
+		{"stale trust with current composer", trust + "\n" + composer, false},
+		{"stale trust with active response and composer", trust + "\n• Working\n\n" + composer + "\n  gpt-5.6-luna max · /tmp/demo", false},
+		{"composer whitespace", trust + "\n  ›\u00a0Ask Codex to do anything  ", false},
+		{"stale bypass with composer", "Bypass Permissions mode\n1. No\n2. Yes, I accept\n" + composer, false},
+		{"stale update with composer", "Update available!\nUpdate now\nSkip until next version\n" + composer, false},
+		{"current trust after old composer", composer + "\n" + trust, true},
+		{"current bypass after old composer", composer + "\nBypass Permissions mode", true},
+		{"current update after old composer", composer + "\nUpdate available!\nUpdate now\nSkip until next version", true},
+		{"selected trust option is not composer", trust + "\n› 1. Yes, continue\n  2. No, exit", true},
+		{"arbitrary chevron text is not composer", trust + "\n› Yes, I trust this folder", true},
+		{"quoted composer is not composer", trust + "\nExample: " + composer, true},
+		{"unknown composer remains conservative", trust + "\n› Another placeholder", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, blocked := containsBlockingStartupDialog(tt.content)
+			if blocked != tt.blocked {
+				t.Fatalf("blocked = %v, want %v for %q", blocked, tt.blocked, tt.content)
+			}
+		})
+	}
+}
+
+// fakeStartupPane serves a synthetic capture and records key sends without ever
+// connecting to a real tmux socket, agent, or Beads database.
+func fakeStartupPane(t *testing.T, content string) (*Tmux, string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("synthetic tmux executable uses a POSIX shell")
+	}
+	dir := t.TempDir()
+	pane := filepath.Join(dir, "pane.txt")
+	keys := filepath.Join(dir, "keys.txt")
+	if err := os.WriteFile(pane, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(`#!/bin/sh
+case " $* " in
+  *" capture-pane "*) /bin/cat "$GT_TEST_STARTUP_PANE" ;;
+  *" send-keys "*) printf '%s\n' "$*" >> "$GT_TEST_STARTUP_KEYS" ;;
+  *) exit 90 ;;
+esac
+`), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GT_TEST_STARTUP_PANE", pane)
+	t.Setenv("GT_TEST_STARTUP_KEYS", keys)
+	t.Setenv("PATH", dir)
+	return NewTmuxWithSocket("hermetic-startup-test"), keys
+}
+
+func TestStartupDialogs_CodexComposerNoKeys(t *testing.T) {
+	for _, oldDialog := range []string{
+		"Do you trust the contents of this directory?",
+		"Bypass Permissions mode\n1. No\n2. Yes, I accept",
+	} {
+		t.Run(oldDialog, func(t *testing.T) {
+			tm, keys := fakeStartupPane(t, oldDialog+"\n• Working\n› Ask Codex to do anything")
+			if err := tm.AcceptStartupDialogs("synthetic-worker"); err != nil {
+				t.Fatal(err)
+			}
+			if err := tm.CheckStartupBlocked("synthetic-worker"); err != nil {
+				t.Fatalf("running composer was treated as blocked: %v", err)
+			}
+			if _, err := os.Stat(keys); !os.IsNotExist(err) {
+				t.Fatalf("stale dialog caused a key send: %v", err)
+			}
+		})
+	}
+}
+
+func TestStartupDialogs_CurrentTrustStillAcceptedAndBlocked(t *testing.T) {
+	tm, keys := fakeStartupPane(t, "› Ask Codex to do anything\nDo you trust the contents of this directory?\n› 1. Yes, continue\n2. No, exit")
+	if err := tm.AcceptWorkspaceTrustDialog("synthetic-worker"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 || !strings.HasSuffix(lines[0], " Enter") {
+		t.Fatalf("expected existing single Enter acceptance, got %q", data)
+	}
+	// The fixture intentionally does not dismiss the modal after Enter. It must
+	// still refuse startup, even though an old composer is in scrollback.
+	if err := tm.CheckStartupBlocked("synthetic-worker"); err == nil || !strings.Contains(err.Error(), "workspace trust prompt") {
+		t.Fatalf("undismissed genuine trust dialog was not refused: %v", err)
 	}
 }
 

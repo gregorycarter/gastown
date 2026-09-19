@@ -2010,6 +2010,12 @@ func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 			continue
 		}
 
+		// Codex's active composer can follow an already accepted trust screen
+		// in captured scrollback. Do not send Enter into the running agent.
+		if codexStartupComposerAfterLastBlocker(content) {
+			return nil
+		}
+
 		// Look for characteristic trust dialog text before prompt detection.
 		// Codex trust screens include a leading ">" banner line, so prompt
 		// detection alone would exit too early.
@@ -2060,12 +2066,31 @@ func containsBlockingStartupDialog(content string) (string, bool) {
 }
 
 func promptAppearsAfterStartupBlocker(content string) bool {
+	if codexStartupComposerAfterLastBlocker(content) {
+		return true
+	}
 	promptLine := lastPromptIndicatorLine(content)
 	if promptLine < 0 {
 		return false
 	}
 	blockerLine := lastStartupBlockerLine(content)
 	return blockerLine >= 0 && promptLine > blockerLine
+}
+
+// codexStartupComposerAfterLastBlocker recognizes the observed Codex 0.155
+// empty-composer placeholder, which does not end in a prompt character. Require
+// the complete known line after every modal marker: a selected "› 1. Yes" menu
+// row, arbitrary chevron text, or a composer before a new modal is not readiness.
+// This only distinguishes stale startup scrollback; it does not grant trust or
+// change the general-purpose shell/prompt/busy detection heuristics.
+func codexStartupComposerAfterLastBlocker(content string) bool {
+	blockerLine := lastStartupBlockerLine(content)
+	for i, line := range strings.Split(content, "\n") {
+		if i > blockerLine && strings.Join(strings.Fields(line), " ") == "› Ask Codex to do anything" {
+			return true
+		}
+	}
+	return false
 }
 
 func lastStartupBlockerLine(content string) int {
@@ -2154,6 +2179,12 @@ func (t *Tmux) AcceptBypassPermissionsWarning(session string) error {
 		if err != nil {
 			time.Sleep(constants.DialogPollInterval)
 			continue
+		}
+
+		// An accepted modal may remain in scrollback beneath an active Codex
+		// session. Never send Down/Enter to that session on stale text alone.
+		if codexStartupComposerAfterLastBlocker(content) {
+			return nil
 		}
 
 		// Look for the characteristic warning text
