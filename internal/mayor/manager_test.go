@@ -1,6 +1,7 @@
 package mayor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +46,35 @@ func TestManager_SessionName_MatchesPackageFunc(t *testing.T) {
 	if m.SessionName() != SessionName() {
 		t.Errorf("Manager.SessionName() = %q, SessionName() = %q — should match",
 			m.SessionName(), SessionName())
+	}
+}
+
+func TestManager_EnsureNudgePoller(t *testing.T) {
+	m := NewManager("/tmp/test-town")
+	var gotRoot, gotSession string
+	m.startPoller = func(townRoot, session string) (int, error) {
+		gotRoot, gotSession = townRoot, session
+		return 42, nil
+	}
+
+	if err := m.EnsureNudgePoller(); err != nil {
+		t.Fatalf("EnsureNudgePoller() error = %v", err)
+	}
+	if gotRoot != "/tmp/test-town" {
+		t.Errorf("poller town root = %q, want %q", gotRoot, "/tmp/test-town")
+	}
+	if gotSession != SessionName() {
+		t.Errorf("poller session = %q, want %q", gotSession, SessionName())
+	}
+}
+
+func TestManager_EnsureNudgePoller_PropagatesError(t *testing.T) {
+	m := NewManager("/tmp/test-town")
+	want := errors.New("poller unavailable")
+	m.startPoller = func(string, string) (int, error) { return 0, want }
+
+	if err := m.EnsureNudgePoller(); !errors.Is(err, want) {
+		t.Errorf("EnsureNudgePoller() error = %v, want %v", err, want)
 	}
 }
 

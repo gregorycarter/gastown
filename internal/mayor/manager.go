@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/acp"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -46,7 +47,9 @@ type MayorStatus struct {
 
 // Manager handles mayor lifecycle operations.
 type Manager struct {
-	townRoot string
+	townRoot    string
+	startPoller func(townRoot, session string) (int, error)
+	stopPoller  func(townRoot, session string) error
 }
 
 // CombinedStatus returns the combined status of the mayor across all modes.
@@ -90,7 +93,9 @@ func (m *Manager) IsActive() (bool, Mode) {
 // NewManager creates a new mayor manager for a town.
 func NewManager(townRoot string) *Manager {
 	return &Manager{
-		townRoot: townRoot,
+		townRoot:    townRoot,
+		startPoller: nudge.StartPoller,
+		stopPoller:  nudge.StopPoller,
 	}
 }
 
@@ -108,6 +113,36 @@ func (m *Manager) SessionName() string {
 // mayorDir returns the working directory for the mayor.
 func (m *Manager) mayorDir() string {
 	return filepath.Join(m.townRoot, "mayor")
+}
+
+// EnsureNudgePoller makes queued nudges deliverable to the Mayor's tmux
+// session. Codex and other runtimes without prompt detection rely on this
+// background poller; a live Mayor session alone is not sufficient evidence
+// that queued lifecycle messages will be delivered.
+//
+// StartPoller is idempotent, so this is safe to call on every daemon
+// heartbeat while the Mayor is running.
+func (m *Manager) EnsureNudgePoller() error {
+	if m.startPoller == nil {
+		return nil
+	}
+	_, err := m.startPoller(m.townRoot, m.SessionName())
+	return err
+}
+
+func (m *Manager) startNudgePoller() {
+	if err := m.EnsureNudgePoller(); err != nil {
+		fmt.Printf("warning: could not start nudge poller for %s: %v\n", m.SessionName(), err)
+	}
+}
+
+func (m *Manager) stopNudgePoller() {
+	if m.stopPoller == nil {
+		return
+	}
+	if err := m.stopPoller(m.townRoot, m.SessionName()); err != nil {
+		fmt.Printf("warning: could not stop nudge poller for %s: %v\n", m.SessionName(), err)
+	}
 }
 
 // Start starts the mayor session.
@@ -181,6 +216,7 @@ func (m *Manager) StartTMUX(agentOverride string) error {
 	if err != nil {
 		return err
 	}
+	m.startNudgePoller()
 
 	time.Sleep(session.ShutdownDelay())
 
@@ -338,6 +374,8 @@ func (m *Manager) Stop() error {
 	if !running {
 		return ErrNotRunning
 	}
+
+	m.stopNudgePoller()
 
 	// Try graceful shutdown first (best-effort interrupt)
 	_ = t.SendKeysRaw(sessionID, "C-c")

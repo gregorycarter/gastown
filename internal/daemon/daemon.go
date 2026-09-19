@@ -2048,6 +2048,12 @@ func (d *Daemon) ensureMayorRunning() {
 
 	if err := mgr.Start(""); err != nil {
 		if err == mayor.ErrAlreadyRunning {
+			// A live Mayor session is not proof that it can receive queued
+			// nudges. Codex relies on a background poller, so recreate it if
+			// it has died before continuing normal liveness checks.
+			if pollerErr := mgr.EnsureNudgePoller(); pollerErr != nil {
+				d.logger.Printf("Mayor: could not ensure nudge poller: %v", pollerErr)
+			}
 			// Session exists — verify agent is actually alive.
 			// During handoffs the agent is briefly undetectable, so we
 			// only restart if the session has been a zombie for multiple
