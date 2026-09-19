@@ -457,9 +457,8 @@ func dispatchMQResume(townRoot string, fields *capacity.SlingContextFields) (*Sl
 			return manager.Start(worker, opts)
 		},
 		hook: func(state *mqResumeState) error {
-			root := filepath.Join(townRoot, "hisn", "mayor", "rig")
 			actor := fields.TargetRig + "/polecats/" + fields.ResumeWorker
-			if err := BdCmd("update", fields.WorkBeadID, "--if-status="+state.Source.Status, "--status=hooked", "--assignee="+actor).Dir(root).WithAutoCommit().Run(); err != nil {
+			if err := mqResumeHookCommand(townRoot, state, fields).Run(); err != nil {
 				return fmt.Errorf("hook failed: %w", err)
 			}
 			hooked, err := mqResumeBeads(townRoot).Show(fields.WorkBeadID)
@@ -469,6 +468,15 @@ func dispatchMQResume(townRoot string, fields *capacity.SlingContextFields) (*Sl
 			return verifyMQResumeHook(state.Source, hooked, actor)
 		},
 	})
+}
+
+func mqResumeHookCommand(townRoot string, state *mqResumeState, fields *capacity.SlingContextFields) *bdCmd {
+	root := filepath.Join(townRoot, "hisn", "mayor", "rig")
+	actor := fields.TargetRig + "/polecats/" + fields.ResumeWorker
+	// Dir controls cwd but its implicit pin does not search upward. Match the
+	// read/context wrapper's rig authority, including rig .beads redirects.
+	return BdCmd("update", fields.WorkBeadID, "--if-status="+state.Source.Status, "--status=hooked", "--assignee="+actor).
+		Dir(root).WithBeadsDir(beads.ResolveBeadsDir(filepath.Join(townRoot, "hisn"))).WithAutoCommit()
 }
 
 func verifyMQResumeHook(source, hooked *beads.Issue, actor string) error {
