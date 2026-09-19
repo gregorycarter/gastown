@@ -210,7 +210,15 @@ func runFormulaShow(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		if pinned != "" {
-			formulaName = pinned
+			// bd formula show accepts registry names, not absolute file paths.
+			// cook is the supported read-only parser for explicit pinned files.
+			bdArgs := []string{"cook", pinned, "--search-path", filepath.Dir(pinned)}
+			if !formulaShowJSON {
+				bdArgs = append(bdArgs, "--dry-run")
+			}
+			bdCmd := exec.Command("bd", bdArgs...)
+			bdCmd.Stdout, bdCmd.Stderr = os.Stdout, os.Stderr
+			return bdCmd.Run()
 		}
 	}
 	bdArgs := []string{"formula", "show", formulaName}

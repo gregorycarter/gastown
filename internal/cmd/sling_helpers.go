@@ -1036,9 +1036,12 @@ func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, h
 	// If cook fails, retry with the embedded formula extracted to a temp file.
 	// This handles non-gastown rigs that don't have formulas provisioned on disk.
 	// See gt-oir.
-	resolvedFormula := formulaName
+	resolvedFormula, pinErr := registeredPinnedFormula(townRoot, config.FormulaRigFromPath(townRoot, hookWorkDir), formulaWorkDir, formulaName)
+	if pinErr != nil {
+		return nil, pinErr
+	}
 	var formulaCleanup func()
-	if !skipCook {
+	if !skipCook && resolvedFormula == formulaName {
 		if err := formulaBeadBdCmd(beadID, formulaWorkDir, townRoot, "cook", formulaName).
 			WithAutoCommit().
 			Run(); err != nil {

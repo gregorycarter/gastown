@@ -216,6 +216,13 @@ func autoSpawnPatrol(cfg PatrolConfig) (string, error) {
 
 	// Find the proto ID for the patrol molecule
 	protoID := pinned
+	if pinned != "" {
+		var err error
+		protoID, err = registerPinnedFormulaFile(pinned, cfg.BeadsDir)
+		if err != nil {
+			return "", err
+		}
+	}
 	if protoID == "" {
 		cmdCatalog := exec.Command("gt", "formula", "list")
 		cmdCatalog.Dir = cfg.BeadsDir

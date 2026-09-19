@@ -267,7 +267,7 @@ func verifyFormulaExists(formulaName, workDir, townRoot string) error {
 		if pinned == "" {
 			continue
 		}
-		if out, err := BdCmd("formula", "show", pinned).
+		if out, err := BdCmd("cook", pinned, "--dry-run").
 			AllowStale().
 			Dir(workDir).
 			WithGTRoot(townRoot).
@@ -487,7 +487,16 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 
 	// Step 1: Cook the formula (ensures proto exists)
 	fmt.Printf("  Cooking formula...\n")
-	if err := BdCmd("cook", formulaName).
+	rigName := config.FormulaRigFromPath(townRoot, formulaWorkDir)
+	if parts := strings.Split(targetAgent, "/"); rigName == "" && len(parts) > 1 {
+		rigName = parts[0]
+	}
+	resolvedFormula, pinErr := registeredPinnedFormula(townRoot, rigName, formulaWorkDir, formulaName)
+	if pinErr != nil {
+		rollbackSpawned("")
+		return pinErr
+	}
+	if err := BdCmd("cook", resolvedFormula).
 		Dir(formulaWorkDir).
 		WithGTRoot(townRoot).
 		Run(); err != nil {
@@ -499,7 +508,7 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 
 	// Step 2: Create wisp instance (ephemeral)
 	fmt.Printf("  Creating wisp...\n")
-	wispArgs := []string{"mol", "wisp", formulaName}
+	wispArgs := []string{"mol", "wisp", resolvedFormula}
 	for _, v := range slingVars {
 		wispArgs = append(wispArgs, "--var", v)
 	}
