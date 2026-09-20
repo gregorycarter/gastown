@@ -364,6 +364,7 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	defer resolved.NewPolecatInfo.ReleaseAdmission()
 	targetAgent := resolved.Agent
 	targetPane := resolved.Pane
 	formulaWorkDir := resolved.WorkDir
@@ -474,7 +475,7 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 			return fmt.Errorf("cleaning stale dog formula wisp %s: %w", existing.ID, err)
 		}
 	}
-	if admission == nil && strings.Contains(targetAgent, "/polecats/") {
+	if admission == nil && (resolved.NewPolecatInfo == nil || resolved.NewPolecatInfo.admission == nil) && strings.Contains(targetAgent, "/polecats/") {
 		parts := strings.Split(targetAgent, "/")
 		if len(parts) >= 3 {
 			admission, _, err = acquirePolecatAdmissionFn(townRoot, parts[0], formulaName, "formula")

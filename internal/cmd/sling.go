@@ -725,6 +725,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	if err != nil {
 		return err
 	}
+	defer resolved.NewPolecatInfo.ReleaseAdmission()
 	targetAgent := resolved.Agent
 	targetPane := resolved.Pane
 	hookWorkDir := resolved.WorkDir

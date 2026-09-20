@@ -30,6 +30,12 @@ func setupPolecatCapacityTestTown(t *testing.T, maxPolecats int) string {
 func setupPolecatCapacityRig(t *testing.T, maxPolecats int) string {
 	t.Helper()
 	townRoot := t.TempDir()
+	// Cwd-based authority resolves /var to /private/var on macOS.
+	canonical, err := filepath.EvalSymlinks(townRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	townRoot = canonical
 	configureScheduler(t, townRoot, maxPolecats, 1)
 	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", "polecats"), 0755); err != nil {
 		t.Fatalf("mkdir rig: %v", err)

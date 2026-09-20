@@ -252,6 +252,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		result.ErrMsg = err.Error()
 		return result, fmt.Errorf("failed to spawn polecat: %w", err)
 	}
+	defer spawnInfo.ReleaseAdmission()
 	result.SpawnInfo = spawnInfo
 	result.PolecatName = spawnInfo.PolecatName
 

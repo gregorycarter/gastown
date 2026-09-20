@@ -35,8 +35,26 @@ type SpawnedPolecatInfo struct {
 	Branch      string // Git branch name (for cleanup on rollback)
 
 	// Internal fields for deferred session start
-	account string
-	agent   string
+	account   string
+	agent     string
+	admission *polecatAdmissionHandle
+}
+
+// ReleaseAdmission also covers formula/hook errors before StartSession. All
+// dispatch callers defer it immediately after receiving the spawned worker.
+func (s *SpawnedPolecatInfo) ReleaseAdmission() {
+	if s != nil && s.admission != nil {
+		s.admission.Release()
+		s.admission = nil
+	}
+}
+
+func transferSpawnAdmission(spawned *SpawnedPolecatInfo, err error, admission *polecatAdmissionHandle) {
+	if err == nil && spawned != nil {
+		spawned.admission = admission
+	} else {
+		admission.Release()
+	}
 }
 
 // AgentID returns the agent identifier (e.g., "gastown/polecats/Toast")
@@ -99,7 +117,7 @@ func reclaimBrokenIdlePolecatForSling(polecatMgr *polecat.Manager) (bool, error)
 // SpawnPolecatForSling creates a fresh polecat and optionally starts its session.
 // This is used by gt sling when the target is a rig name.
 // The caller (sling) handles hook attachment and nudging.
-func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (spawned *SpawnedPolecatInfo, err error) {
 	// Find workspace
 	townRoot := opts.TownRoot
 	if townRoot == "" {
@@ -155,7 +173,9 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		if err != nil {
 			return nil, err
 		}
-		defer admission.Release()
+		// Creating a worktree is only the first half of dispatch. Keep its slot
+		// reserved through formula/hook setup and the deferred session start.
+		defer func() { transferSpawnAdmission(spawned, err, admission) }()
 	}
 
 	// Per-bead respawn circuit breaker (clown show #22):
@@ -388,6 +408,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 // sees its work when gt prime runs on session start.
 // Returns the pane ID after session start.
 func (s *SpawnedPolecatInfo) StartSession() (string, error) {
+	defer s.ReleaseAdmission()
 	if s.SessionStarted() {
 		return s.Pane, nil
 	}

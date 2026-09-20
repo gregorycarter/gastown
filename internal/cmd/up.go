@@ -991,8 +991,11 @@ func startPolecatsWithWork(townRoot, rigName string) ([]string, map[string]error
 			continue
 		}
 
-		// This polecat has work - start it using SessionManager
-		if err := polecatMgr.Start(polecatName, polecat.SessionStartOptions{}); err != nil {
+		// Bulk restoration must share the scheduler/MQ recovery admission cap.
+		// A preserved worktree alone no longer reserves an execution slot.
+		if err := restorePolecatSessionWithAdmission(townRoot, rigName, polecatName, pinnedBeads[0].ID,
+			func() (bool, error) { return polecatMgr.IsRunning(polecatName) },
+			func() error { return polecatMgr.Start(polecatName, polecat.SessionStartOptions{}) }); err != nil {
 			if err == polecat.ErrSessionRunning {
 				started = append(started, polecatName)
 			} else {

@@ -297,6 +297,19 @@ func startPolecatSessionWithAdmission(townRoot, rigName, polecatName, issue stri
 	return start()
 }
 
+// Restoration is idempotent at a full cap: an existing session already owns
+// its slot. Unknown session state must never be interpreted as a free slot.
+func restorePolecatSessionWithAdmission(townRoot, rigName, polecatName, issue string, running func() (bool, error), start func() error) error {
+	live, err := running()
+	if err != nil {
+		return fmt.Errorf("checking session before restoration: %w", err)
+	}
+	if live {
+		return polecat.ErrSessionRunning
+	}
+	return startPolecatSessionWithAdmission(townRoot, rigName, polecatName, issue, start)
+}
+
 func runSessionStart(cmd *cobra.Command, args []string) error {
 	rigName, polecatName, err := parseAddress(args[0])
 	if err != nil {
