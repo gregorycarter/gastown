@@ -8,11 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
 )
 
 func TestPreservedSessionStartupChecksBeforeHook(t *testing.T) {
-	for _, problem := range []string{"", "checkpoint", "foreign checkpoint", "wrong branch", "wrong head", "dirty", "missing hook", "hook failure", "hook changes head", "manual hold"} {
+	for _, problem := range []string{"", "matching MR", "checkpoint", "foreign checkpoint", "wrong branch", "wrong head", "dirty", "missing hook", "hook failure", "hook changes head", "manual hold"} {
 		t.Run(problem, func(t *testing.T) {
 			root := t.TempDir()
 			run := func(args ...string) string {
@@ -44,6 +45,8 @@ func TestPreservedSessionStartupChecksBeforeHook(t *testing.T) {
 				return nil
 			}}
 			switch problem {
+			case "matching MR":
+				opts.RecoveryMR = "hisn-wisp-existing"
 			case "wrong branch":
 				opts.PreserveBranch = "main"
 			case "wrong head":
@@ -67,12 +70,16 @@ func TestPreservedSessionStartupChecksBeforeHook(t *testing.T) {
 				if status != "hooked" || problem == "manual hold" {
 					return errors.New("source not admitted")
 				}
-				return nil
+				source := &beads.Issue{ID: opts.Issue, Status: status, Assignee: "hisn/polecats/quartz"}
+				if problem == "matching MR" {
+					source.Labels = []string{"awaiting-merge:" + opts.RecoveryMR}
+				}
+				return validateHisnStartSource(source, "hisn/polecats/quartz", opts)
 			})
-			if (err == nil) != (problem == "" || problem == "checkpoint") {
+			if (err == nil) != (problem == "" || problem == "checkpoint" || problem == "matching MR") {
 				t.Fatalf("problem=%s err=%v", problem, err)
 			}
-			if problem != "" && problem != "checkpoint" && problem != "manual hold" && problem != "hook failure" && problem != "hook changes head" && hooks != 0 {
+			if problem != "" && problem != "matching MR" && problem != "checkpoint" && problem != "manual hold" && problem != "hook failure" && problem != "hook changes head" && hooks != 0 {
 				t.Fatal("invalid state hooked")
 			}
 			if problem == "checkpoint" {

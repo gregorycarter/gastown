@@ -83,6 +83,10 @@ type SessionStartOptions struct {
 	PreserveBranch string
 	PreserveHead   string
 	BeforeLaunch   func() error
+	// RecoveryMR is set only by the admitted same-MR dispatcher. Its
+	// BeforeLaunch callback freshly validates the MR, source and receipt.
+	// It permits that MR's awaiting-merge label, never another hold.
+	RecoveryMR string
 	// StartupInstructions carry the validated same-MR recovery directions to
 	// both hook-capable and delayed-nudge runtimes without rebonding a formula.
 	StartupInstructions string

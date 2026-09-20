@@ -565,7 +565,7 @@ func dispatchMQResumeWith(townRoot string, fields *capacity.SlingContextFields, 
 		return nil, err
 	}
 	defer admission.Release()
-	opts := polecat.SessionStartOptions{WorkDir: state.WorkDir, Issue: fields.WorkBeadID, PreserveBranch: fields.ResumeBranch, PreserveHead: fields.ResumeHead, StartupInstructions: state.Record.Instructions}
+	opts := polecat.SessionStartOptions{WorkDir: state.WorkDir, Issue: fields.WorkBeadID, PreserveBranch: fields.ResumeBranch, PreserveHead: fields.ResumeHead, RecoveryMR: fields.ResumeMR, StartupInstructions: state.Record.Instructions}
 	opts.BeforeLaunch = func() error {
 		freshScheduler, err := capacity.LoadState(townRoot)
 		if err != nil {

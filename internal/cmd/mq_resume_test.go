@@ -367,7 +367,7 @@ func TestMQResumeDispatchPreservesAdmissionAndHookOrdering(t *testing.T) {
 					return nil
 				},
 				start: func(worker string, opts polecat.SessionStartOptions) error {
-					if worker != "quartz" || opts.WorkDir != state.WorkDir || opts.Issue != state.Source.ID || opts.PreserveBranch != fields.ResumeBranch || opts.PreserveHead != fields.ResumeHead || opts.StartupInstructions != state.Record.Instructions {
+					if worker != "quartz" || opts.WorkDir != state.WorkDir || opts.Issue != state.Source.ID || opts.PreserveBranch != fields.ResumeBranch || opts.PreserveHead != fields.ResumeHead || opts.RecoveryMR != fields.ResumeMR || opts.StartupInstructions != state.Record.Instructions {
 						t.Fatal("worker branch/worktree changed")
 					}
 					if _, err := os.Stat(reservation); err != nil {

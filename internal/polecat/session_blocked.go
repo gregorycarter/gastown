@@ -37,10 +37,10 @@ func (m *SessionManager) validateHisnStart(name, workDir string, opts SessionSta
 	if err != nil {
 		return fmt.Errorf("source startup state unavailable: %w", err)
 	}
-	return validateHisnStartSource(source, "hisn/polecats/"+name)
+	return validateHisnStartSource(source, "hisn/polecats/"+name, opts)
 }
 
-func validateHisnStartSource(source *beads.Issue, actor string) error {
+func validateHisnStartSource(source *beads.Issue, actor string, opts SessionStartOptions) error {
 	if source == nil {
 		return fmt.Errorf("source startup state unavailable")
 	}
@@ -50,7 +50,17 @@ func validateHisnStartSource(source *beads.Issue, actor string) error {
 	if source.Assignee != "" && source.Assignee != actor {
 		return fmt.Errorf("source %s belongs to %s; do not restart previous worker", source.ID, source.Assignee)
 	}
+	// prepareSessionLaunch has already run the admission callback and checked
+	// preserved Git state. Ordinary restarts and dependency resumes have no MR
+	// exception; a matching label alone is never permission to launch.
+	branch, validBranch := ParseBranchName(opts.PreserveBranch)
+	admittedMR := opts.RecoveryMR != "" && opts.BeforeLaunch != nil && opts.PreserveHead != "" &&
+		validBranch && branch.Issue == source.ID && "hisn/polecats/"+branch.Polecat == actor &&
+		opts.Issue == source.ID && source.Assignee == actor
 	for _, label := range source.Labels {
+		if admittedMR && label == "awaiting-merge:"+opts.RecoveryMR {
+			continue
+		}
 		if label == "needs-operator" || label == "needs-operator-rollout" || label == "needs-review" || strings.HasPrefix(label, "awaiting-merge:") {
 			return fmt.Errorf("source %s held by %s; preserve worker", source.ID, label)
 		}
