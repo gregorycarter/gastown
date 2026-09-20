@@ -122,15 +122,18 @@ func (d *Daemon) syncDoltBackups() {
 		d.logger.Printf("dolt_backup: failed databases: %s", strings.Join(failures, ", "))
 	}
 	if synced > 0 {
-		previous := state["replica"]
-		if !time.Now().Before(previous.NextAttempt) {
-			err := d.syncOffsiteBackup(successful)
-			state["replica"] = nextDoltBackupState(previous, time.Now(), err)
-			if err != nil {
-				d.logger.Printf("dolt_backup: replica failed: %v", err)
+		for _, destination := range d.doltBackupReplicaDestinations() {
+			key := "replica:" + destination
+			previous := state[key]
+			if !time.Now().Before(previous.NextAttempt) {
+				err := d.syncOffsiteBackup(successful, destination)
+				state[key] = nextDoltBackupState(previous, time.Now(), err)
+				if err != nil {
+					d.logger.Printf("dolt_backup: replica failed: %v", err)
+				}
+			} else {
+				d.logger.Printf("dolt_backup: replica %s backing off until %s", destination, previous.NextAttempt.UTC().Format(time.RFC3339))
 			}
-		} else {
-			d.logger.Printf("dolt_backup: replica backing off until %s", previous.NextAttempt.UTC().Format(time.RFC3339))
 		}
 	}
 
@@ -181,21 +184,26 @@ func (d *Daemon) syncBackup(dataDir, db, backupName string) error {
 // syncOffsiteBackup rsyncs the local backup directory to iCloud Drive.
 // iCloud automatically syncs to Apple's cloud, providing offsite replication.
 // Non-fatal: if iCloud is unavailable or rsync fails, we just log and continue.
-func (d *Daemon) syncOffsiteBackup(databases []string) error {
+func (d *Daemon) doltBackupReplicaDestinations() []string {
+	var result []string
+	if destination := d.patrolConfig.Patrols.DoltBackup.OffsiteDir; destination != "" {
+		result = append(result, destination)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		cloud := filepath.Join(home, "Library", "Mobile Documents", "com~apple~CloudDocs", "gt-dolt-backup")
+		if len(result) == 0 || result[0] != cloud {
+			result = append(result, cloud)
+		}
+	}
+	return result
+}
+
+func (d *Daemon) syncOffsiteBackup(databases []string, icloudDir string) error {
 	backupDir := filepath.Join(d.config.TownRoot, ".dolt-backup")
 	if _, err := os.Stat(backupDir); err != nil {
 		return err
 	}
 
-	// iCloud Drive path (macOS)
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	icloudDir := filepath.Join(homeDir, "Library", "Mobile Documents", "com~apple~CloudDocs", "gt-dolt-backup")
-	if configured := d.patrolConfig.Patrols.DoltBackup.OffsiteDir; configured != "" {
-		icloudDir = configured
-	}
 	if !filepath.IsAbs(icloudDir) || filepath.Clean(icloudDir) == filepath.Clean(backupDir) {
 		return fmt.Errorf("invalid replica destination")
 	}

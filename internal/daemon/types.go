@@ -189,7 +189,7 @@ type DoltRemotesConfig struct {
 // DoltBackupConfig holds configuration for the dolt_backup patrol.
 // This patrol periodically syncs Dolt databases to local filesystem backups.
 type DoltBackupConfig struct {
-	// OffsiteDir overrides the default iCloud replica destination.
+	// OffsiteDir adds an explicit replica destination alongside default iCloud replication.
 	OffsiteDir string `json:"offsite_dir,omitempty"`
 
 	// Enabled controls whether backup sync runs.
