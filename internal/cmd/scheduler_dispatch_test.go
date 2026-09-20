@@ -36,6 +36,7 @@ func setupSchedulerScanFailureTown(t *testing.T) string {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
+	writeJSONFile(t, filepath.Join(townRoot, "mayor", "rigs.json"), &config.RigsConfig{Version: config.CurrentRigsVersion, Rigs: map[string]config.RigEntry{"rig": {}}})
 	installFakeBD(t, `#!/bin/sh
 case "$BEADS_DIR" in
   */rig/.beads) echo "scan failed" >&2; exit 7 ;;
@@ -139,5 +140,25 @@ func TestRunSchedulerClearFailsOnContextScanFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "listing sling contexts") {
 		t.Fatalf("error = %q, want sling context scan failure", err.Error())
+	}
+}
+
+func TestSchedulerScanIgnoresUnregisteredOrphanDatabases(t *testing.T) {
+	town := setupSchedulerScanFailureTown(t)
+	for _, name := range []string{"forkrig", "testrig", "hisn"} {
+		if err := os.MkdirAll(filepath.Join(town, name, ".beads"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dirs, err := beadsSearchDirs(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 2 || dirs[0] != town || dirs[1] != filepath.Join(town, "rig") {
+		t.Fatalf("scanned unregistered database: %v", dirs)
+	}
+	// A registered rig error still fails closed; an orphan does not hide work.
+	if _, err := listAllSlingContextRecords(town); err == nil {
+		t.Fatal("ignored actual rig failure")
 	}
 }

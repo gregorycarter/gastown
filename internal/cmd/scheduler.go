@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -450,8 +451,12 @@ func scheduledBeadInfoFromWork(ctxTitle string, fields *capacity.SlingContextFie
 }
 
 // beadsSearchDirs returns directories to scan for scheduled beads:
-// the town root plus any rig directories that have a .beads/ subdirectory.
+// the town root plus registered rigs. Orphan/test databases are not rigs.
 func beadsSearchDirs(townRoot string) ([]string, error) {
+	registered, err := config.LoadRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"))
+	if err != nil {
+		return nil, fmt.Errorf("loading scheduler rig registry: %w", err)
+	}
 	dirs := []string{townRoot}
 	seen := map[string]bool{townRoot: true}
 	entries, err := os.ReadDir(townRoot)
@@ -460,6 +465,9 @@ func beadsSearchDirs(townRoot string) ([]string, error) {
 	}
 	for _, e := range entries {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || e.Name() == "mayor" || e.Name() == "settings" {
+			continue
+		}
+		if _, ok := registered.Rigs[e.Name()]; !ok {
 			continue
 		}
 		rigDir := filepath.Join(townRoot, e.Name())
