@@ -285,6 +285,18 @@ func getSessionManager(rigName string) (*polecat.SessionManager, *rig.Rig, error
 	return polecatMgr, r, nil
 }
 
+// Stopped workers preserve work without reserving execution capacity. Every
+// direct start/restart must reacquire a slot, just like scheduler/MQ recovery.
+// The reservation spans startup and is released on both success and failure.
+func startPolecatSessionWithAdmission(townRoot, rigName, polecatName, issue string, start func() error) error {
+	handle, _, err := acquirePolecatAdmission(townRoot, rigName, issue, "session-start:"+polecatName)
+	if err != nil {
+		return err
+	}
+	defer handle.Release()
+	return start()
+}
+
 func runSessionStart(cmd *cobra.Command, args []string) error {
 	rigName, polecatName, err := parseAddress(args[0])
 	if err != nil {
@@ -315,7 +327,9 @@ func runSessionStart(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Starting session for %s/%s...\n", rigName, polecatName)
-	if err := polecatMgr.Start(polecatName, opts); err != nil {
+	if err := startPolecatSessionWithAdmission(filepath.Dir(r.Path), rigName, polecatName, sessionIssue, func() error {
+		return polecatMgr.Start(polecatName, opts)
+	}); err != nil {
 		return fmt.Errorf("starting session: %w", err)
 	}
 
@@ -554,7 +568,7 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	polecatMgr, _, err := getSessionManager(rigName)
+	polecatMgr, r, err := getSessionManager(rigName)
 	if err != nil {
 		return err
 	}
@@ -591,7 +605,9 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 	// Start fresh session
 	fmt.Printf("Starting session for %s/%s...\n", rigName, polecatName)
 	opts := polecat.SessionStartOptions{}
-	if err := polecatMgr.Start(polecatName, opts); err != nil {
+	if err := startPolecatSessionWithAdmission(filepath.Dir(r.Path), rigName, polecatName, "", func() error {
+		return polecatMgr.Start(polecatName, opts)
+	}); err != nil {
 		return fmt.Errorf("starting session: %w", err)
 	}
 
