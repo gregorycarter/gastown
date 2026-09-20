@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -51,9 +52,19 @@ func (d *Daemon) syncDoltBackups() {
 		return
 	}
 
-	// Pour molecule for observability (nil-safe — all methods are no-ops on nil).
-	mol := d.pourDogMolecule(constants.MolDogBackup, nil)
-	defer mol.close()
+	// One durable checkpoint replaces a new tracking molecule per backup tick.
+	// This avoids DB churn during persistent filesystem/permission failures.
+	stateFile := filepath.Join(d.config.TownRoot, ".runtime", "dolt-backup-state.json")
+	state, err := readDoltBackupState(stateFile)
+	if err != nil {
+		d.logger.Printf("dolt_backup: checkpoint unavailable: %v", err)
+		return
+	}
+	defer func() {
+		if err := writeDoltBackupState(stateFile, state); err != nil {
+			d.logger.Printf("dolt_backup: checkpoint write failed: %v", err)
+		}
+	}()
 
 	// Resolve data dir: use DoltServerManager if available, else conventional path.
 	var dataDir string
@@ -64,7 +75,6 @@ func (d *Daemon) syncDoltBackups() {
 	}
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 		d.logger.Printf("dolt_backup: data dir %s does not exist, skipping", dataDir)
-		mol.failStep("sync", "data dir does not exist")
 		return
 	}
 
@@ -76,7 +86,6 @@ func (d *Daemon) syncDoltBackups() {
 
 	if len(databases) == 0 {
 		d.logger.Printf("dolt_backup: no databases with backup remotes found")
-		mol.failStep("sync", "no databases with backup remotes")
 		return
 	}
 
@@ -84,34 +93,47 @@ func (d *Daemon) syncDoltBackups() {
 
 	synced := 0
 	var failures []string
+	var successful []string
 	for _, db := range databases {
+		if !validDBName.MatchString(db) {
+			d.logger.Printf("dolt_backup: invalid database name")
+			continue
+		}
+		previous := state[db]
+		if time.Now().Before(previous.NextAttempt) {
+			d.logger.Printf("dolt_backup: %s: backing off until %s", db, previous.NextAttempt.UTC().Format(time.RFC3339))
+			continue
+		}
 		backupName := db + "-backup"
 		if err := d.syncBackup(dataDir, db, backupName); err != nil {
 			d.logger.Printf("dolt_backup: %s: sync failed: %v", db, err)
 			failures = append(failures, db)
+			state[db] = nextDoltBackupState(previous, time.Now(), err)
 		} else {
 			synced++
+			successful = append(successful, db)
+			state[db] = nextDoltBackupState(previous, time.Now(), nil)
 		}
 	}
 
 	d.logger.Printf("dolt_backup: synced %d/%d database(s)", synced, len(databases))
 
 	if len(failures) > 0 {
-		mol.failStep("sync", fmt.Sprintf("synced %d/%d, failures: %s", synced, len(databases), strings.Join(failures, "; ")))
-	} else {
-		mol.closeStep("sync")
+		d.logger.Printf("dolt_backup: failed databases: %s", strings.Join(failures, ", "))
 	}
-
-	// Offsite sync: rsync local backups to iCloud Drive for cloud replication.
-	// This is a stopgap until proper dolt remote push is configured.
 	if synced > 0 {
-		d.syncOffsiteBackup()
-		mol.closeStep("offsite")
-	} else {
-		mol.closeStep("offsite")
+		previous := state["replica"]
+		if !time.Now().Before(previous.NextAttempt) {
+			err := d.syncOffsiteBackup(successful)
+			state["replica"] = nextDoltBackupState(previous, time.Now(), err)
+			if err != nil {
+				d.logger.Printf("dolt_backup: replica failed: %v", err)
+			}
+		} else {
+			d.logger.Printf("dolt_backup: replica backing off until %s", previous.NextAttempt.UTC().Format(time.RFC3339))
+		}
 	}
 
-	mol.closeStep("report")
 }
 
 // syncBackup runs `dolt backup sync <backup-name>` for a single database,
@@ -149,6 +171,9 @@ func (d *Daemon) syncBackup(dataDir, db, backupName string) error {
 			return nil
 		}
 		lastErr = fmt.Errorf("%s: %s", err, strings.TrimSpace(string(output)))
+		if permanentBackupFailure(lastErr) {
+			break
+		}
 	}
 	return lastErr
 }
@@ -156,33 +181,49 @@ func (d *Daemon) syncBackup(dataDir, db, backupName string) error {
 // syncOffsiteBackup rsyncs the local backup directory to iCloud Drive.
 // iCloud automatically syncs to Apple's cloud, providing offsite replication.
 // Non-fatal: if iCloud is unavailable or rsync fails, we just log and continue.
-func (d *Daemon) syncOffsiteBackup() {
+func (d *Daemon) syncOffsiteBackup(databases []string) error {
 	backupDir := filepath.Join(d.config.TownRoot, ".dolt-backup")
-	if _, err := os.Stat(backupDir); os.IsNotExist(err) {
-		return
+	if _, err := os.Stat(backupDir); err != nil {
+		return err
 	}
 
 	// iCloud Drive path (macOS)
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return
+		return err
 	}
 	icloudDir := filepath.Join(homeDir, "Library", "Mobile Documents", "com~apple~CloudDocs", "gt-dolt-backup")
-	if err := os.MkdirAll(icloudDir, 0755); err != nil {
-		d.logger.Printf("dolt_backup: offsite: cannot create iCloud dir: %v", err)
-		return
+	if configured := d.patrolConfig.Patrols.DoltBackup.OffsiteDir; configured != "" {
+		icloudDir = configured
+	}
+	if !filepath.IsAbs(icloudDir) || filepath.Clean(icloudDir) == filepath.Clean(backupDir) {
+		return fmt.Errorf("invalid replica destination")
+	}
+	if err := os.MkdirAll(icloudDir, 0700); err != nil {
+		return fmt.Errorf("cannot create replica dir: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "rsync", "-a", "--delete", backupDir+"/", icloudDir+"/")
-	util.SetDetachedProcessGroup(cmd)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		d.logger.Printf("dolt_backup: offsite sync failed: %v (%s)", err, strings.TrimSpace(string(output)))
-	} else {
-		d.logger.Printf("dolt_backup: offsite synced to iCloud")
+	// Copy only successfully synced databases. Never delete a previous backup
+	// because another database failed or was omitted from this cycle.
+	var failures []error
+	for _, db := range databases {
+		source := filepath.Join(backupDir, db)
+		if _, err := os.Stat(source); err != nil {
+			failures = append(failures, fmt.Errorf("replica source unavailable for %s: %w", db, err))
+			continue
+		}
+		cmd := exec.CommandContext(ctx, "rsync", "-a", source, icloudDir+"/")
+		util.SetDetachedProcessGroup(cmd)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			failures = append(failures, fmt.Errorf("replica failed for %s: %w (%s)", db, err, strings.TrimSpace(string(output))))
+		} else {
+			d.logger.Printf("dolt_backup: replicated %s to %s", db, icloudDir)
+		}
 	}
+	return errors.Join(failures...)
 }
 
 // discoverDatabasesWithBackups lists databases in the data directory
@@ -234,4 +275,69 @@ func (d *Daemon) hasBackupRemote(dataDir, db, backupName string) bool {
 		}
 	}
 	return false
+}
+
+// Persistent backoff survives daemon restart and retains the last good time.
+type doltBackupState struct {
+	Failures    int       `json:"failures"`
+	LastSuccess time.Time `json:"lastSuccess,omitempty"`
+	LastAttempt time.Time `json:"lastAttempt"`
+	NextAttempt time.Time `json:"nextAttempt,omitempty"`
+	Error       string    `json:"error,omitempty"`
+}
+
+func permanentBackupFailure(err error) bool {
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "operation not permitted") || strings.Contains(text, "permission denied") || strings.Contains(text, "read-only file system")
+}
+func nextDoltBackupState(previous doltBackupState, now time.Time, err error) doltBackupState {
+	if err == nil {
+		return doltBackupState{LastSuccess: now, LastAttempt: now}
+	}
+	n := previous.Failures + 1
+	if n > 6 {
+		n = 6
+	}
+	delay := 15 * time.Minute * time.Duration(1<<uint(n-1))
+	if delay > 4*time.Hour {
+		delay = 4 * time.Hour
+	}
+	return doltBackupState{Failures: n, LastSuccess: previous.LastSuccess, LastAttempt: now, NextAttempt: now.Add(delay), Error: err.Error()}
+}
+func readDoltBackupState(file string) (map[string]doltBackupState, error) {
+	data, err := os.ReadFile(file)
+	if os.IsNotExist(err) {
+		return map[string]doltBackupState{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var state map[string]doltBackupState
+	err = json.Unmarshal(data, &state)
+	if state == nil && err == nil {
+		err = fmt.Errorf("invalid null backup checkpoint")
+	}
+	return state, err
+}
+func writeDoltBackupState(file string, state map[string]doltBackupState) error {
+	if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(file), ".backup-state-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err = tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), file)
 }

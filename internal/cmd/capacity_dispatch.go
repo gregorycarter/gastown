@@ -244,6 +244,13 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	}
 	defer func() { _ = fileLock.Unlock() }()
 
+	// Preserve dependency-unblocked work before filling slots with new work.
+	if isDaemonDispatch() {
+		if _, err := recoverDependencies(townRoot, false); err != nil {
+			fmt.Fprintf(os.Stderr, "dependency recovery: %v\n", err)
+		}
+	}
+
 	// Supply step: top the queue up from `bd ready` before planning, so
 	// dispatch never waits for a Mayor session to hand-pick work. No-op
 	// unless scheduler.queue_floor > 0. Failure here is non-fatal — a
@@ -287,7 +294,7 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	if !isDaemonDispatch() {
 		var admitted []capacity.PendingBead
 		for _, pending := range dispatchPlan.Plan.ToDispatch {
-			if pending.Context != nil && pending.Context.ResumeMR != "" {
+			if pending.Context != nil && pending.Context.IsRecovery() {
 				dispatchPlan.Plan.Skipped++
 				continue
 			}
@@ -597,7 +604,7 @@ func cleanupStaleContexts(townRoot string) error {
 		fields := staleCheckFields[i]
 		info, found := workBeadInfo[fields.WorkBeadID]
 		// A recovery deliberately retains the existing hooked/in-progress source.
-		if fields.ResumeMR != "" && found && (info.Status == "hooked" || info.Status == "in_progress") {
+		if fields.IsRecovery() && found && (info.Status == "hooked" || info.Status == "in_progress") {
 			continue
 		}
 		if found && (info.Status == "hooked" || info.Status == "closed" || info.Status == "tombstone") {
@@ -783,7 +790,7 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 		candidate.blockedUnknown = blockedUnknownIDs[workBeadID]
 		candidate.blockers = blockers[workBeadID]
 		candidate.ready = isScheduledWorkBeadReady(workBeadID, info, found, blockedWorkIDs, blockedUnknownIDs)
-		if candidate.fields.ResumeMR != "" {
+		if candidate.fields.IsRecovery() {
 			// This validates the original MR plus inherited dependencies directly;
 			// awaiting-merge and an existing molecule are not new-work blockers.
 			_, resumeErr := validateMQResumeContext(townRoot, candidate.fields)
@@ -876,7 +883,7 @@ func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResul
 	if b.Context == nil {
 		return nil, fmt.Errorf("missing sling context for %s", b.ID)
 	}
-	if b.Context.ResumeMR != "" {
+	if b.Context.IsRecovery() {
 		return dispatchMQResume(townRoot, b.Context)
 	}
 

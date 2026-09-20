@@ -31,6 +31,7 @@ type SlingContextFields struct {
 	ResumeBranch string `json:"resume_branch,omitempty"`
 	// ResumeMR is an opt-in same-worker recovery, not a fresh sling. These
 	// immutable identifiers are revalidated at enqueue, readiness and dispatch.
+	ResumeDependency bool   `json:"resume_dependency,omitempty"`
 	ResumeMR         string `json:"resume_mr,omitempty"`
 	ResumeWorker     string `json:"resume_worker,omitempty"`
 	ResumeHead       string `json:"resume_head,omitempty"`
@@ -276,4 +277,9 @@ func splitVars(vars string) []string {
 		}
 	}
 	return result
+}
+
+// IsRecovery separates preserved-work dispatch from fresh slings.
+func (f *SlingContextFields) IsRecovery() bool {
+	return f != nil && (f.ResumeMR != "" || f.ResumeDependency)
 }

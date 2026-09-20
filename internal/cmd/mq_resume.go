@@ -174,8 +174,12 @@ func validateMQResumeDependencies(issue *beads.Issue, show func(string) (*beads.
 	defer delete(seen, issue.ID)
 	attachment := beads.ParseAttachmentFields(issue)
 	for _, dep := range issue.Dependencies {
-		if dep.DependencyType != "blocks" && dep.DependencyType != "parent-child" {
+		switch dep.DependencyType {
+		case "tracks", "related", "discovered-from", "thread":
 			continue
+		case "blocks", "conditional-blocks", "waits-for", "merge-blocks", "parent-child":
+		default:
+			return fmt.Errorf("unknown dependency relation for %s", dep.ID)
 		}
 		// Only the source's own recorded workflow bond may remain open.
 		if root && dep.DependencyType == "blocks" && attachment != nil && attachment.AttachedMolecule != "" && dep.ID == attachment.AttachedMolecule {
@@ -185,7 +189,7 @@ func validateMQResumeDependencies(issue *beads.Issue, show func(string) (*beads.
 		if err != nil || d == nil || d.ID != dep.ID {
 			return fmt.Errorf("dependency %s unavailable", dep.ID)
 		}
-		if dep.DependencyType == "blocks" && d.Status != "closed" {
+		if dep.DependencyType != "parent-child" && d.Status != "closed" {
 			return fmt.Errorf("open prerequisite %s", dep.ID)
 		}
 		if dep.DependencyType == "parent-child" {
@@ -262,9 +266,11 @@ func validateMQResumeWorkerWith(townRoot string, state *mqResumeState, ops mqRes
 	if err != nil || strings.TrimSuffix(origin, ".git") != "https://github.com/gregorycarter/hisn-core" {
 		return fmt.Errorf("foreign worker origin")
 	}
-	remote, err := ops.git(root, "ls-remote", "--refs", "origin", "refs/heads/"+r.Branch)
-	if err != nil || remote != r.Submitted+"\trefs/heads/"+r.Branch {
-		return fmt.Errorf("original pushed head changed or unavailable")
+	if r.Kind != "dependency-resume" {
+		remote, err := ops.git(root, "ls-remote", "--refs", "origin", "refs/heads/"+r.Branch)
+		if err != nil || remote != r.Submitted+"\trefs/heads/"+r.Branch {
+			return fmt.Errorf("original pushed head changed or unavailable")
+		}
 	}
 	issues, err := ops.assignments(r.Rig + "/polecats/" + r.Worker)
 	if err != nil {
@@ -305,12 +311,21 @@ func loadMQResumeState(townRoot, rigName, mrID string) (*mqResumeState, error) {
 }
 
 func validateMQResumeContext(townRoot string, fields *capacity.SlingContextFields) (*mqResumeState, error) {
-	state, err := loadMQResumeState(townRoot, fields.TargetRig, fields.ResumeMR)
+	var state *mqResumeState
+	var err error
+	if fields.ResumeDependency {
+		if fields.TargetRig != "hisn" || fields.ResumeMR != "" {
+			return nil, fmt.Errorf("invalid dependency recovery context")
+		}
+		state, err = loadDependencyResume(townRoot, fields.WorkBeadID)
+	} else {
+		state, err = loadMQResumeState(townRoot, fields.TargetRig, fields.ResumeMR)
+	}
 	if err != nil {
 		return nil, err
 	}
 	r := state.Record
-	expected := &capacity.SlingContextFields{Version: 1, WorkBeadID: r.Source, TargetRig: r.Rig, ResumeMR: r.MR, ResumeWorker: r.Worker, ResumeBranch: r.Branch, ResumeHead: r.Submitted, ResumeReceipt: state.ReceiptHash}
+	expected := &capacity.SlingContextFields{Version: 1, WorkBeadID: r.Source, TargetRig: r.Rig, ResumeDependency: r.Kind == "dependency-resume", ResumeMR: r.MR, ResumeWorker: r.Worker, ResumeBranch: r.Branch, ResumeHead: r.Submitted, ResumeReceipt: state.ReceiptHash}
 	if !sameMQResumeContext(fields, expected) {
 		return nil, fmt.Errorf("queued recovery identity changed")
 	}
@@ -384,7 +399,7 @@ func queueMQResume(townRoot string, initial *mqResumeState, load func() (*mqResu
 	if initial.ReceiptHash != state.ReceiptHash || initial.Record != state.Record {
 		return empty, fmt.Errorf("recovery changed during enqueue")
 	}
-	fields := &capacity.SlingContextFields{Version: 1, WorkBeadID: state.Record.Source, TargetRig: state.Record.Rig, EnqueuedAt: time.Now().UTC().Format(time.RFC3339Nano), ResumeMR: state.Record.MR, ResumeWorker: state.Record.Worker, ResumeBranch: state.Record.Branch, ResumeHead: state.Record.Submitted, ResumeReceipt: state.ReceiptHash}
+	fields := &capacity.SlingContextFields{Version: 1, WorkBeadID: state.Record.Source, TargetRig: state.Record.Rig, EnqueuedAt: time.Now().UTC().Format(time.RFC3339Nano), ResumeDependency: state.Record.Kind == "dependency-resume", ResumeMR: state.Record.MR, ResumeWorker: state.Record.Worker, ResumeBranch: state.Record.Branch, ResumeHead: state.Record.Submitted, ResumeReceipt: state.ReceiptHash}
 	contexts, err := list()
 	if err != nil {
 		return empty, err
