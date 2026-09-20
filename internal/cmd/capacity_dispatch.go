@@ -812,12 +812,28 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 }
 
 // sortScheduledContextAssessments orders the queue for dispatch and display:
-// priority ascending, then oldest enqueued first, then context ID.
+// Priority remains authoritative. At equal priority finish submitted work,
+// then resume preserved dependency work, before starting another fresh bead.
+// Readiness, holds, pressure and capacity admission remain unchanged.
 func sortScheduledContextAssessments(assessments []scheduledContextAssessment) {
 	sort.SliceStable(assessments, func(i, j int) bool {
 		a, b := assessments[i], assessments[j]
 		if a.info.Priority != b.info.Priority {
 			return a.info.Priority < b.info.Priority
+		}
+		rank := func(row scheduledContextAssessment) int {
+			if row.fields != nil && row.fields.TargetRig == "hisn" {
+				if row.fields.ResumeMR != "" {
+					return 0
+				}
+				if row.fields.ResumeDependency {
+					return 1
+				}
+			}
+			return 2
+		}
+		if ar, br := rank(a), rank(b); ar != br {
+			return ar < br
 		}
 		ae, be := "", ""
 		if a.fields != nil {

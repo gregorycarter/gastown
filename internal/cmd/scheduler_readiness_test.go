@@ -152,3 +152,28 @@ func TestScheduledWorkBeadReady_AwaitingMergeHoldIsNotReady(t *testing.T) {
 		t.Fatal("a bead held for merge (in_progress, unassigned, awaiting-merge:) must not be re-dispatched")
 	}
 }
+
+func TestSortScheduledRecoveryFinishesWorkBeforeFreshBeads(t *testing.T) {
+	row := func(id string, priority int, date string, mr bool, dependency bool) scheduledContextAssessment {
+		fields := &capacity.SlingContextFields{TargetRig: "hisn", EnqueuedAt: date, ResumeDependency: dependency}
+		if mr {
+			fields.ResumeMR = "hisn-wisp-existing"
+		}
+		return scheduledContextAssessment{context: slingContextRecord{issue: &beads.Issue{ID: id}}, fields: fields, info: beadStatusInfo{Priority: priority}}
+	}
+	rows := []scheduledContextAssessment{
+		row("fresh-old", 2, "2026-09-19T05:00:00Z", false, false),
+		row("dependency", 2, "2026-09-20T05:00:00Z", false, true),
+		row("mr-newer", 2, "2026-09-20T07:00:00Z", true, false),
+		row("urgent", 1, "2026-09-20T08:00:00Z", false, false),
+		row("mr-older", 2, "2026-09-20T06:00:00Z", true, false),
+		row("low-priority-mr", 3, "2026-09-19T04:00:00Z", true, false),
+	}
+	sortScheduledContextAssessments(rows)
+	want := []string{"urgent", "mr-older", "mr-newer", "dependency", "fresh-old", "low-priority-mr"}
+	for i, id := range want {
+		if rows[i].context.issue.ID != id {
+			t.Fatalf("position %d = %s, want %s", i, rows[i].context.issue.ID, id)
+		}
+	}
+}
