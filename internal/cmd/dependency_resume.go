@@ -156,6 +156,7 @@ func recoverDependencies(town string, dry bool) ([]mqResumeResult, error) {
 			}
 			state, err := loadDependencyResume(town, source.ID)
 			if err != nil {
+				fmt.Fprintf(os.Stderr, "Dependency recovery %s retained: %v\n", source.ID, err)
 				continue
 			}
 			row := mqResumeOutput(state, "ready-to-queue", "")

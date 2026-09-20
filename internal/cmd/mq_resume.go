@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/session"
@@ -258,6 +259,12 @@ func validateMQResumeWorkerWith(townRoot string, state *mqResumeState, ops mqRes
 	}
 	for _, check := range checks {
 		value, err := ops.git(root, check.args...)
+		if err == nil && check.args[0] == "status" {
+			_, err = checkpoint.ValidateRecoveryStatus(root, value, r.Branch, r.Submitted, r.Source)
+			if err == nil {
+				continue
+			}
+		}
 		if err != nil || value != check.expected {
 			return fmt.Errorf("original worker Git state changed (%s)", strings.Join(check.args, " "))
 		}

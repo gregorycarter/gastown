@@ -383,8 +383,12 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		}
 	}
 
-	if err := m.validateHisnStart(polecat, workDir, opts); err != nil {
-		return err
+	// Admitted recovery verifies and hooks the source in BeforeLaunch. The
+	// ordinary restart guard must not run ahead of that state transition.
+	if opts.PreserveBranch == "" {
+		if err := m.validateHisnStart(polecat, workDir, opts); err != nil {
+			return err
+		}
 	}
 
 	// Validate issue exists and isn't tombstoned BEFORE creating session.
@@ -515,10 +519,10 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// Create session with command and env vars via -e flags so the initial
 	// shell — and Claude's subprocesses (notably bd) — inherit them from the start.
 	// See: https://github.com/anthropics/gastown/issues/280 (race condition fix)
-	if opts.PreserveBranch != "" {
-		if err := preparePreservedSession(workDir, opts); err != nil {
-			return err
-		}
+	if err := prepareSessionLaunch(workDir, opts, func() error {
+		return m.validateHisnStart(polecat, workDir, opts)
+	}); err != nil {
+		return err
 	}
 	if err := m.tmux.NewSessionWithCommandAndEnv(sessionID, workDir, command, envVars); err != nil {
 		return fmt.Errorf("creating session: %w", err)

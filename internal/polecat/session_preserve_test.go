@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/checkpoint"
 )
 
 func TestPreservedSessionStartupChecksBeforeHook(t *testing.T) {
-	for _, problem := range []string{"", "wrong branch", "wrong head", "dirty", "missing hook", "hook failure", "hook changes head"} {
+	for _, problem := range []string{"", "checkpoint", "foreign checkpoint", "wrong branch", "wrong head", "dirty", "missing hook", "hook failure", "hook changes head", "manual hold"} {
 		t.Run(problem, func(t *testing.T) {
 			root := t.TempDir()
 			run := func(args ...string) string {
@@ -29,6 +31,7 @@ func TestPreservedSessionStartupChecksBeforeHook(t *testing.T) {
 			run("commit", "--allow-empty", "-m", "synthetic recovery fixture")
 			head := run("rev-parse", "HEAD")
 			hooks := 0
+			status := "blocked"
 			opts := SessionStartOptions{Issue: "hisn-test", PreserveBranch: "polecat/quartz/hisn-test", PreserveHead: head, BeforeLaunch: func() error {
 				hooks++
 				if problem == "hook failure" {
@@ -37,6 +40,7 @@ func TestPreservedSessionStartupChecksBeforeHook(t *testing.T) {
 				if problem == "hook changes head" {
 					run("commit", "--allow-empty", "-m", "concurrent change")
 				}
+				status = "hooked"
 				return nil
 			}}
 			switch problem {
@@ -50,17 +54,47 @@ func TestPreservedSessionStartupChecksBeforeHook(t *testing.T) {
 				}
 			case "missing hook":
 				opts.BeforeLaunch = nil
+			case "checkpoint", "foreign checkpoint":
+				issue := opts.Issue
+				if problem == "foreign checkpoint" {
+					issue = "hisn-other"
+				}
+				if err := checkpoint.Write(root, &checkpoint.Checkpoint{Branch: opts.PreserveBranch, LastCommit: head, HookedBead: issue}); err != nil {
+					t.Fatal(err)
+				}
 			}
-			err := preparePreservedSession(root, opts)
-			if (err == nil) != (problem == "") {
+			err := prepareSessionLaunch(root, opts, func() error {
+				if status != "hooked" || problem == "manual hold" {
+					return errors.New("source not admitted")
+				}
+				return nil
+			})
+			if (err == nil) != (problem == "" || problem == "checkpoint") {
 				t.Fatalf("problem=%s err=%v", problem, err)
 			}
-			if problem != "" && problem != "hook failure" && problem != "hook changes head" && hooks != 0 {
+			if problem != "" && problem != "checkpoint" && problem != "manual hold" && problem != "hook failure" && problem != "hook changes head" && hooks != 0 {
 				t.Fatal("invalid state hooked")
+			}
+			if problem == "checkpoint" {
+				if run("status", "--porcelain") != "" {
+					t.Fatal("checkpoint still dirties source")
+				}
+				files, _ := filepath.Glob(filepath.Join(filepath.Dir(root), ".runtime", "recovery-checkpoints", "*.json"))
+				if len(files) != 1 {
+					t.Fatal("checkpoint not preserved outside repository")
+				}
 			}
 			if problem != "hook changes head" && run("rev-parse", "HEAD") != head {
 				t.Fatal("startup mutated branch")
 			}
 		})
+	}
+}
+
+func TestOrdinaryStartupCannotBypassBlockedGuard(t *testing.T) {
+	hooked := false
+	err := prepareSessionLaunch(t.TempDir(), SessionStartOptions{BeforeLaunch: func() error { hooked = true; return nil }}, func() error { return errors.New("blocked source") })
+	if err == nil || hooked {
+		t.Fatal("ordinary restart bypassed blocked guard")
 	}
 }
