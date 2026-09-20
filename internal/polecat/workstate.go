@@ -14,6 +14,8 @@ const (
 // classify a polecat consistently across list, recovery, witness, and capacity.
 type WorkstateInput struct {
 	State                          State
+	SessionKnown                   bool
+	SessionRunning                 bool
 	HookBead                       string
 	CleanupStatus                  CleanupStatus
 	IgnoreCleanupStatus            bool
@@ -57,6 +59,18 @@ type WorkstateDisposition struct {
 
 // DecideWorkstate returns the canonical disposition for a polecat.
 func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
+	d := decideWorkPreservation(in)
+	// Preserved work occupies a worktree, not an execution slot. A stopped
+	// recovery worker must not prevent other workers from fixing its blockers.
+	// Unknown session evidence retains the conservative existing accounting.
+	// Starts/resumes hold separate admission reservations until the session exists.
+	if in.SessionKnown && !in.SessionRunning {
+		d.CountsTowardCapacity = false
+	}
+	return d
+}
+
+func decideWorkPreservation(in WorkstateInput) WorkstateDisposition {
 	if in.ActiveMRBlocker != "" && !in.PushFailed && !in.MRFailed && in.State == StateDone {
 		return WorkstateDisposition{
 			Verdict:     WorkstateVerdictPendingMR,

@@ -1064,6 +1064,10 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	workTerminal := beadTerminal
 	targetRefs, targetRefLookupFailed := recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch)
 	input := polecat.WorkstateInput{State: p.State, CleanupStatus: polecat.CleanupUnknown, Branch: p.Branch}
+	if names, sessionErr := tmux.NewTmux().ListSessions(); sessionErr == nil {
+		_, input.SessionRunning = newPolecatSessionSet(names).lookup(rigName, polecatName)
+		input.SessionKnown = true
+	}
 	var gitState *GitState
 	var gitErr error
 	gitStateLoaded := false

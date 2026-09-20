@@ -2335,6 +2335,12 @@ func (m *Manager) reuseDecisionForPolecat(name string, state State) SlotReuseDec
 
 func (m *Manager) workstateInputForPolecat(name string, state State, issue string) WorkstateInput {
 	input := WorkstateInput{State: state, CleanupStatus: CleanupUnknown}
+	if m.tmux != nil {
+		sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+		if running, err := m.tmux.HasSession(sessionName); err == nil {
+			input.SessionKnown, input.SessionRunning = true, running
+		}
+	}
 	agentID := m.agentBeadID(name)
 	activeMR := ""
 	sourceHint := ""

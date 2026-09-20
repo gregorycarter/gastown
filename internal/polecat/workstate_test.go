@@ -1,6 +1,37 @@
 package polecat
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+func TestStoppedRecoveryPreservesWorkWithoutReservingExecution(t *testing.T) {
+	for _, in := range []WorkstateInput{
+		{State: StateStalled, CleanupStatus: CleanupClean, ActiveWorkBlocker: "assigned open work", ActiveWorkCountsTowardCapacity: true},
+		{State: StateIdle, CleanupStatus: CleanupUnpushed, UnpushedCommits: 5},
+		{State: StateDone, CleanupStatus: CleanupStash, StashCount: 1},
+		{State: StateIdle, CleanupStatus: CleanupClean, HookBead: "gt-work"},
+		{State: StateIdle, CleanupStatus: CleanupClean, MQCheckRequired: true, HasSubmittableWork: true},
+	} {
+		unknown := DecideWorkstate(in)
+		if !unknown.CountsTowardCapacity || !unknown.NeedsRecovery || unknown.Reusable || unknown.SafeToNuke {
+			t.Fatalf("unknown session must conservatively preserve capacity and work: %+v", unknown)
+		}
+		in.SessionKnown, in.SessionRunning = true, true
+		if live := DecideWorkstate(in); !reflect.DeepEqual(live, unknown) {
+			t.Fatalf("live recovery changed: %+v vs %+v", live, unknown)
+		}
+		in.SessionRunning = false
+		stopped := DecideWorkstate(in)
+		if stopped.CountsTowardCapacity {
+			t.Fatalf("stopped recovery reserves execution: %+v", stopped)
+		}
+		stopped.CountsTowardCapacity = unknown.CountsTowardCapacity
+		if !reflect.DeepEqual(stopped, unknown) {
+			t.Fatalf("stopped work lost preservation predicates: %+v vs %+v", stopped, unknown)
+		}
+	}
+}
 
 func TestDecideWorkstateCanonicalFields(t *testing.T) {
 	tests := []struct {

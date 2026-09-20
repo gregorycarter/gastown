@@ -352,6 +352,33 @@ func TestCapacitySnapshotRecoveryBlockedDoesNotAlwaysConsumeFreeCapacity(t *test
 	}
 }
 
+func TestCapacitySnapshotStoppedRecoveryCannotDeadlockReadyWork(t *testing.T) {
+	setupPolecatTestRegistry(t)
+	sessions := newPolecatSessionSet([]string{"gt-live1", "gt-live2", "gt-live3"})
+	snapshot := polecatCapacitySnapshot{Max: 4}
+	for _, name := range []string{"basalt", "shale", "flint", "jasper"} {
+		item := buildPolecatInventoryItem("gastown", name,
+			&beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: string(polecat.CleanupUnpushed)},
+			&beads.Issue{ID: "gt-" + name, Status: string(beads.StatusBlocked), Assignee: "gastown/polecats/" + name}, sessions)
+		if item.Disposition.Reusable || item.Disposition.SafeToNuke || !item.Disposition.NeedsRecovery || item.Issue == "" {
+			t.Fatalf("recovery work must remain protected: %+v", item)
+		}
+		applyWorkstateDispositionToCapacitySnapshot(&snapshot, item.State, item.Disposition)
+	}
+	if snapshot.RecoveryBlocked != 4 || snapshot.occupied() != 0 {
+		t.Fatalf("four preserved workers must leave execution slots available: %+v", snapshot)
+	}
+	for _, name := range []string{"live1", "live2", "live3"} {
+		applyAgentFieldsToCapacitySnapshot(&snapshot, "gastown", name,
+			&beads.AgentFields{AgentState: string(beads.AgentStateWorking), CleanupStatus: string(polecat.CleanupClean)},
+			&beads.Issue{ID: "gt-" + name, Status: string(beads.StatusInProgress), Assignee: "gastown/polecats/" + name}, sessions)
+	}
+	snapshot.Reservations = 1 // A start/resume before its tmux session exists.
+	if snapshot.Working != 3 || snapshot.occupied() != snapshot.Max {
+		t.Fatalf("three live workers plus a starting reservation must fill the cap: %+v", snapshot)
+	}
+}
+
 func TestPrintDryRunPlanUsesCapacitySnapshot(t *testing.T) {
 	out := captureStdout(t, func() {
 		printDryRunPlan(capacity.DispatchPlan{

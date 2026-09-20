@@ -63,7 +63,7 @@ func TestBuildPolecatInventoryItem(t *testing.T) {
 			wantCapacity: true,
 		},
 		{
-			name:         "open stopped is stalled capacity",
+			name:         "open stopped preserves work without consuming execution capacity",
 			polecatName:  "stopped",
 			fields:       &beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: string(polecat.CleanupClean)},
 			activeWork:   &beads.Issue{ID: "gt-open", Status: string(beads.StatusOpen), Assignee: "gastown/polecats/stopped"},
@@ -71,7 +71,6 @@ func TestBuildPolecatInventoryItem(t *testing.T) {
 			wantIssue:    "gt-open",
 			wantVerdict:  polecat.WorkstateVerdictNeedsRecovery,
 			wantRecovery: true,
-			wantCapacity: true,
 		},
 		{
 			name:         "deferred protects without capacity",
@@ -121,7 +120,6 @@ func TestBuildPolecatInventoryItem(t *testing.T) {
 			wantState:    polecat.StateDone,
 			wantVerdict:  polecat.WorkstateVerdictNeedsRecovery,
 			wantRecovery: true,
-			wantCapacity: true,
 		},
 		{
 			name:        "done with active mr remains pending",

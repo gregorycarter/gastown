@@ -87,7 +87,7 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 		SessionName:    sessionName,
 	}
 
-	input := polecat.WorkstateInput{State: polecat.StateIdle}
+	input := polecat.WorkstateInput{State: polecat.StateIdle, SessionKnown: sessions != nil, SessionRunning: running}
 	if fields != nil {
 		item.CleanupStatus = strings.TrimSpace(fields.CleanupStatus)
 		item.ActiveMR = strings.TrimSpace(fields.ActiveMR)
