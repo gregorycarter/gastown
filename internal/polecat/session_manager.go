@@ -328,6 +328,13 @@ func (m *SessionManager) polecatSlot(polecat string) int {
 
 // Start creates and starts a new session for a polecat.
 func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
+	// Serialize startup with sandbox retirement/reuse. A tmux session does not
+	// exist during early setup, so liveness alone cannot protect that window.
+	fl, lockErr := (&Manager{rig: m.rig}).lockPolecat(polecat)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer fl.Unlock()
 	if !m.hasPolecat(polecat) {
 		return fmt.Errorf("%w: %s", ErrPolecatNotFound, polecat)
 	}

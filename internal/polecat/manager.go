@@ -1795,6 +1795,11 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 			current.State = StateIdle
 		}
 	}
+	if current.State == StateDone {
+		if blocker := m.brokenIdleReclaimSessionBlocker(name); blocker != "" {
+			return nil, fmt.Errorf("%w: %s", ErrPolecatNeedsRecovery, blocker)
+		}
+	}
 	if current.State == StateIdle {
 		// A live session with no active work is a dead prompt, not preserved work.
 		// Clear it before evaluating reuse so recovery-blocked idle slots don't
@@ -2301,15 +2306,15 @@ func (m *Manager) List() ([]*Polecat, error) {
 	return polecats, nil
 }
 
-// FindIdlePolecat returns the first idle polecat in the rig, or nil if none.
-// Idle means no hook, no active session, and no pending completion/MR cleanup state.
+// FindIdlePolecat returns the first safely reusable idle/completed polecat.
+// Done workers use the same work-preservation predicate and must have no session.
 func (m *Manager) FindIdlePolecat() (*Polecat, error) {
 	polecats, err := m.List()
 	if err != nil {
 		return nil, err
 	}
 	for _, p := range polecats {
-		if p.State == StateIdle && m.reuseDecisionForPolecat(p.Name, p.State).Reusable {
+		if reusablePoolState(p.State) && (p.State != StateDone || m.brokenIdleReclaimSessionBlocker(p.Name) == "") && m.reuseDecisionForPolecat(p.Name, p.State).Reusable {
 			return p, nil
 		}
 	}

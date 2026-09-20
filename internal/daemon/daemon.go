@@ -1028,6 +1028,9 @@ func (d *Daemon) heartbeat(state *State) {
 	// branches persist indefinitely. This cleans them up periodically.
 	d.pruneStaleBranches()
 
+	// Retire completed sandboxes independently of pressure-gated dispatch.
+	d.retireMergedPolecats()
+
 	// 14. Dispatch scheduled work (capacity-controlled polecat dispatch).
 	// Shells out to `gt scheduler run` to avoid circular import between daemon and cmd.
 	// Pressure-gated: polecats are the primary resource consumers.
