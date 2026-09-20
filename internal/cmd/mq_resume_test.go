@@ -496,3 +496,54 @@ func TestMQResumeContextOnlyAllowsSchedulerBookkeepingChanges(t *testing.T) {
 		})
 	}
 }
+
+func TestDependencyReceiptRefreshPreservesIdentityAndRetryHistory(t *testing.T) {
+	for _, mode := range []string{"receipt", "head", "worker", "branch", "ordinary", "duplicate", "flag", "failed-write"} {
+		t.Run(mode, func(t *testing.T) {
+			state := &mqResumeState{Source: &beads.Issue{ID: "hisn-original", Title: "preserved"}, ReceiptHash: "new", Record: mqResumeRecord{Kind: "dependency-resume", Source: "hisn-original", Rig: "hisn", Worker: "onyx", Branch: "polecat/onyx/hisn-original+x", Submitted: strings.Repeat("a", 40)}}
+			fields := &capacity.SlingContextFields{Version: 1, WorkBeadID: state.Source.ID, TargetRig: "hisn", ResumeDependency: true, ResumeWorker: "onyx", ResumeBranch: state.Record.Branch, ResumeHead: state.Record.Submitted, ResumeReceipt: "old", EnqueuedAt: "2026-09-19T00:00:00Z", DispatchFailures: 2, LastFailure: "preserve this"}
+			switch mode {
+			case "head":
+				fields.ResumeHead = strings.Repeat("b", 40)
+			case "worker":
+				fields.ResumeWorker = "jasper"
+			case "branch":
+				fields.ResumeBranch = "other"
+			case "ordinary":
+				fields.ResumeDependency = false
+			case "flag":
+				fields.Formula = "mol-new"
+			}
+			ctx := &beads.Issue{ID: "hisn-wisp-existing", Description: beads.FormatSlingContextDescription(fields)}
+			updates := 0
+			list := func() ([]*beads.Issue, error) {
+				if mode == "duplicate" {
+					return []*beads.Issue{ctx, ctx}, nil
+				}
+				return []*beads.Issue{ctx}, nil
+			}
+			result, err := queueMQResume(t.TempDir(), state, func() (*mqResumeState, error) { return state, nil }, list, func(string, string, *capacity.SlingContextFields) (*beads.Issue, error) {
+				t.Fatal("created replacement context")
+				return nil, nil
+			}, func(id string, f *capacity.SlingContextFields) error {
+				updates++
+				if mode == "failed-write" {
+					return fmt.Errorf("write failed")
+				}
+				ctx.Description = beads.FormatSlingContextDescription(f)
+				return nil
+			})
+			if mode == "receipt" {
+				if err != nil || result.Status != "refreshed" || updates != 1 {
+					t.Fatalf("%+v %v updates=%d", result, err, updates)
+				}
+				got := beads.ParseSlingContextFields(ctx.Description)
+				if got.DispatchFailures != 2 || got.LastFailure != "preserve this" || got.EnqueuedAt != fields.EnqueuedAt {
+					t.Fatal("retry history lost")
+				}
+			} else if err == nil {
+				t.Fatal("unsafe refresh accepted")
+			}
+		})
+	}
+}

@@ -500,15 +500,16 @@ type slingContextRecord struct {
 }
 
 type scheduledContextAssessment struct {
-	context        slingContextRecord
-	fields         *capacity.SlingContextFields
-	info           beadStatusInfo
-	found          bool
-	blocked        bool
-	blockedUnknown bool
-	blockers       []string
-	ready          bool
-	recoveryError  string
+	context           slingContextRecord
+	fields            *capacity.SlingContextFields
+	info              beadStatusInfo
+	found             bool
+	blocked           bool
+	blockedUnknown    bool
+	blockers          []string
+	ready             bool
+	recoveryError     string
+	unblocksPreserved int
 }
 
 // pauseReason explains, in one short phrase, why `gt scheduler list` shows a
@@ -811,9 +812,55 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 	// first sort above only had EnqueuedAt, which is what dedup needs to be
 	// deterministic; dispatch order is a different question, and a P0 must
 	// not wait behind a P3 that happened to be enqueued first.
+	// bd blocked includes off-queue sources. Rank ready prerequisites of
+	// preserved product work without overriding priority, holds or admission.
+	blockedIDs := make([]string, 0, len(blockers))
+	for id := range blockers {
+		if strings.HasPrefix(id, "hisn-") {
+			blockedIDs = append(blockedIDs, id)
+		}
+	}
+	preserved := batchFetchBeadInfoByIDs(townRoot, blockedIDs)
+	counts := preservedPrerequisiteCounts(blockers, preserved)
+	for i := range assessments {
+		assessments[i].unblocksPreserved = counts[assessments[i].fields.WorkBeadID]
+	}
 	sortScheduledContextAssessments(assessments)
 
 	return assessments, blockedErr
+}
+
+// Count each preserved source once per prerequisite, including indirect chains.
+// Cycles are bounded and never make an unready bead dispatchable.
+func preservedPrerequisiteCounts(blockers map[string][]string, sources map[string]beadStatusInfo) map[string]int {
+	counts := map[string]int{}
+	for id, source := range sources {
+		if source.Status != "blocked" || !strings.HasPrefix(source.Assignee, "hisn/polecats/") || capacity.IsMessagingBead(source.Labels) {
+			continue
+		}
+		held := false
+		for _, label := range source.Labels {
+			if label == "needs-operator" || label == "needs-operator-rollout" {
+				held = true
+			}
+		}
+		if held {
+			continue
+		}
+		seen := map[string]bool{id: true}
+		pending := append([]string{}, blockers[id]...)
+		for len(pending) > 0 {
+			next := pending[0]
+			pending = pending[1:]
+			if seen[next] || !strings.HasPrefix(next, "hisn-") || strings.Contains(next, "-wisp-") {
+				continue
+			}
+			seen[next] = true
+			counts[next]++
+			pending = append(pending, blockers[next]...)
+		}
+	}
+	return counts
 }
 
 // sortScheduledContextAssessments orders the queue for dispatch and display:
@@ -835,7 +882,10 @@ func sortScheduledContextAssessments(assessments []scheduledContextAssessment) {
 					return 1
 				}
 			}
-			return 2
+			if row.fields != nil && row.fields.TargetRig == "hisn" && row.unblocksPreserved > 0 {
+				return 2
+			}
+			return 3
 		}
 		if ar, br := rank(a), rank(b); ar != br {
 			return ar < br

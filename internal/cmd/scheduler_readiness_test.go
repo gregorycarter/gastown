@@ -193,3 +193,26 @@ func TestSortScheduledRecoveryFinishesWorkBeforeFreshBeads(t *testing.T) {
 		}
 	}
 }
+
+func TestPreservedPrerequisitesPrecedeFreshWorkWithoutOverridingPriority(t *testing.T) {
+	blockers := map[string][]string{"hisn-product": {"hisn-mid", "hisn-ready"}, "hisn-mid": {"hisn-ready", "hisn-product"}, "hisn-held": {"hisn-other"}}
+	sources := map[string]beadStatusInfo{"hisn-product": {Status: "blocked", Assignee: "hisn/polecats/obsidian"}, "hisn-held": {Status: "blocked", Assignee: "hisn/polecats/shale", Labels: []string{"needs-operator"}}}
+	counts := preservedPrerequisiteCounts(blockers, sources)
+	if counts["hisn-ready"] != 1 || counts["hisn-product"] != 0 || counts["hisn-other"] != 0 {
+		t.Fatalf("incorrect bounded dependency ranking: %+v", counts)
+	}
+	rows := []scheduledContextAssessment{}
+	for _, id := range []string{"fresh", "hisn-ready", "urgent"} {
+		priority := 2
+		if id == "urgent" {
+			priority = 1
+		}
+		rows = append(rows, scheduledContextAssessment{context: slingContextRecord{issue: &beads.Issue{ID: id}}, fields: &capacity.SlingContextFields{TargetRig: "hisn", WorkBeadID: id}, info: beadStatusInfo{Priority: priority}, unblocksPreserved: counts[id]})
+	}
+	sortScheduledContextAssessments(rows)
+	for i, want := range []string{"urgent", "hisn-ready", "fresh"} {
+		if rows[i].context.issue.ID != want {
+			t.Fatalf("wrong order at %d: %+v", i, rows)
+		}
+	}
+}

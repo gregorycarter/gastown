@@ -160,9 +160,10 @@ func recoverDependencies(town string, dry bool) ([]mqResumeResult, error) {
 			}
 			row := mqResumeOutput(state, "ready-to-queue", "")
 			if !dry {
-				row, err = queueMQResume(town, state, func() (*mqResumeState, error) { return loadDependencyResume(town, source.ID) }, b.ListOpenSlingContexts, b.CreateSlingContext)
+				row, err = queueMQResume(town, state, func() (*mqResumeState, error) { return loadDependencyResume(town, source.ID) }, b.ListOpenSlingContexts, b.CreateSlingContext, b.UpdateSlingContextFields)
 				if err != nil {
-					return result, err
+					fmt.Fprintf(os.Stderr, "Dependency recovery %s retained: %v\n", source.ID, err)
+					continue
 				}
 			}
 			result = append(result, row)
@@ -180,9 +181,10 @@ func recoverDependencies(town string, dry bool) ([]mqResumeResult, error) {
 		}
 		row := mqResumeOutput(state, "ready-to-queue", "")
 		if !dry {
-			row, err = queueMQResume(town, state, func() (*mqResumeState, error) { return loadMQResumeState(town, "hisn", mr.ID) }, b.ListOpenSlingContexts, b.CreateSlingContext)
+			row, err = queueMQResume(town, state, func() (*mqResumeState, error) { return loadMQResumeState(town, "hisn", mr.ID) }, b.ListOpenSlingContexts, b.CreateSlingContext, b.UpdateSlingContextFields)
 			if err != nil {
-				return result, err
+				fmt.Fprintf(os.Stderr, "MR recovery %s retained: %v\n", mr.ID, err)
+				continue
 			}
 		}
 		result = append(result, row)

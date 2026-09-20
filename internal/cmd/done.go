@@ -684,7 +684,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	// Clean completions retire the live polecat session after durable handoff.
-	// Failed, deferred, escalated, and local-review paths preserve the session for recovery.
+	// Hisn blocked exits checkpoint and release execution; failed submissions and
+	// local-review paths retain their sessions for recovery.
 
 	worktree, err := resolveDonePolecatWorktree()
 	if err != nil {
@@ -1934,6 +1935,14 @@ notifyWitness:
 		style.PrintWarning("could not log feed event: %v", err)
 	}
 
+	blockedCheckpoint := false
+	if shouldCheckpointBlockedDone(rigName, exitType, issueID) && !pushFailed && !mrFailed {
+		if err := checkpointBlockedDone(townRoot, cwd, sender, issueID, branch, exitType); err != nil {
+			return err
+		}
+		blockedCheckpoint = true
+	}
+
 	// Update agent bead state (ZFC: self-report completion). If push/MR failed,
 	// keep the hook intact so Witness can recover the still-open work.
 	if err := updateAgentStateAfterSubmission(cwd, townRoot, exitType, issueID, pushFailed, mrFailed); err != nil {
@@ -1966,7 +1975,7 @@ notifyWitness:
 		if convoyInfo != nil {
 			mergeStrategy = convoyInfo.MergeStrategy
 		}
-		retirePolecat = shouldRetirePolecatSessionAfterDone(exitType, mergeStrategy, pushFailed, mrFailed)
+		retirePolecat = blockedCheckpoint || shouldRetirePolecatSessionAfterDone(exitType, mergeStrategy, pushFailed, mrFailed)
 		if retirePolecat {
 			fmt.Printf("%s Polecat session retiring after durable handoff\n", style.Bold.Render("✓"))
 		} else {
@@ -2332,9 +2341,7 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 	// Workflow step beads (*-wfs-*) are ephemeral formula steps managed by the workflow
 	// engine. For these, DEFERRED means "step complete, no code commits" not "work
 	// paused for resumption". Close them on DEFERRED so the convoy can advance.
-	isWorkflowStep := strings.Contains(hookedBeadID, "-wfs-")
-
-	if hookedBeadID != "" && (exitType != ExitDeferred || isWorkflowStep) {
+	if hookedBeadID != "" && shouldFinishDoneSource(exitType, hookedBeadID) {
 		// BUG FIX (gt-pftz): Close hooked bead unless already terminal (closed/tombstone).
 		// Previously checked hookedBead.Status == StatusHooked, but polecats update
 		// their work bead to in_progress during work. The exact-match check caused

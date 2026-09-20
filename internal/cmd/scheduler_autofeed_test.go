@@ -241,3 +241,18 @@ func TestIsOpsBead(t *testing.T) {
 		t.Error("product labels should not be ops labels")
 	}
 }
+
+func TestAutoFeedPrefersReadyPreservedPrerequisiteWithinPriority(t *testing.T) {
+	rows := []autoFeedCandidate{
+		{ID: "hisn-fresh", Rig: "hisn", Status: "open", Priority: 2, CreatedAt: "2026-09-01"},
+		{ID: "hisn-blocker", Rig: "hisn", Status: "open", Priority: 2, CreatedAt: "2026-09-20", UnblocksPreserved: 2},
+		{ID: "hisn-urgent", Rig: "hisn", Status: "open", Priority: 1, CreatedAt: "2026-09-20"},
+		{ID: "hisn-held", Rig: "hisn", Status: "open", Priority: 2, UnblocksPreserved: 5, Labels: []string{"needs-operator"}},
+	}
+	selected, _ := selectAutoFeedCandidates(rows, autoFeedPolicy{ExcludeLabels: []string{"needs-operator"}}, nil, 3)
+	for i, want := range []string{"hisn-urgent", "hisn-blocker", "hisn-fresh"} {
+		if len(selected) != 3 || selected[i].ID != want {
+			t.Fatalf("unexpected selection: %+v", selected)
+		}
+	}
+}

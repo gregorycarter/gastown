@@ -26,15 +26,16 @@ const autoFeedReadyLimit = 50
 // needs. Kept separate from beads.Issue so the selection logic is pure and
 // testable without a database.
 type autoFeedCandidate struct {
-	ID        string
-	Title     string
-	Status    string
-	Assignee  string
-	Type      string
-	Priority  int
-	CreatedAt string
-	Labels    []string
-	Rig       string
+	ID                string
+	Title             string
+	Status            string
+	Assignee          string
+	Type              string
+	Priority          int
+	CreatedAt         string
+	Labels            []string
+	Rig               string
+	UnblocksPreserved int
 }
 
 // autoFeedRejection records why a ready bead was not enqueued. Surfaced by
@@ -91,6 +92,9 @@ func sortAutoFeedCandidates(candidates []autoFeedCandidate) {
 		a, b := candidates[i], candidates[j]
 		if a.Priority != b.Priority {
 			return a.Priority < b.Priority
+		}
+		if (a.UnblocksPreserved > 0) != (b.UnblocksPreserved > 0) {
+			return a.UnblocksPreserved > 0
 		}
 		if a.CreatedAt != b.CreatedAt {
 			return a.CreatedAt < b.CreatedAt
@@ -323,6 +327,21 @@ func autoFeedScheduler(townRoot string, floorOverride int, dryRun bool) (*autoFe
 		return result, nil
 	}
 
+	blockers, _, blockerErr := listBlockedWorkBeadBlockersWithRunner(townRoot, candidateIDs, runBlockedWorkQuery)
+	if blockerErr == nil {
+		ids := []string{}
+		for id := range blockers {
+			if strings.HasPrefix(id, "hisn-") {
+				ids = append(ids, id)
+			}
+		}
+		counts := preservedPrerequisiteCounts(blockers, batchFetchBeadInfoByIDs(townRoot, ids))
+		for i := range candidates {
+			if candidates[i].Rig == "hisn" {
+				candidates[i].UnblocksPreserved = counts[candidates[i].ID]
+			}
+		}
+	}
 	result.OpsWorking = countWorkingOpsBeads(townRoot)
 	policy := autoFeedPolicy{
 		AllowLabels:   schedulerCfg.GetAutoFeedLabels(),

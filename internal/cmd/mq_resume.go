@@ -385,7 +385,7 @@ func mqResumeOutput(state *mqResumeState, status, contextID string) mqResumeResu
 	return mqResumeResult{Status: status, Context: contextID, MR: r.MR, Source: r.Source, Rig: r.Rig, Worker: r.Worker, Branch: r.Branch, Head: r.Submitted}
 }
 
-func queueMQResume(townRoot string, initial *mqResumeState, load func() (*mqResumeState, error), list func() ([]*beads.Issue, error), create func(string, string, *capacity.SlingContextFields) (*beads.Issue, error)) (mqResumeResult, error) {
+func queueMQResume(townRoot string, initial *mqResumeState, load func() (*mqResumeState, error), list func() ([]*beads.Issue, error), create func(string, string, *capacity.SlingContextFields) (*beads.Issue, error), refresh ...func(string, *capacity.SlingContextFields) error) (mqResumeResult, error) {
 	empty := mqResumeResult{}
 	release, err := tryAcquireSlingBeadLock(townRoot, initial.Source.ID)
 	if err != nil {
@@ -405,18 +405,42 @@ func queueMQResume(townRoot string, initial *mqResumeState, load func() (*mqResu
 		return empty, err
 	}
 	result := mqResumeOutput(state, "queued", "")
+	var matched *beads.Issue
 	for _, ctx := range contexts {
 		existing := beads.ParseSlingContextFields(ctx.Description)
 		if existing == nil || existing.WorkBeadID != fields.WorkBeadID {
 			continue
 		}
-		if result.Context != "" || !sameMQResumeContext(existing, fields) {
+		if matched != nil {
+			return empty, fmt.Errorf("duplicate recovery contexts; preserve and inspect")
+		}
+		matched = ctx
+	}
+	if matched != nil {
+		existing := beads.ParseSlingContextFields(matched.Description)
+		if sameMQResumeContext(existing, fields) {
+			return mqResumeOutput(state, "already-queued", matched.ID), nil
+		}
+		// Only refresh a dependency receipt for the exact same preserved work.
+		// Never reinterpret an ordinary context, changed HEAD, worker or branch.
+		updated := *existing
+		updated.ResumeReceipt = fields.ResumeReceipt
+		if !existing.ResumeDependency || !fields.ResumeDependency || existing.ResumeMR != "" || len(refresh) != 1 || !sameMQResumeContext(&updated, fields) {
 			return empty, fmt.Errorf("existing scheduler context conflicts with exact recovery; preserve and inspect")
 		}
-		result.Context, result.Status = ctx.ID, "already-queued"
-	}
-	if result.Context != "" {
-		return result, nil
+		if err := refresh[0](matched.ID, &updated); err != nil {
+			return empty, err
+		}
+		confirmed, err := list()
+		if err != nil {
+			return empty, err
+		}
+		for _, ctx := range confirmed {
+			if ctx.ID == matched.ID && sameMQResumeContext(beads.ParseSlingContextFields(ctx.Description), &updated) {
+				return mqResumeOutput(state, "refreshed", matched.ID), nil
+			}
+		}
+		return empty, fmt.Errorf("recovery refresh unconfirmed")
 	}
 	created, err := create(state.Source.Title, state.Source.ID, fields)
 	if err != nil {
