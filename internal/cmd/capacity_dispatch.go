@@ -246,6 +246,9 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 
 	// Preserve dependency-unblocked work before filling slots with new work.
 	if isDaemonDispatch() {
+		if _, err := reconcileWaitingWorkers(townRoot, false); err != nil {
+			fmt.Fprintf(os.Stderr, "waiting worker recovery: %v\n", err)
+		}
 		if _, err := recoverDependencies(townRoot, false); err != nil {
 			fmt.Fprintf(os.Stderr, "dependency recovery: %v\n", err)
 		}
