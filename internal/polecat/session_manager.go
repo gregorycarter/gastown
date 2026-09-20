@@ -383,6 +383,10 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		}
 	}
 
+	if err := m.validateHisnStart(polecat, workDir, opts); err != nil {
+		return err
+	}
+
 	// Validate issue exists and isn't tombstoned BEFORE creating session.
 	// This prevents CPU spin loops from agents retrying work on invalid issues.
 	if opts.Issue != "" {
