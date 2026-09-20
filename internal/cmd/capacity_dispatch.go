@@ -536,6 +536,11 @@ func (a scheduledContextAssessment) pauseReason() string {
 	if !a.found {
 		return "work bead not found"
 	}
+	for _, label := range a.info.Labels {
+		if label == "backlog-container" {
+			return "tracking-container (dispatch its children)"
+		}
+	}
 	assignee := strings.TrimSpace(a.info.Assignee)
 	if assignee == "" {
 		assignee = "<none>"
@@ -1228,6 +1233,13 @@ func markBlockedUnknown(blockedUnknownIDs map[string]bool, ids []string) {
 func isScheduledWorkBeadReady(workBeadID string, info beadStatusInfo, found bool, blockedWorkIDs, blockedUnknownIDs map[string]bool) bool {
 	if !found || blockedWorkIDs[workBeadID] || blockedUnknownIDs[workBeadID] {
 		return false
+	}
+	// A task can be split after it was queued. Re-check its current disposition
+	// so an old context cannot dispatch the tracking parent alongside its leaves.
+	for _, label := range info.Labels {
+		if label == "backlog-container" {
+			return false
+		}
 	}
 	if info.Status == "open" {
 		return true

@@ -7,6 +7,22 @@ import (
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
+func TestScheduledParentConvertedToTrackingContainer(t *testing.T) {
+	for _, status := range []string{"open", "in_progress"} {
+		info := beadStatusInfo{Status: status, Labels: []string{"backlog-container"}}
+		if isScheduledWorkBeadReady("hisn-parent", info, true, nil, nil) {
+			t.Fatal("an already queued parent must stop dispatching after decomposition")
+		}
+		assessment := scheduledContextAssessment{found: true, info: info}
+		if got := assessment.pauseReason(); got != "tracking-container (dispatch its children)" {
+			t.Fatalf("missing parent disposition: %s", got)
+		}
+	}
+	if !isScheduledWorkBeadReady("hisn-parent.1", beadStatusInfo{Status: "open"}, true, nil, nil) {
+		t.Fatal("the independent child remains dispatchable")
+	}
+}
+
 func TestIsScheduledWorkBeadReady_InProgressUnassigned(t *testing.T) {
 	info := beadStatusInfo{Status: "in_progress"}
 	if !isScheduledWorkBeadReady("bt-1", info, true, nil, nil) {
