@@ -19,17 +19,22 @@ import (
 // Retirement removes only a dormant, completed sandbox. Product/MR/molecule
 // beads and local/remote branches are retained; this is not wisp GC or a nuke.
 type Retirement struct {
-	Rig        string `json:"rig"`
-	Worker     string `json:"worker"`
-	Status     string `json:"status"`
-	Reason     string `json:"reason,omitempty"`
-	Source     string `json:"source,omitempty"`
-	Branch     string `json:"branch,omitempty"`
-	Head       string `json:"head,omitempty"`
-	Target     string `json:"target,omitempty"`
-	TargetHead string `json:"target_head,omitempty"`
-	Archive    string `json:"archive,omitempty"`
-	Empty      bool   `json:"empty_directory"`
+	Rig            string `json:"rig"`
+	Worker         string `json:"worker"`
+	Status         string `json:"status"`
+	Reason         string `json:"reason,omitempty"`
+	Source         string `json:"source,omitempty"`
+	Branch         string `json:"branch,omitempty"`
+	Head           string `json:"head,omitempty"`
+	Target         string `json:"target,omitempty"`
+	TargetHead     string `json:"target_head,omitempty"`
+	Archive        string `json:"archive,omitempty"`
+	Empty          bool   `json:"empty_directory"`
+	Cache          string `json:"dependency_cache,omitempty"`
+	CacheIdentity  string `json:"cache_identity,omitempty"`
+	HostFreeBefore *int64 `json:"host_free_before_bytes,omitempty"`
+	HostFreeAfter  *int64 `json:"host_free_after_bytes,omitempty"`
+	HostFreeDelta  *int64 `json:"observed_host_free_delta_bytes,omitempty"`
 }
 
 var retirementName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
@@ -185,6 +190,19 @@ func (m *Manager) inspectRetirement(name string) (Retirement, *beads.Issue, erro
 				return refuse("commits not represented on " + r.Target)
 			}
 		}
+		// A sibling cache belongs to this completed worker. Unknown siblings
+		// are retained before removing any checkout, not discovered afterwards.
+		if clone != dir {
+			for _, entry := range entries {
+				if entry.Name() != filepath.Base(clone) && entry.Name() != ".cache" {
+					return refuse("unrecognized worker sibling: " + entry.Name())
+				}
+			}
+			r.Cache, r.CacheIdentity, err = inspectRetirementCache(dir)
+			if err != nil {
+				return refuse(err.Error())
+			}
+		}
 	}
 	if r.Source != "" {
 		source, err := m.beads.Show(r.Source)
@@ -240,6 +258,7 @@ func (m *Manager) RetireMerged(name string, dryRun bool) (Retirement, error) {
 		return r, err
 	}
 	r.Archive = archive
+	r.HostFreeBefore = retirementHostFree(m.rig.Path)
 	if err := writeRetirementEvidence(archive, r, agent); err != nil {
 		return r, err
 	}
@@ -252,11 +271,27 @@ func (m *Manager) RetireMerged(name string, dryRun bool) (Retirement, error) {
 		if err != nil {
 			return r, err
 		}
-		if err := retireSandboxFiles(repo, m.clonePath(name), m.polecatDir(name), archive); err != nil {
+		clone := m.clonePath(name)
+		if err := retireSandboxFiles(repo, clone, m.polecatDir(name), archive); err != nil {
 			return r, err
+		}
+		if r.Cache != "" {
+			if err := removeRetirementCache(m.polecatDir(name), r.CacheIdentity); err != nil {
+				return r, err
+			}
+		}
+		if m.polecatDir(name) != clone {
+			if err := os.Remove(m.polecatDir(name)); err != nil {
+				return r, fmt.Errorf("worktree removed, parent retained: %w", err)
+			}
 		}
 	}
 	r.Status = "retired"
+	r.HostFreeAfter = retirementHostFree(m.rig.Path)
+	if r.HostFreeBefore != nil && r.HostFreeAfter != nil {
+		delta := *r.HostFreeAfter - *r.HostFreeBefore
+		r.HostFreeDelta = &delta
+	}
 	if err := m.resetAgentBeadForReuse(m.agentBeadID(name), "merged sandbox retired"); err != nil {
 		r.Reason = "sandbox removed; agent reset failed: " + err.Error()
 	}
@@ -308,11 +343,6 @@ func retireSandboxFiles(repo *git.Git, clone, parent, archive string) error {
 			}
 		}
 		return err
-	}
-	if parent != clone {
-		if err := os.Remove(parent); err != nil {
-			return fmt.Errorf("worktree removed, parent retained: %w", err)
-		}
 	}
 	return nil
 }

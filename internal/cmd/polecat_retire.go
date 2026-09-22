@@ -17,7 +17,7 @@ func init() {
 	var dry, all, jsonOutput bool
 	var limit int
 	command := &cobra.Command{Use: "retire [rig]", Short: "Retire dormant merged sandboxes and empty completed directories", Args: cobra.MaximumNArgs(1),
-		Long: "Release completed polecat directories after checking source closure, target merge proof, sessions, assignments, MRs, dirty files and stashes. Preserve agent identity, branches and test receipts. Never runs wisp GC. Parked rigs are skipped.",
+		Long: "Release completed polecat directories after checking source closure, target merge proof, sessions, assignments, MRs, dirty files and stashes. Preserve agent identity, branches and test receipts. Never runs wisp GC. Includes parked rigs without starting agents or dispatching work.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if all == (len(args) == 1) {
 				return fmt.Errorf("provide one rig or --all")
@@ -43,10 +43,8 @@ func init() {
 			results := []polecat.Retirement{}
 			retired := 0
 			for _, rigName := range names {
-				if blocked, reason := IsRigParkedOrDocked(town, rigName); blocked {
-					results = append(results, polecat.Retirement{Rig: rigName, Status: "retained", Reason: "rig " + reason})
-					continue
-				}
+				// Parking stops execution, not reclamation of proven completed work.
+				// The same live worker/source/MR checks apply in every rig state.
 				mgr, r, err := getPolecatManager(rigName)
 				if err != nil {
 					return err
@@ -81,7 +79,7 @@ func init() {
 			return nil
 		}}
 	command.Flags().BoolVar(&dry, "dry-run", false, "Inspect without deleting or resetting")
-	command.Flags().BoolVar(&all, "all", false, "Inspect all active rigs")
+	command.Flags().BoolVar(&all, "all", false, "Inspect all rigs, including parked rigs")
 	command.Flags().BoolVar(&jsonOutput, "json", false, "Emit retirement receipts as JSON")
 	command.Flags().IntVar(&limit, "limit", 2, "Maximum eligible sandboxes per invocation")
 	polecatCmd.AddCommand(command)

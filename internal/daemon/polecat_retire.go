@@ -11,7 +11,7 @@ import (
 )
 
 // One bounded lifecycle sweep each heartbeat, even when dispatch is pressure
-// deferred or all execution slots are occupied. The command skips parked rigs
+// deferred or all execution slots are occupied. The command includes parked rigs
 // and rechecks assignment/session/git facts under the normal lifecycle locks.
 func (d *Daemon) retireMergedPolecats() {
 	ctx, cancel := context.WithTimeout(d.ctx, 2*time.Minute)

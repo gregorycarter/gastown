@@ -74,6 +74,9 @@ func newRetirementFixture(t *testing.T) *retirementFixture {
 	script := `#!/usr/bin/env python3
 import os,sys,json
 p=os.environ['GT_RETIRE_TEST_MODEL'];m=json.load(open(p));a=sys.argv[1:]
+if os.path.basename(sys.argv[0])=='lsof':
+ if m.get('openFileError'): sys.exit(2)
+ print('p1\nn'+m.get('openFile','/unrelated'));sys.exit(0)
 if os.path.basename(sys.argv[0])=='tmux':
  if m.get('sessionError'): print('tmux unavailable',file=sys.stderr);sys.exit(2)
  if m.get('session'): sys.exit(0)
@@ -91,7 +94,7 @@ elif 'update' in a:
  json.dump(m,open(p,'w'));print('{}')
 else: print('[]')
 `
-	for _, name := range []string{"bd", "tmux"} {
+	for _, name := range []string{"bd", "tmux", "lsof"} {
 		if err := os.WriteFile(filepath.Join(town, "bin", name), []byte(script), 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -279,5 +282,94 @@ func TestRetirementRechecksAfterWaitingForLifecycleLock(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.clone, "new-work.txt")); err != nil {
 		t.Fatal("new work was removed")
+	}
+}
+
+func TestRetirementReclaimsSiblingCache(t *testing.T) {
+	f := newRetirementFixture(t)
+	parent := filepath.Dir(f.clone)
+	cache := filepath.Join(parent, ".cache", "polecat-deps", "venvs", "locked")
+	if err := os.MkdirAll(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "preserve")
+	if err := os.WriteFile(outside, []byte("external"), 0400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(cache, "python")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "payload"), []byte("regenerable"), 0400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cache, 0500); err != nil {
+		t.Fatal(err)
+	}
+	r, err := f.manager.RetireMerged("toast", true)
+	if err != nil || r.Status != "eligible" || r.Cache == "" {
+		t.Fatalf("dry: %+v %v", r, err)
+	}
+	if _, err := os.Stat(cache); err != nil {
+		t.Fatal("dry run removed cache")
+	}
+	r, err = f.manager.RetireMerged("toast", false)
+	if err != nil || r.Status != "retired" {
+		t.Fatalf("apply: %+v %v", r, err)
+	}
+	if _, err := os.Stat(parent); !os.IsNotExist(err) {
+		t.Fatal("cache/worktree parent remains")
+	}
+	if data, err := os.ReadFile(outside); err != nil || string(data) != "external" {
+		t.Fatal("followed external cache symlink")
+	}
+	if info, _ := os.Stat(outside); info.Mode().Perm() != 0400 {
+		t.Fatal("changed external permissions")
+	}
+	if r.HostFreeBefore == nil || r.HostFreeAfter == nil || r.HostFreeDelta == nil || *r.HostFreeDelta != *r.HostFreeAfter-*r.HostFreeBefore {
+		t.Fatalf("missing physical observations: %+v", r)
+	}
+	retirementGit(t, f.repo, "rev-parse", "refs/heads/polecat/toast/gt-task+old")
+}
+
+func TestRetirementPreservesUnknownAndBusyCaches(t *testing.T) {
+	for _, name := range []string{"unknown sibling", "unknown cache entry", "redirected root", "redirected deps", "open files", "unknown open files", "new assignment"} {
+		t.Run(name, func(t *testing.T) {
+			f := newRetirementFixture(t)
+			parent := filepath.Dir(f.clone)
+			cache := filepath.Join(parent, ".cache")
+			deps := filepath.Join(cache, "polecat-deps")
+			if err := os.MkdirAll(filepath.Join(deps, "npm-cache"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			switch name {
+			case "unknown sibling":
+				os.WriteFile(filepath.Join(parent, "keep.txt"), []byte("keep"), 0600)
+			case "unknown cache entry":
+				os.WriteFile(filepath.Join(deps, "keep.txt"), []byte("keep"), 0600)
+			case "redirected root":
+				os.Rename(cache, cache+"-real")
+				os.Symlink(cache+"-real", cache)
+			case "redirected deps":
+				os.Rename(deps, deps+"-real")
+				os.Symlink(deps+"-real", deps)
+			case "open files":
+				f.model["openFile"] = filepath.Join(deps, "npm-cache", "busy")
+			case "unknown open files":
+				f.model["openFileError"] = true
+			case "new assignment":
+				f.fields.HookBead = "gt-other"
+			}
+			f.save(t)
+			r, err := f.manager.RetireMerged("toast", false)
+			if err == nil && r.Status != "retained" {
+				t.Fatalf("unsafe: %+v", r)
+			}
+			if _, err := os.Stat(f.clone); err != nil {
+				t.Fatal("checkout removed before cache validation")
+			}
+			if _, err := os.Lstat(cache); err != nil {
+				t.Fatal("cache removed")
+			}
+		})
 	}
 }
