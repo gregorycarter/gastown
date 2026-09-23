@@ -777,7 +777,7 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 	})
 
 	workBeadInfo := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
-	blockers, blockedUnknownIDs, blockedErr := listBlockedWorkBeadBlockersWithRunner(townRoot, workBeadIDs, runBlockedWorkQuery)
+	blockers, blockedSources, blockedUnknownIDs, blockedErr := listBlockedWorkBeadBlockersAndSourcesWithRunner(townRoot, workBeadIDs, runBlockedWorkQuery)
 	blockedWorkIDs := make(map[string]bool, len(blockers))
 	for id := range blockers {
 		blockedWorkIDs[id] = true
@@ -817,14 +817,12 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 	// not wait behind a P3 that happened to be enqueued first.
 	// bd blocked includes off-queue sources. Rank ready prerequisites of
 	// preserved product work without overriding priority, holds or admission.
-	blockedIDs := make([]string, 0, len(blockers))
-	for id := range blockers {
-		if strings.HasPrefix(id, "hisn-") {
-			blockedIDs = append(blockedIDs, id)
-		}
-	}
-	preserved := batchFetchBeadInfoByIDs(townRoot, blockedIDs)
-	counts := preservedPrerequisiteCounts(blockers, preserved)
+	// bd blocked already returned status, labels and assignee for every blocked
+	// source in the dependency graph. Reuse that snapshot for prerequisite
+	// ranking. Fetching every blocked source again made scheduler status/list
+	// fan out across the entire rig and, after one imperfect batch, degrade to
+	// one bounded bd show process per unrelated source or wisp.
+	counts := preservedPrerequisiteCounts(blockers, blockedSources)
 	for i := range assessments {
 		assessments[i].unblocksPreserved = counts[assessments[i].fields.WorkBeadID]
 	}
@@ -1236,7 +1234,19 @@ func listBlockedWorkBeadIDStatesWithRunner(townRoot string, workBeadIDs []string
 // name the blocker and lets the orphan-wisp sweep recognise a molecule wisp
 // as the only thing in the way.
 func listBlockedWorkBeadBlockersWithRunner(townRoot string, workBeadIDs []string, query blockedWorkQuery) (map[string][]string, map[string]bool, error) {
+	blockers, _, blockedUnknownIDs, err := listBlockedWorkBeadBlockersAndSourcesWithRunner(townRoot, workBeadIDs, query)
+	return blockers, blockedUnknownIDs, err
+}
+
+// listBlockedWorkBeadBlockersAndSourcesWithRunner returns one consistent
+// blocked-work snapshot. bd blocked already includes the fields needed to rank
+// preserved sources, so callers must not re-read every returned ID with bd
+// show. A busy rig can contain hundreds of unrelated blocked records and wisps;
+// that N+1 fallback previously turned scheduler status/list into multi-minute
+// commands even while direct Dolt reads were healthy.
+func listBlockedWorkBeadBlockersAndSourcesWithRunner(townRoot string, workBeadIDs []string, query blockedWorkQuery) (map[string][]string, map[string]beadStatusInfo, map[string]bool, error) {
 	blockers := make(map[string][]string)
+	sources := make(map[string]beadStatusInfo)
 	blockedUnknownIDs := make(map[string]bool)
 	idsByBeadsDir := groupBeadIDsByResolvedBeadsDir(townRoot, workBeadIDs)
 	failCount := 0
@@ -1253,6 +1263,12 @@ func listBlockedWorkBeadBlockersWithRunner(townRoot string, workBeadIDs []string
 		}
 		var blockedBeads []struct {
 			ID        string   `json:"id"`
+			Status    string   `json:"status"`
+			Title     string   `json:"title"`
+			Labels    []string `json:"labels"`
+			Assignee  string   `json:"assignee"`
+			Priority  int      `json:"priority"`
+			CreatedAt string   `json:"created_at"`
 			BlockedBy []string `json:"blocked_by"`
 		}
 		if err := json.Unmarshal(blockedOut, &blockedBeads); err != nil {
@@ -1266,13 +1282,21 @@ func listBlockedWorkBeadBlockersWithRunner(townRoot string, workBeadIDs []string
 		for _, b := range blockedBeads {
 			if _, seen := blockers[b.ID]; !seen {
 				blockers[b.ID] = b.BlockedBy
+				sources[b.ID] = beadStatusInfo{
+					Status:    b.Status,
+					Title:     b.Title,
+					Labels:    b.Labels,
+					Assignee:  b.Assignee,
+					Priority:  b.Priority,
+					CreatedAt: b.CreatedAt,
+				}
 			}
 		}
 	}
 	if failCount == len(idsByBeadsDir) && failCount > 0 {
-		return blockers, blockedUnknownIDs, fmt.Errorf("all %d bd blocked queries failed (last: %w)", failCount, lastErr)
+		return blockers, sources, blockedUnknownIDs, fmt.Errorf("all %d bd blocked queries failed (last: %w)", failCount, lastErr)
 	}
-	return blockers, blockedUnknownIDs, nil
+	return blockers, sources, blockedUnknownIDs, nil
 }
 
 func markBlockedUnknown(blockedUnknownIDs map[string]bool, ids []string) {

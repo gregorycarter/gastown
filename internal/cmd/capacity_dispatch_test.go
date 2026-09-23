@@ -140,6 +140,53 @@ func TestListBlockedWorkBeadIDStatesPartialFailureFailsClosedPerGroup(t *testing
 	}
 }
 
+func TestListBlockedWorkBeadBlockersReusesBlockedSnapshotMetadata(t *testing.T) {
+	townRoot := t.TempDir()
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(townBeadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir town beads: %v", err)
+	}
+	if err := beads.WriteRoutes(townBeadsDir, []beads.Route{{Prefix: "hisn-", Path: "hisn"}}); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	queries := 0
+	blockers, sources, unknown, err := listBlockedWorkBeadBlockersAndSourcesWithRunner(
+		townRoot,
+		[]string{"hisn-ready"},
+		func(_ string, groupedIDs []string) ([]byte, error) {
+			queries++
+			if len(groupedIDs) != 1 || groupedIDs[0] != "hisn-ready" {
+				t.Fatalf("unexpected requested IDs: %v", groupedIDs)
+			}
+			return []byte(`[
+				{"id":"hisn-product","status":"blocked","title":"Preserved product","labels":["product"],"assignee":"hisn/polecats/one","priority":1,"created_at":"2026-09-23T00:00:00Z","blocked_by":["hisn-mid","hisn-ready"]},
+				{"id":"hisn-mid","status":"blocked","title":"Intermediate","priority":2,"blocked_by":["hisn-ready"]}
+			]`), nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("blocked snapshot: %v", err)
+	}
+	if queries != 1 {
+		t.Fatalf("queries = %d, want one blocked snapshot query", queries)
+	}
+	if len(unknown) != 0 {
+		t.Fatalf("unexpected unknown IDs: %v", unknown)
+	}
+	if got := blockers["hisn-product"]; len(got) != 2 || got[0] != "hisn-mid" || got[1] != "hisn-ready" {
+		t.Fatalf("product blockers = %v", got)
+	}
+	product := sources["hisn-product"]
+	if product.Status != "blocked" || product.Assignee != "hisn/polecats/one" || product.Priority != 1 {
+		t.Fatalf("source metadata not preserved: %+v", product)
+	}
+	counts := preservedPrerequisiteCounts(blockers, sources)
+	if counts["hisn-ready"] != 1 {
+		t.Fatalf("preserved source ranking not derived from snapshot: %v", counts)
+	}
+}
+
 func TestIsScheduledWorkBeadReadyFailsClosedForBlockedUnknown(t *testing.T) {
 	info := beadStatusInfo{Status: "open"}
 	if isScheduledWorkBeadReady("gt-ready", info, true, nil, map[string]bool{"gt-ready": true}) {

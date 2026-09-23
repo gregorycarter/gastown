@@ -327,15 +327,9 @@ func autoFeedScheduler(townRoot string, floorOverride int, dryRun bool) (*autoFe
 		return result, nil
 	}
 
-	blockers, _, blockerErr := listBlockedWorkBeadBlockersWithRunner(townRoot, candidateIDs, runBlockedWorkQuery)
+	blockers, blockedSources, _, blockerErr := listBlockedWorkBeadBlockersAndSourcesWithRunner(townRoot, candidateIDs, runBlockedWorkQuery)
 	if blockerErr == nil {
-		ids := []string{}
-		for id := range blockers {
-			if strings.HasPrefix(id, "hisn-") {
-				ids = append(ids, id)
-			}
-		}
-		counts := preservedPrerequisiteCounts(blockers, batchFetchBeadInfoByIDs(townRoot, ids))
+		counts := preservedPrerequisiteCounts(blockers, blockedSources)
 		for i := range candidates {
 			if candidates[i].Rig == "hisn" {
 				candidates[i].UnblocksPreserved = counts[candidates[i].ID]
