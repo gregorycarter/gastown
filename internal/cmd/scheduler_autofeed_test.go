@@ -77,6 +77,18 @@ func TestControlPlaneIsTopicAndDispatchHoldIsExplicit(t *testing.T) {
 	if isOpsBead([]string{"control-plane"}) {
 		t.Fatal("control-plane topic consumed an operations slot")
 	}
+	if isOpsBead([]string{"deep-dive"}) {
+		t.Fatal("deep-dive analysis consumed an operations slot")
+	}
+}
+
+func TestDeepDiveIsDispatchable(t *testing.T) {
+	selected, rejected := selectAutoFeedCandidates([]autoFeedCandidate{
+		autoFeedTestCandidate("hisn-analysis", 2, "2026-01-01T00:00:00Z", "deep-dive"),
+	}, defaultAutoFeedPolicy(), nil, 1)
+	if len(selected) != 1 || selected[0].ID != "hisn-analysis" || len(rejected) != 0 {
+		t.Fatalf("deep-dive selected=%v rejected=%v", autoFeedIDs(selected), rejected)
+	}
 }
 
 func TestSortAutoFeedCandidates_PriorityThenAgeThenID(t *testing.T) {
@@ -131,7 +143,7 @@ func TestSelectAutoFeedCandidates_RejectionReasons(t *testing.T) {
 		notOpen,
 		assigned,
 		epic,
-		autoFeedTestCandidate("bt-excluded", 2, "2026-01-01T00:00:00Z", "deep-dive"),
+		autoFeedTestCandidate("bt-excluded", 2, "2026-01-01T00:00:00Z", "dispatch:hold"),
 		autoFeedTestCandidate("bt-operator", 2, "2026-01-01T00:00:00Z", "needs-operator"),
 		autoFeedTestCandidate("bt-scheduled", 2, "2026-01-01T00:00:00Z"),
 		autoFeedTestCandidate("bt-good", 2, "2026-01-01T00:00:00Z"),
@@ -147,7 +159,7 @@ func TestSelectAutoFeedCandidates_RejectionReasons(t *testing.T) {
 		"bt-status":    "status=in_progress",
 		"bt-assigned":  "assignee=testrig/polecats/nux",
 		"bt-epic":      "type=epic",
-		"bt-excluded":  "exclude-label=deep-dive",
+		"bt-excluded":  "exclude-label=dispatch:hold",
 		"bt-operator":  "exclude-label=needs-operator",
 		"bt-scheduled": "already-scheduled",
 	}

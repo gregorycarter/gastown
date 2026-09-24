@@ -58,7 +58,6 @@ type SchedulerConfig struct {
 // policy changes, and the agent-lifecycle roles. A control-plane topic label
 // alone does not hold a bead or make it consume an operations slot.
 var DefaultAutoFeedExcludeLabels = []string{
-	"deep-dive",
 	"needs-operator",
 	"needs-operator-rollout",
 	"live-validation",
