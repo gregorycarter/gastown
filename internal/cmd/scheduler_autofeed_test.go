@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
@@ -16,6 +17,24 @@ func autoFeedTestCandidate(id string, priority int, created string, labels ...st
 		CreatedAt: created,
 		Labels:    labels,
 		Rig:       "testrig",
+	}
+}
+
+func TestAutoFeedResumesPushedHandoffBranch(t *testing.T) {
+	branch := "polecat/opal/hisn-a"
+	head := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, value := range []any{map[string]string{"branch": branch, "head": head},
+		`{"branch":"polecat/opal/hisn-a","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`} {
+		raw, err := json.Marshal(map[string]any{"handoff": value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := autoFeedResumeBranch(raw); got != branch {
+			t.Fatalf("resume branch = %q", got)
+		}
+	}
+	if got := autoFeedResumeBranch(json.RawMessage(`{"handoff":{"branch":"main","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`)); got != "" {
+		t.Fatalf("unsafe resume branch = %q", got)
 	}
 }
 
@@ -40,6 +59,23 @@ func defaultAutoFeedPolicy() autoFeedPolicy {
 	return autoFeedPolicy{
 		ExcludeLabels: capacity.DefaultAutoFeedExcludeLabels,
 		MaxOpsSlots:   capacity.DefaultAutoFeedMaxOpsSlots,
+	}
+}
+
+func TestControlPlaneIsTopicAndDispatchHoldIsExplicit(t *testing.T) {
+	candidates := []autoFeedCandidate{
+		autoFeedTestCandidate("hisn-topic", 2, "2026-01-01T00:00:00Z", "control-plane"),
+		autoFeedTestCandidate("hisn-held", 2, "2026-01-02T00:00:00Z", "control-plane", "dispatch:hold"),
+	}
+	selected, rejected := selectAutoFeedCandidates(candidates, defaultAutoFeedPolicy(), nil, 2)
+	if len(selected) != 1 || selected[0].ID != "hisn-topic" {
+		t.Fatalf("selected %v, want only the topic-labelled bead", autoFeedIDs(selected))
+	}
+	if got := rejectionReason(rejected, "hisn-held"); got != "exclude-label=dispatch:hold" {
+		t.Fatalf("held rejection = %q", got)
+	}
+	if isOpsBead([]string{"control-plane"}) {
+		t.Fatal("control-plane topic consumed an operations slot")
 	}
 }
 

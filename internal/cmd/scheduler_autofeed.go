@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,6 +37,24 @@ type autoFeedCandidate struct {
 	Labels            []string
 	Rig               string
 	UnblocksPreserved int
+	ResumeBranch      string
+}
+
+func autoFeedResumeBranch(raw json.RawMessage) string {
+	var metadata map[string]json.RawMessage
+	if json.Unmarshal(raw, &metadata) != nil {
+		return ""
+	}
+	value := metadata["handoff"]
+	var encoded string
+	if json.Unmarshal(value, &encoded) == nil {
+		value = []byte(encoded)
+	}
+	var handoff struct{ Branch, Head string }
+	if json.Unmarshal(value, &handoff) != nil || !mqResumeBranch.MatchString(handoff.Branch) || !mqResumeSHA.MatchString(handoff.Head) {
+		return ""
+	}
+	return handoff.Branch
 }
 
 // autoFeedRejection records why a ready bead was not enqueued. Surfaced by
@@ -204,16 +223,18 @@ func autoFeedCandidatesForRig(townRoot, rigName string) ([]autoFeedCandidate, er
 		if issue == nil {
 			continue
 		}
+		resumeBranch := autoFeedResumeBranch(issue.Metadata)
 		candidates = append(candidates, autoFeedCandidate{
-			ID:        issue.ID,
-			Title:     issue.Title,
-			Status:    issue.Status,
-			Assignee:  issue.Assignee,
-			Type:      issue.Type,
-			Priority:  issue.Priority,
-			CreatedAt: issue.CreatedAt,
-			Labels:    issue.Labels,
-			Rig:       rigName,
+			ID:           issue.ID,
+			Title:        issue.Title,
+			Status:       issue.Status,
+			Assignee:     issue.Assignee,
+			Type:         issue.Type,
+			Priority:     issue.Priority,
+			CreatedAt:    issue.CreatedAt,
+			Labels:       issue.Labels,
+			Rig:          rigName,
+			ResumeBranch: resumeBranch,
 		})
 	}
 	return candidates, nil
@@ -353,8 +374,9 @@ func autoFeedScheduler(townRoot string, floorOverride int, dryRun bool) (*autoFe
 
 	for _, c := range selected {
 		opts := ScheduleOptions{
-			Formula:  resolveFormula("", false, townRoot, c.Rig),
-			NoConvoy: true,
+			Formula:      resolveFormula("", false, townRoot, c.Rig),
+			NoConvoy:     true,
+			ResumeBranch: c.ResumeBranch,
 		}
 		if err := scheduleBead(c.ID, c.Rig, opts); err != nil {
 			fmt.Fprintf(os.Stderr, "%s autofeed: could not schedule %s → %s: %v\n",
@@ -386,7 +408,7 @@ scheduled, and must pass the label policy:
 
   scheduler.queue_floor             minimum ready contexts to maintain (0 = off)
   scheduler.autofeed_labels         allow-list (empty = any label)
-  scheduler.autofeed_exclude_labels deny-list (default: operator/control-plane labels)
+  scheduler.autofeed_exclude_labels deny-list (default: operator/dispatch-hold labels)
   scheduler.autofeed_max_ops_slots  max concurrently-working ops beads (default 1)
 
   gt scheduler feed                    # top up to the configured floor

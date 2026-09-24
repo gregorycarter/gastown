@@ -54,17 +54,16 @@ type SchedulerConfig struct {
 }
 
 // DefaultAutoFeedExcludeLabels are labels that mark work the auto-feeder must
-// never dispatch on its own: operator dispositions, control-plane/policy
-// changes, and the agent-lifecycle roles. Kept in sync with the rig board's
-// OPS_LABELS so the board and the feeder agree on what "dispatchable product"
-// means.
+// never dispatch on its own: operator dispositions, explicit dispatch holds,
+// policy changes, and the agent-lifecycle roles. A control-plane topic label
+// alone does not hold a bead or make it consume an operations slot.
 var DefaultAutoFeedExcludeLabels = []string{
 	"deep-dive",
 	"needs-operator",
 	"needs-operator-rollout",
 	"live-validation",
 	"gt-fork",
-	"control-plane",
+	"dispatch:hold",
 	"policy",
 	"patrol",
 	"refinery",
