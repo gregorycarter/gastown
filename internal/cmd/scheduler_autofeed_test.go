@@ -304,3 +304,15 @@ func TestAutoFeedPrefersReadyPreservedPrerequisiteWithinPriority(t *testing.T) {
 		}
 	}
 }
+
+// Spikes are leaf research work: the feeder must enqueue them rather than
+// reject them as an unslingable type (hisn-4s8b.1).
+func TestSelectAutoFeedCandidates_EnqueuesSpikes(t *testing.T) {
+	spike := autoFeedTestCandidate("hisn-spike", 3, "2026-01-01T00:00:00Z")
+	spike.Type = "spike"
+
+	selected, rejected := selectAutoFeedCandidates([]autoFeedCandidate{spike}, defaultAutoFeedPolicy(), nil, 10)
+	if len(selected) != 1 || selected[0].ID != "hisn-spike" {
+		t.Fatalf("selected %v, rejected %v, want [hisn-spike]", autoFeedIDs(selected), rejected)
+	}
+}

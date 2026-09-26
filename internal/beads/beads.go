@@ -1503,6 +1503,27 @@ func (b *Beads) Ready() ([]*Issue, error) {
 	return issues, nil
 }
 
+// ReadyAll returns every ready issue. bd ready caps its output at 50 rows by
+// default, so callers that filter the rows afterwards (epics, excluded labels)
+// must use this to see lower-priority work past the cap.
+func (b *Beads) ReadyAll() ([]*Issue, error) {
+	if b.store != nil {
+		return b.storeReady()
+	}
+
+	out, err := b.run("ready", "--json", "-n", "0")
+	if err != nil {
+		return nil, err
+	}
+
+	var issues []*Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd ready output: %w", err)
+	}
+
+	return issues, nil
+}
+
 // ReadyLimited returns ready issues, capped at limit rows.
 // limit <= 0 falls back to Ready() (bd's own default cap).
 func (b *Beads) ReadyLimited(limit int) ([]*Issue, error) {

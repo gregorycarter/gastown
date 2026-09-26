@@ -133,7 +133,7 @@ func TestConvoyCreate_FromEpicWithOverrideName(t *testing.T) {
 
 func TestFromEpic_SlingableTypeFiltering(t *testing.T) {
 	// Verify the types that collectEpicChildren would include/exclude
-	slingable := []string{"task", "bug", "feature", "chore"}
+	slingable := []string{"task", "bug", "feature", "chore", "spike"}
 	nonSlingable := []string{"epic", "decision"}
 
 	for _, typ := range slingable {
@@ -152,7 +152,7 @@ func TestFromEpic_SlingableTypeFiltering(t *testing.T) {
 // in test. Uses the same logic as convoyops.IsSlingableType.
 func convoyops_IsSlingableType(issueType string) bool {
 	switch issueType {
-	case "task", "bug", "feature", "chore":
+	case "task", "bug", "feature", "chore", "spike":
 		return true
 	default:
 		return false

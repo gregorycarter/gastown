@@ -165,6 +165,7 @@ var slingableTypes = map[string]bool{
 	"bug":     true,
 	"feature": true,
 	"chore":   true,
+	"spike":   true, // Time-boxed research; a leaf work item like task
 	"":        true, // Empty type defaults to task
 }
 

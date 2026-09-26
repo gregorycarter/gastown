@@ -49,6 +49,7 @@ func TestIsSlingableType(t *testing.T) {
 		{"bug", true},
 		{"feature", true},
 		{"chore", true},
+		{"spike", true},
 		{"", true},          // empty defaults to task
 		{"epic", false},     // container type
 		{"convoy", false},   // meta type

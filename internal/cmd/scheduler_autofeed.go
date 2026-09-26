@@ -18,11 +18,6 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// autoFeedReadyLimit is how many `bd ready` rows are considered per rig.
-// The floor is small (single digits) and rows are priority-sorted by bd, so
-// 50 is generous headroom without paying for a full backlog scan.
-const autoFeedReadyLimit = 50
-
 // autoFeedCandidate is one `bd ready` row reduced to the fields the feeder
 // needs. Kept separate from beads.Issue so the selection logic is pure and
 // testable without a database.
@@ -206,7 +201,10 @@ func autoFeedCandidatesForRig(townRoot, rigName string) ([]autoFeedCandidate, er
 	workDir := filepath.Dir(rigBeadsDir)
 	b := beads.NewWithBeadsDir(workDir, rigBeadsDir)
 
-	issues, err := b.ReadyLimited(autoFeedReadyLimit)
+	// Read every ready row: a capped window fills with epics and excluded
+	// beads, which are rejected below, and starves lower-priority work that
+	// sorts past the cap (hisn-4s8b.1).
+	issues, err := b.ReadyAll()
 	if err != nil {
 		return nil, fmt.Errorf("bd ready in %s: %w", workDir, err)
 	}
