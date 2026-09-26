@@ -316,3 +316,26 @@ func TestSelectAutoFeedCandidates_EnqueuesSpikes(t *testing.T) {
 		t.Fatalf("selected %v, rejected %v, want [hisn-spike]", autoFeedIDs(selected), rejected)
 	}
 }
+
+// Parked and docked rigs are not scanned, so their ready work never enters
+// the shared dispatch queue (hisn-4s8b.1).
+func TestAutoFeedRigs_SkipsParkedAndDockedRigs(t *testing.T) {
+	state := map[string]string{"bridge_town_core": "parked", "old_rig": "docked"}
+	feed, skipped := autoFeedRigs([]string{"bridge_town_core", "hisn", "old_rig"}, func(rigName string) (bool, string) {
+		reason, ok := state[rigName]
+		return ok, reason
+	})
+
+	if len(feed) != 1 || feed[0] != "hisn" {
+		t.Fatalf("feed = %v, want [hisn]", feed)
+	}
+	want := []autoFeedSkippedRig{{Rig: "bridge_town_core", Reason: "parked"}, {Rig: "old_rig", Reason: "docked"}}
+	if len(skipped) != len(want) {
+		t.Fatalf("skipped = %v, want %v", skipped, want)
+	}
+	for i := range want {
+		if skipped[i] != want[i] {
+			t.Errorf("skipped[%d] = %v, want %v", i, skipped[i], want[i])
+		}
+	}
+}

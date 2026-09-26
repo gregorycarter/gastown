@@ -265,14 +265,37 @@ func countWorkingOpsBeads(townRoot string) int {
 	return count
 }
 
+// autoFeedSkippedRig records a rig the feeder did not scan and why.
+type autoFeedSkippedRig struct {
+	Rig    string
+	Reason string
+}
+
+// autoFeedRigs splits rigs into those to scan and those that are parked or
+// docked. Paused rigs must not have their ready work pulled into the shared
+// dispatch queue (hisn-4s8b.1).
+func autoFeedRigs(rigNames []string, blocked func(rigName string) (bool, string)) ([]string, []autoFeedSkippedRig) {
+	var feed []string
+	var skipped []autoFeedSkippedRig
+	for _, rigName := range rigNames {
+		if isBlocked, reason := blocked(rigName); isBlocked {
+			skipped = append(skipped, autoFeedSkippedRig{Rig: rigName, Reason: reason})
+			continue
+		}
+		feed = append(feed, rigName)
+	}
+	return feed, skipped
+}
+
 // autoFeedResult reports what one feed pass did (or would do).
 type autoFeedResult struct {
-	Floor      int
-	ReadyNow   int
-	Selected   []autoFeedCandidate
-	Rejected   []autoFeedRejection
-	Enqueued   int
-	OpsWorking int
+	Floor       int
+	ReadyNow    int
+	Selected    []autoFeedCandidate
+	Rejected    []autoFeedRejection
+	SkippedRigs []autoFeedSkippedRig
+	Enqueued    int
+	OpsWorking  int
 	// DirectMode is set when scheduler.max_polecats <= 0, where contexts are
 	// never consumed and feeding the queue would only accumulate them.
 	DirectMode bool
@@ -328,6 +351,9 @@ func autoFeedScheduler(townRoot string, floorOverride int, dryRun bool) (*autoFe
 		rigNames = append(rigNames, name)
 	}
 	sort.Strings(rigNames)
+	rigNames, result.SkippedRigs = autoFeedRigs(rigNames, func(rigName string) (bool, string) {
+		return IsRigParkedOrDocked(townRoot, rigName)
+	})
 
 	var candidates []autoFeedCandidate
 	var candidateIDs []string
@@ -438,6 +464,9 @@ func runSchedulerFeed(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s (floor %d, ready now %d, ops working %d)\n",
 		style.Bold.Render("Scheduler auto-feed"), result.Floor, result.ReadyNow, result.OpsWorking)
+	for _, r := range result.SkippedRigs {
+		fmt.Printf("  Skipped rig %s: %s\n", r.Rig, r.Reason)
+	}
 
 	if len(result.Selected) == 0 {
 		fmt.Println("  Nothing to enqueue.")
