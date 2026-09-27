@@ -1618,25 +1618,27 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 	}
 	var pending []convoyTracked
 	var allTrackedIDs []string
-	for _, convoy := range convoys {
-		// Extract base_branch from convoy description fields
-		var baseBranch string
-		if cf := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); cf != nil {
-			baseBranch = cf.BaseBranch
-		}
+	withOpenAgentBeadsMemo(func() {
+		for _, convoy := range convoys {
+			// Extract base_branch from convoy description fields
+			var baseBranch string
+			if cf := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); cf != nil {
+				baseBranch = cf.BaseBranch
+			}
 
-		tracked, err := getTrackedIssues(townBeads, convoy.ID)
-		if err != nil {
-			// Write to stderr explicitly — stdout may be consumed as JSON
-			// by the daemon's JSON parser (fixes #2142).
-			fmt.Fprintf(os.Stderr, "⚠ Warning: skipping convoy %s: %v\n", convoy.ID, err)
-			continue
+			tracked, err := getTrackedIssues(townBeads, convoy.ID)
+			if err != nil {
+				// Write to stderr explicitly — stdout may be consumed as JSON
+				// by the daemon's JSON parser (fixes #2142).
+				fmt.Fprintf(os.Stderr, "⚠ Warning: skipping convoy %s: %v\n", convoy.ID, err)
+				continue
+			}
+			pending = append(pending, convoyTracked{convoy: convoy, baseBranch: baseBranch, tracked: tracked})
+			for _, t := range tracked {
+				allTrackedIDs = append(allTrackedIDs, t.ID)
+			}
 		}
-		pending = append(pending, convoyTracked{convoy: convoy, baseBranch: baseBranch, tracked: tracked})
-		for _, t := range tracked {
-			allTrackedIDs = append(allTrackedIDs, t.ID)
-		}
-	}
+	})
 	scheduledSet := areScheduled(allTrackedIDs)
 
 	// Check each convoy for stranded state
@@ -2748,24 +2750,36 @@ type workerInfo struct {
 //
 // Optimized to batch queries per rig (O(R) instead of O(N×R)) and
 // parallelize across rigs.
-func getWorkersForIssues(issueIDs []string) map[string]*workerInfo {
-	result := make(map[string]*workerInfo)
-	if len(issueIDs) == 0 {
-		return result
-	}
+// openAgentBead is the subset of an open agent bead used to map hooked work to workers.
+type openAgentBead struct {
+	ID           string `json:"id"`
+	HookBead     string `json:"hook_bead"`
+	LastActivity string `json:"last_activity"`
+}
 
-	// Find town root
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil || townRoot == "" {
-		return result
-	}
+// openAgentBeadsLoader lists open agent beads; withOpenAgentBeadsMemo swaps in
+// a memoizing loader for the duration of a stranded scan.
+var openAgentBeadsLoader = listOpenAgentBeads
 
-	// Build a set of target issue IDs for fast lookup
-	targetIDs := make(map[string]bool, len(issueIDs))
-	for _, id := range issueIDs {
-		targetIDs[id] = true
+// withOpenAgentBeadsMemo reads open agent beads at most once while fn runs.
+// getWorkersForIssues is called per convoy; without this every convoy re-listed
+// agent beads in every rig database.
+func withOpenAgentBeadsMemo(fn func()) {
+	previous := openAgentBeadsLoader
+	var agents []openAgentBead
+	loaded := false
+	openAgentBeadsLoader = func(townRoot string) []openAgentBead {
+		if !loaded {
+			agents, loaded = previous(townRoot), true
+		}
+		return agents
 	}
+	defer func() { openAgentBeadsLoader = previous }()
+	fn()
+}
 
+// listOpenAgentBeads lists open agent beads in every rig with a beads directory.
+func listOpenAgentBeads(townRoot string) []openAgentBead {
 	// Discover rigs with beads directories
 	rigDirs, _ := filepath.Glob(filepath.Join(townRoot, "*", "polecats"))
 	var beadsDirs []string
@@ -2778,16 +2792,12 @@ func getWorkersForIssues(issueIDs []string) map[string]*workerInfo {
 	}
 
 	if len(beadsDirs) == 0 {
-		return result
+		return nil
 	}
 
 	// Query all rigs in parallel using bd list
 	type rigResult struct {
-		agents []struct {
-			ID           string `json:"id"`
-			HookBead     string `json:"hook_bead"`
-			LastActivity string `json:"last_activity"`
-		}
+		agents []openAgentBead
 	}
 
 	resultChan := make(chan rigResult, len(beadsDirs))
@@ -2823,9 +2833,36 @@ func getWorkersForIssues(issueIDs []string) map[string]*workerInfo {
 		close(resultChan)
 	}()
 
-	// Collect results from all rigs, filtering by target issue IDs
+	var agents []openAgentBead
 	for rr := range resultChan {
-		for _, agent := range rr.agents {
+		agents = append(agents, rr.agents...)
+	}
+	return agents
+}
+
+func getWorkersForIssues(issueIDs []string) map[string]*workerInfo {
+	result := make(map[string]*workerInfo)
+	if len(issueIDs) == 0 {
+		return result
+	}
+
+	// Find town root
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil || townRoot == "" {
+		return result
+	}
+
+	// Build a set of target issue IDs for fast lookup
+	targetIDs := make(map[string]bool, len(issueIDs))
+	for _, id := range issueIDs {
+		targetIDs[id] = true
+	}
+
+	agents := openAgentBeadsLoader(townRoot)
+
+	// Collect results from all rigs, filtering by target issue IDs
+	{
+		for _, agent := range agents {
 			// Only include agents working on issues we care about
 			if !targetIDs[agent.HookBead] {
 				continue

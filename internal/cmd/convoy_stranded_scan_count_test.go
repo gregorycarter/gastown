@@ -11,10 +11,10 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-// strandedSlingContextScans runs findStrandedConvoys against a mock bd with
-// the given number of single-issue convoys and returns how many times the
-// open sling-context scan was issued.
-func strandedSlingContextScans(t *testing.T, convoys int) int {
+// strandedRigScans runs findStrandedConvoys against a mock bd with the given
+// number of single-issue convoys and returns how many times the rig-wide open
+// sling-context and agent-bead listings were issued.
+func strandedRigScans(t *testing.T, convoys int) (slingContexts, agentLists int) {
 	t.Helper()
 	binDir := t.TempDir()
 	townRoot := t.TempDir()
@@ -25,8 +25,10 @@ func strandedSlingContextScans(t *testing.T, convoys int) int {
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatalf("mkdir mayor: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(townRoot, "rig", ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir rig beads: %v", err)
+	for _, dir := range []string{filepath.Join(townRoot, "rig", ".beads"), filepath.Join(townRoot, "rig", "polecats"), filepath.Join(townRoot, "rig", "mayor", "rig", ".beads")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
 	}
 	writeJSONFile(t, filepath.Join(townRoot, "mayor", "rigs.json"), &config.RigsConfig{Version: config.CurrentRigsVersion, Rigs: map[string]config.RigEntry{"rig": {}}})
 	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(`{"prefix":"gt-","path":"gastown/mayor/rig"}`+"\n"), 0644); err != nil {
@@ -72,22 +74,25 @@ exit 0
 	if err != nil {
 		t.Fatalf("read call log: %v", err)
 	}
-	return strings.Count(string(calls), "gt:sling-context")
+	return strings.Count(string(calls), "gt:sling-context"), strings.Count(string(calls), "--label=gt:agent")
 }
 
-// TestFindStrandedConvoysScansSlingContextsOncePerRun guards the daemon's
-// 30 s stranded scan: the rig-wide open sling-context listing must not be
-// repeated for every open convoy.
-func TestFindStrandedConvoysScansSlingContextsOncePerRun(t *testing.T) {
+// TestFindStrandedConvoysScansRigsOncePerRun guards the daemon's 30 s stranded
+// scan: rig-wide sling-context and agent-bead listings must not be repeated for
+// every open convoy.
+func TestFindStrandedConvoysScansRigsOncePerRun(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping convoy test on Windows")
 	}
-	one := strandedSlingContextScans(t, 1)
-	five := strandedSlingContextScans(t, 5)
-	if one == 0 {
-		t.Fatal("expected the stranded scan to list open sling contexts")
+	contextsOne, agentsOne := strandedRigScans(t, 1)
+	contextsFive, agentsFive := strandedRigScans(t, 5)
+	if contextsOne == 0 || agentsOne == 0 {
+		t.Fatalf("expected the stranded scan to list sling contexts and agents, got %d and %d", contextsOne, agentsOne)
 	}
-	if five != one {
-		t.Fatalf("sling-context scans grew with convoy count: 1 convoy=%d, 5 convoys=%d", one, five)
+	if contextsFive != contextsOne {
+		t.Errorf("sling-context scans grew with convoy count: 1 convoy=%d, 5 convoys=%d", contextsOne, contextsFive)
+	}
+	if agentsFive != agentsOne {
+		t.Errorf("agent-bead listings grew with convoy count: 1 convoy=%d, 5 convoys=%d", agentsOne, agentsFive)
 	}
 }
