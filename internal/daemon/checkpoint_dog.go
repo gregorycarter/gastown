@@ -138,6 +138,15 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 		return false // Clean worktree
 	}
 
+	// Never checkpoint mid-operation. During a rebase/merge/cherry-pick/revert,
+	// `git add -A` marks unresolved conflicts as resolved (conflict markers and
+	// all) and the commit lands inside the series being replayed; the lander
+	// then replays a broken intermediate commit (hisn-x8uk).
+	if reason := checkpointBlockedReason(workDir); reason != "" {
+		d.logger.Printf("checkpoint_dog: skipping %s/%s: %s", rigName, polecatName, reason)
+		return false
+	}
+
 	// Stage everything
 	if _, err := runGitCmd(workDir, "add", "-A"); err != nil {
 		d.logger.Printf("checkpoint_dog: git add -A failed in %s/%s: %v", rigName, polecatName, err)
@@ -262,4 +271,26 @@ func splitNullSeparatedPaths(out string) []string {
 		}
 	}
 	return paths
+}
+
+// checkpointBlockedReason reports why a worktree must not be checkpointed now:
+// an in-progress git operation or unmerged paths. Empty means safe.
+func checkpointBlockedReason(workDir string) string {
+	gitDir, err := runGitCmd(workDir, "rev-parse", "--git-dir")
+	if err != nil {
+		return "cannot resolve git dir"
+	}
+	gitDir = strings.TrimSpace(gitDir)
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(workDir, gitDir)
+	}
+	for _, marker := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"} {
+		if _, err := os.Stat(filepath.Join(gitDir, marker)); err == nil {
+			return "git operation in progress (" + marker + ")"
+		}
+	}
+	if unmerged, err := runGitCmd(workDir, "diff", "--name-only", "--diff-filter=U"); err == nil && strings.TrimSpace(unmerged) != "" {
+		return "unmerged paths present"
+	}
+	return ""
 }
