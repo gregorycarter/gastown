@@ -334,12 +334,50 @@ func runSchedulerQueueHygiene(townRoot string, dryRun bool) error {
 // dispatchScheduledWork is the main dispatch loop for the capacity scheduler.
 // Called by both `gt scheduler run` and the daemon heartbeat.
 func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun bool) (int, error) {
+	return dispatchScheduledWorkFiltered(townRoot, actor, batchOverride, dryRun, nil)
+}
+
+// recoveryOnlyFilter keeps only same-worker recovery contexts (MR or dependency
+// resume). Recovery drains the merge queue instead of adding to it, so the
+// daemon still admits it while host pressure defers new work.
+func recoveryOnlyFilter(b capacity.PendingBead) bool {
+	return b.Context != nil && b.Context.IsRecovery()
+}
+
+// filterDispatchPlan keeps only beads that keep returns true for, refilling the
+// planned slots from the backfill so a matching bead deeper in the queue still
+// dispatches. Planned beads that were dropped count as skipped.
+func filterDispatchPlan(plan *capacity.DispatchPlan, keep func(capacity.PendingBead) bool) {
+	if keep == nil {
+		return
+	}
+	slots := len(plan.ToDispatch)
+	var kept []capacity.PendingBead
+	for _, pending := range append(append([]capacity.PendingBead{}, plan.ToDispatch...), plan.Backfill...) {
+		if keep(pending) {
+			kept = append(kept, pending)
+		}
+	}
+	plan.Skipped += len(plan.ToDispatch)
+	if len(kept) > slots {
+		plan.ToDispatch, plan.Backfill = kept[:slots], kept[slots:]
+	} else {
+		plan.ToDispatch, plan.Backfill = kept, nil
+	}
+	plan.Skipped -= len(plan.ToDispatch)
+	if plan.Skipped < 0 {
+		plan.Skipped = 0
+	}
+}
+
+func dispatchScheduledWorkFiltered(townRoot, actor string, batchOverride int, dryRun bool, keep func(capacity.PendingBead) bool) (int, error) {
 	if dryRun {
 		dispatchPlan, err := buildSchedulerDispatchPlan(townRoot, batchOverride, false)
 		if err != nil {
 			return 0, fmt.Errorf("planning dispatch: %w", err)
 		}
 		sweepOrphanWispBlockers(townRoot, dispatchPlan.Assessments, true)
+		filterDispatchPlan(&dispatchPlan.Plan, keep)
 		dispatchPlan.Plan = validateDryRunDispatchPlan(townRoot, dispatchPlan.Plan)
 		printSchedulerDryRunPlan(dispatchPlan)
 		return 0, nil
@@ -373,10 +411,14 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	}
 
 	// Supply step: top the queue up from `bd ready` before planning, so
+	// (skipped for a recovery-only pass: pressure defers new work, and feeding
+	// would only add Dolt load)
 	// dispatch never waits for a Mayor session to hand-pick work. No-op
 	// unless scheduler.queue_floor > 0. Failure here is non-fatal — a
 	// dispatch of what is already queued beats no dispatch at all.
-	if _, feedErr := autoFeedScheduler(townRoot, 0, false); feedErr != nil {
+	if keep != nil {
+		// recovery-only: no feed
+	} else if _, feedErr := autoFeedScheduler(townRoot, 0, false); feedErr != nil {
 		fmt.Fprintf(os.Stderr, "%s scheduler auto-feed failed: %v\n", style.Warning.Render("⚠"), feedErr)
 	}
 
@@ -409,6 +451,7 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	}
 
 	printWIPDeferrals(dispatchPlan.WIPDeferred)
+	filterDispatchPlan(&dispatchPlan.Plan, keep)
 
 	// Wire up the DispatchCycle
 	// Recovery admission is owned by the pressure-checked daemon tick. A

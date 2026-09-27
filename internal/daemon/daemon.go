@@ -1050,6 +1050,10 @@ func (d *Daemon) heartbeat(state *State) {
 			// also freezes stale-context cleanup and reservation-TTL expiry,
 			// so a saturated host accumulates queue debris it cannot clear.
 			d.dispatchQueuedWorkCleanupOnly()
+			// Same-worker recovery (needs-rebase MR / dependency resume) drains
+			// the merge queue rather than adding work, so it is still admitted
+			// under pressure; new work stays deferred.
+			d.dispatchQueuedRecoveryOnly()
 		}
 	} else {
 		d.dispatchQueuedWork()
@@ -3375,6 +3379,29 @@ func (d *Daemon) dispatchQueuedWorkCleanupOnly() {
 		d.logger.Printf("Scheduler cleanup-only failed: %v (output: %s)", err, string(out))
 	case len(out) > 0:
 		d.logger.Printf("Scheduler cleanup-only: %s", string(out))
+	}
+}
+
+// dispatchQueuedRecoveryOnly dispatches only same-worker recovery contexts.
+// Used when pressure defers new polecat work. An older gt without the flag is
+// logged and ignored.
+func (d *Daemon) dispatchQueuedRecoveryOnly() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gt", "scheduler", "run", "--recovery-only")
+	setSysProcAttr(cmd)
+	cmd.Dir = d.config.TownRoot
+	cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads")), "GT_DAEMON=1")
+	out, err := cmd.CombinedOutput()
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		d.logger.Printf("Scheduler recovery-only dispatch timed out after 5m")
+	case err != nil && strings.Contains(string(out), "unknown flag"):
+		d.logger.Printf("Scheduler recovery-only unavailable in this gt build; recovery waits for pressure to clear")
+	case err != nil:
+		d.logger.Printf("Scheduler recovery-only dispatch failed: %v (output: %s)", err, string(out))
+	case len(out) > 0:
+		d.logger.Printf("Scheduler recovery-only dispatch: %s", string(out))
 	}
 }
 

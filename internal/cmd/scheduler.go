@@ -20,12 +20,13 @@ import (
 )
 
 var (
-	schedulerStatusJSON     bool
-	schedulerListJSON       bool
-	schedulerClearBead      string
-	schedulerRunBatch       int
-	schedulerRunDryRun      bool
-	schedulerRunCleanupOnly bool
+	schedulerStatusJSON      bool
+	schedulerListJSON        bool
+	schedulerClearBead       string
+	schedulerRunBatch        int
+	schedulerRunDryRun       bool
+	schedulerRunCleanupOnly  bool
+	schedulerRunRecoveryOnly bool
 )
 
 var schedulerCmd = &cobra.Command{
@@ -119,6 +120,7 @@ func init() {
 	schedulerRunCmd.Flags().IntVar(&schedulerRunBatch, "batch", 0, "Override batch size (0 = use config)")
 	schedulerRunCmd.Flags().BoolVar(&schedulerRunDryRun, "dry-run", false, "Preview what would dispatch")
 	schedulerRunCmd.Flags().BoolVar(&schedulerRunCleanupOnly, "cleanup-only", false, "Run queue hygiene (stale contexts, reservation TTL, orphaned wisps) without dispatching")
+	schedulerRunCmd.Flags().BoolVar(&schedulerRunRecoveryOnly, "recovery-only", false, "Dispatch only same-worker recovery contexts (MR/dependency resume); used by the daemon under host pressure")
 
 	// Feed flags
 	schedulerFeedCmd.Flags().IntVar(&schedulerFeedFloor, "floor", 0, "Override scheduler.queue_floor for this run")
@@ -453,6 +455,10 @@ func runSchedulerRun(cmd *cobra.Command, args []string) error {
 		return runSchedulerQueueHygiene(townRoot, schedulerRunDryRun)
 	}
 
+	if schedulerRunRecoveryOnly {
+		_, err = dispatchScheduledWorkFiltered(townRoot, detectActor(), schedulerRunBatch, schedulerRunDryRun, recoveryOnlyFilter)
+		return err
+	}
 	_, err = dispatchScheduledWork(townRoot, detectActor(), schedulerRunBatch, schedulerRunDryRun)
 	return err
 }
