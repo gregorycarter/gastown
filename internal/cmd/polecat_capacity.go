@@ -32,7 +32,11 @@ type polecatCapacitySnapshot struct {
 	Reservations    int `json:"reservations"`
 	Free            int `json:"free"`
 	ActiveSessions  int `json:"active_sessions"`
-	capacityUsed    int
+	// PendingMRByRig counts, per rig, polecats holding an unlanded merge
+	// request (agent active_mr set; the refinery clears it when the MR
+	// reaches a terminal state). This is the scheduler's WIP-cap input.
+	PendingMRByRig map[string]int `json:"pending_mr_by_rig,omitempty"`
+	capacityUsed   int
 }
 
 func (s polecatCapacitySnapshot) occupied() int {
@@ -57,6 +61,13 @@ func (s *polecatCapacitySnapshot) addReusableIdle() {
 
 func (s *polecatCapacitySnapshot) addPendingMR() {
 	s.PendingMR++
+}
+
+func (s *polecatCapacitySnapshot) addRigPendingMR(rigName string) {
+	if s.PendingMRByRig == nil {
+		s.PendingMRByRig = make(map[string]int)
+	}
+	s.PendingMRByRig[rigName]++
 }
 
 type polecatAdmissionReservation struct {
@@ -354,6 +365,9 @@ func listPolecatDirectoryNames(rigPath string) ([]string, error) {
 func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet) {
 	item := buildPolecatInventoryItem(rigName, polecatName, fields, activeWork, sessions)
 	applyWorkstateDispositionToCapacitySnapshot(snapshot, item.State, item.Disposition)
+	if item.ActiveMR != "" {
+		snapshot.addRigPendingMR(rigName)
+	}
 }
 
 func applyWorkstateDispositionToCapacitySnapshot(snapshot *polecatCapacitySnapshot, state polecat.State, disposition polecat.WorkstateDisposition) {

@@ -555,3 +555,72 @@ func TestStandaloneFormulaExistingPolecatNoopDoesNotRequireCapacity(t *testing.T
 		t.Fatalf("runSlingFormula: %v", err)
 	}
 }
+
+func TestCapacitySnapshotCountsPendingMRsPerRig(t *testing.T) {
+	setupPolecatTestRegistry(t)
+	snapshot := polecatCapacitySnapshot{Max: 10}
+	// Two done polecats with open MRs in hisn, one idle polecat without an MR.
+	for _, name := range []string{"a", "b"} {
+		applyAgentFieldsToCapacitySnapshot(&snapshot, "hisn", name,
+			&beads.AgentFields{AgentState: string(beads.AgentStateDone), CleanupStatus: string(polecat.CleanupClean), ActiveMR: "hisn-wisp-mr-" + name},
+			nil, newPolecatSessionSet(nil))
+	}
+	applyAgentFieldsToCapacitySnapshot(&snapshot, "hisn", "c",
+		&beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: string(polecat.CleanupClean)},
+		nil, newPolecatSessionSet(nil))
+	applyAgentFieldsToCapacitySnapshot(&snapshot, "gastown", "d",
+		&beads.AgentFields{AgentState: string(beads.AgentStateDone), CleanupStatus: string(polecat.CleanupClean), ActiveMR: "gt-wisp-mr-d"},
+		nil, newPolecatSessionSet(nil))
+	if snapshot.PendingMRByRig["hisn"] != 2 || snapshot.PendingMRByRig["gastown"] != 1 {
+		t.Fatalf("per-rig pending MR counts = %v, want hisn=2 gastown=1", snapshot.PendingMRByRig)
+	}
+}
+
+func TestAnnotateWIPCapPausesOnlyNewWork(t *testing.T) {
+	mk := func(id string, fields capacity.SlingContextFields, info beadStatusInfo) scheduledContextAssessment {
+		fields.WorkBeadID, fields.TargetRig = id, "hisn"
+		return scheduledContextAssessment{
+			context: slingContextRecord{issue: &beads.Issue{ID: "ctx-" + id}},
+			fields:  &fields, info: info, found: true, ready: true,
+		}
+	}
+	assessments := []scheduledContextAssessment{
+		mk("hisn-new", capacity.SlingContextFields{}, beadStatusInfo{Priority: 2}),
+		mk("hisn-resume", capacity.SlingContextFields{ResumeMR: "hisn-wisp-mr"}, beadStatusInfo{Priority: 2}),
+		mk("hisn-p0", capacity.SlingContextFields{}, beadStatusInfo{Priority: 0}),
+		mk("hisn-rem", capacity.SlingContextFields{}, beadStatusInfo{Priority: 2, Labels: []string{"release-remediation"}}),
+	}
+	cfg := capacity.DefaultSchedulerConfig()
+	wip := schedulerWIPCap(cfg, polecatCapacitySnapshot{PendingMRByRig: map[string]int{"hisn": 19}})
+	annotateWIPCap(assessments, wip)
+
+	infos := scheduledBeadInfosFromAssessments(assessments)
+	if len(infos) != 4 {
+		t.Fatalf("infos = %+v", infos)
+	}
+	if !infos[0].Blocked || infos[0].Reason != "wip-cap: 19 pending MRs >= 8" {
+		t.Fatalf("new work must show as paused by wip-cap: %+v", infos[0])
+	}
+	for _, info := range infos[1:] {
+		if info.Blocked || info.Reason != "" {
+			t.Fatalf("exempt work must stay ready: %+v", info)
+		}
+	}
+	ready := readySlingContextsFromAssessments(assessments)
+	plan, deferred := capacity.PlanDispatchWithWIPCap(10, 10, ready, wip)
+	if len(plan.ToDispatch) != 3 || len(deferred) != 1 || deferred[0].Bead.WorkBeadID != "hisn-new" {
+		t.Fatalf("plan=%+v deferred=%+v", plan, deferred)
+	}
+	out := captureStdout(t, func() { printWIPDeferrals(deferred) })
+	if !strings.Contains(out, "Deferring new work for rig hisn: wip-cap: 19 pending MRs >= 8 (1 bead(s) held: hisn-new)") {
+		t.Fatalf("deferral log = %q", out)
+	}
+
+	// Below the cap nothing is annotated.
+	annotateWIPCap(assessments, schedulerWIPCap(cfg, polecatCapacitySnapshot{PendingMRByRig: map[string]int{"hisn": 7}}))
+	for _, info := range scheduledBeadInfosFromAssessments(assessments) {
+		if info.Blocked {
+			t.Fatalf("under the cap nothing is paused: %+v", info)
+		}
+	}
+}

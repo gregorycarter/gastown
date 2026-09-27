@@ -13,6 +13,10 @@ type PendingBead struct {
 	Context         *SlingContextFields // Parsed sling params from context bead
 	ContextWorkDir  string              // Work dir for the DB where the context was discovered.
 	ContextBeadsDir string              // Resolved .beads dir where the context was discovered.
+	// Priority is the work bead's priority (0 = P0) when HasPriority is set.
+	// Unknown priority is never treated as P0.
+	Priority    int
+	HasPriority bool
 }
 
 // SlingContextFields holds scheduling parameters stored on a sling context bead.

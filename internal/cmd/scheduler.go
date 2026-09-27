@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -157,14 +159,21 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading scheduler state: %w", err)
 	}
 
-	scheduled, err := listScheduledBeads(townRoot)
-	if err != nil {
-		return fmt.Errorf("listing scheduled beads: %w", err)
-	}
-
 	capacitySnapshot, err := polecatCapacitySnapshotForTown(townRoot)
 	if err != nil {
 		return fmt.Errorf("loading polecat capacity: %w", err)
+	}
+
+	schedulerCfg, err := loadSchedulerConfig(townRoot)
+	if err != nil {
+		return err
+	}
+	wipCap := schedulerWIPCap(schedulerCfg, capacitySnapshot)
+	wipCapped := wipCappedRigs(wipCap, capacitySnapshot)
+
+	scheduled, err := listScheduledBeadsWithWIP(townRoot, &wipCap)
+	if err != nil {
+		return fmt.Errorf("listing scheduled beads: %w", err)
 	}
 
 	if schedulerStatusJSON {
@@ -176,8 +185,10 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 			ActivePolecats int                     `json:"active_polecats"`
 			Capacity       polecatCapacitySnapshot `json:"capacity"`
 			LastDispatchAt string                  `json:"last_dispatch_at,omitempty"`
+			WIPCapped      map[string]string       `json:"wip_capped,omitempty"`
 			Beads          []scheduledBeadInfo     `json:"beads"`
 		}{
+			WIPCapped:      wipCapped,
 			Paused:         state.Paused,
 			PausedBy:       state.PausedBy,
 			ScheduledTotal: len(scheduled),
@@ -224,11 +235,44 @@ func runSchedulerStatus(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Printf("  Capacity:  direct dispatch (scheduler.max_polecats=%d)\n", capacitySnapshot.Max)
 	}
+	if len(capacitySnapshot.PendingMRByRig) > 0 {
+		rigs := make([]string, 0, len(capacitySnapshot.PendingMRByRig))
+		for rig := range capacitySnapshot.PendingMRByRig {
+			rigs = append(rigs, rig)
+		}
+		sort.Strings(rigs)
+		for _, rig := range rigs {
+			limit := schedulerCfg.GetMaxPendingMRs(rig)
+			limitStr := "off"
+			if limit > 0 {
+				limitStr = strconv.Itoa(limit)
+			}
+			line := fmt.Sprintf("  WIP %s: %d pending MR(s), cap %s", rig, capacitySnapshot.PendingMRByRig[rig], limitStr)
+			if reason, ok := wipCapped[rig]; ok {
+				line += " — " + style.Warning.Render("new work deferred ("+reason+")")
+			}
+			fmt.Println(line)
+		}
+	}
 	if state.LastDispatchAt != "" {
 		fmt.Printf("  Last dispatch: %s (%d beads)\n", state.LastDispatchAt, state.LastDispatchCount)
 	}
 
 	return nil
+}
+
+// wipCappedRigs returns rig -> wip-cap reason for every rig at its cap.
+func wipCappedRigs(wip capacity.WIPCap, snapshot polecatCapacitySnapshot) map[string]string {
+	capped := map[string]string{}
+	for rig := range snapshot.PendingMRByRig {
+		if reason := wip.RigReason(rig); reason != "" {
+			capped[rig] = reason
+		}
+	}
+	if len(capped) == 0 {
+		return nil
+	}
+	return capped
 }
 
 func runSchedulerList(cmd *cobra.Command, args []string) error {
@@ -237,7 +281,17 @@ func runSchedulerList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	scheduled, err := listScheduledBeads(townRoot)
+	// The WIP cap annotation is best effort: list must still work when the
+	// capacity snapshot (tmux, agent beads) is unavailable.
+	var wipCap *capacity.WIPCap
+	if schedulerCfg, cfgErr := loadSchedulerConfig(townRoot); cfgErr == nil {
+		if snapshot, snapErr := polecatCapacitySnapshotForTownNoCleanup(townRoot); snapErr == nil {
+			w := schedulerWIPCap(schedulerCfg, snapshot)
+			wipCap = &w
+		}
+	}
+
+	scheduled, err := listScheduledBeadsWithWIP(townRoot, wipCap)
 	if err != nil {
 		return fmt.Errorf("listing scheduled beads: %w", err)
 	}
@@ -407,9 +461,18 @@ func runSchedulerRun(cmd *cobra.Command, args []string) error {
 // Reconciles sling context beads with work bead readiness to mark blocked status.
 // Uses batch fetch for work bead info to avoid N+1 subprocess spawns.
 func listScheduledBeads(townRoot string) ([]scheduledBeadInfo, error) {
+	return listScheduledBeadsWithWIP(townRoot, nil)
+}
+
+// listScheduledBeadsWithWIP is listScheduledBeads with ready rows that the
+// WIP cap holds back shown as paused ("why: wip-cap: ..."). nil wip skips it.
+func listScheduledBeadsWithWIP(townRoot string, wip *capacity.WIPCap) ([]scheduledBeadInfo, error) {
 	assessments, err := assessScheduledContexts(townRoot)
 	if err != nil {
 		return nil, err
+	}
+	if wip != nil {
+		annotateWIPCap(assessments, *wip)
 	}
 	return scheduledBeadInfosFromAssessments(assessments), nil
 }
@@ -422,6 +485,9 @@ func scheduledBeadInfosFromAssessments(assessments []scheduledContextAssessment)
 			continue
 		}
 		bead.Reason = assessment.pauseReason()
+		if assessment.wipDeferred != "" {
+			bead.Blocked = true
+		}
 		result = append(result, bead)
 	}
 

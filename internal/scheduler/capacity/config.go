@@ -51,6 +51,61 @@ type SchedulerConfig struct {
 	// ci). Product work is what the factory exists for; ops work must not
 	// take every slot. P0/P1 beads bypass the cap. Default 1.
 	AutoFeedMaxOpsSlots *int `json:"autofeed_max_ops_slots,omitempty"`
+
+	// MaxPendingMRs is the per-rig work-in-progress cap: when a rig already
+	// has this many polecats holding an unlanded merge request, the
+	// scheduler defers dispatch of NEW work for that rig so a landing outage
+	// turns into an idle rig instead of a pile of MRs (each holding a
+	// worktree, disk and a polecat directory slot). Recovery contexts, P0
+	// beads and WIPCapExemptLabels still dispatch. nil/absent = default (8);
+	// 0 disables the cap.
+	MaxPendingMRs *int `json:"max_pending_mrs,omitempty"`
+
+	// MaxPendingMRsByRig overrides MaxPendingMRs for individual rigs
+	// (rig name -> limit; 0 disables the cap for that rig).
+	MaxPendingMRsByRig map[string]int `json:"max_pending_mrs_by_rig,omitempty"`
+
+	// WIPCapExemptLabels are work-bead labels that bypass the WIP cap because
+	// the work unblocks landing. nil means "use the defaults"; an explicitly
+	// empty JSON array exempts nothing by label.
+	WIPCapExemptLabels []string `json:"wip_cap_exempt_labels,omitempty"`
+}
+
+// DefaultMaxPendingMRs is the default per-rig WIP cap on unlanded MRs.
+const DefaultMaxPendingMRs = 8
+
+// DefaultWIPCapExemptLabels mark work that unblocks landing (tracked release
+// remediation, CI train failures) and therefore must not wait behind the cap.
+var DefaultWIPCapExemptLabels = []string{
+	"release-remediation",
+	"ci-train-failure",
+}
+
+// GetMaxPendingMRs returns the WIP cap for rig: the per-rig override when
+// present, else MaxPendingMRs, else DefaultMaxPendingMRs. Negative values are
+// clamped to 0 (disabled).
+func (c *SchedulerConfig) GetMaxPendingMRs(rig string) int {
+	limit := DefaultMaxPendingMRs
+	if c != nil {
+		if override, ok := c.MaxPendingMRsByRig[rig]; ok && rig != "" {
+			limit = override
+		} else if c.MaxPendingMRs != nil {
+			limit = *c.MaxPendingMRs
+		}
+	}
+	if limit < 0 {
+		return 0
+	}
+	return limit
+}
+
+// GetWIPCapExemptLabels returns the WIP-cap label exemptions. An unset field
+// yields the defaults; an explicitly empty list exempts nothing by label.
+func (c *SchedulerConfig) GetWIPCapExemptLabels() []string {
+	if c == nil || c.WIPCapExemptLabels == nil {
+		return DefaultWIPCapExemptLabels
+	}
+	return c.WIPCapExemptLabels
 }
 
 // DefaultAutoFeedExcludeLabels are labels that mark work the auto-feeder must

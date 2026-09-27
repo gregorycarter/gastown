@@ -777,6 +777,16 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		}
 		townSettings.Scheduler.QueueFloor = &n
 
+	case "scheduler.max_pending_mrs":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 {
+			return fmt.Errorf("invalid value for %s: expected non-negative integer (0 = WIP cap off)", key)
+		}
+		if townSettings.Scheduler == nil {
+			townSettings.Scheduler = capacity.DefaultSchedulerConfig()
+		}
+		townSettings.Scheduler.MaxPendingMRs = &n
+
 	case "scheduler.autofeed_max_ops_slots":
 		n, err := strconv.Atoi(value)
 		if err != nil || n < 0 {
@@ -847,7 +857,7 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		if strings.HasPrefix(key, "lifecycle.") {
 			return setLifecycleConfig(townRoot, key, value)
 		}
-		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  scheduler.queue_floor\n  scheduler.autofeed_max_ops_slots\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
+		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  scheduler.queue_floor\n  scheduler.autofeed_max_ops_slots\n  scheduler.max_pending_mrs\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
 	}
 
 	if err := config.SaveTownSettings(settingsPath, townSettings); err != nil {
@@ -920,6 +930,9 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 	case "scheduler.autofeed_max_ops_slots":
 		value = strconv.Itoa(townSettings.Scheduler.GetAutoFeedMaxOpsSlots())
 
+	case "scheduler.max_pending_mrs":
+		value = strconv.Itoa(townSettings.Scheduler.GetMaxPendingMRs(""))
+
 	case "scheduler.autofeed_labels":
 		value = strings.Join(townSettings.Scheduler.GetAutoFeedLabels(), ",")
 
@@ -954,7 +967,7 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 		if strings.HasPrefix(key, "lifecycle.") {
 			return getLifecycleConfig(townRoot, key)
 		}
-		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  scheduler.queue_floor\n  scheduler.autofeed_max_ops_slots\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
+		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  scheduler.queue_floor\n  scheduler.autofeed_max_ops_slots\n  scheduler.max_pending_mrs\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
 	}
 
 	fmt.Println(value)

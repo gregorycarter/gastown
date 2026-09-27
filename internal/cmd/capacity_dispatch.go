@@ -84,6 +84,70 @@ type schedulerDispatchPlan struct {
 	Assessments []scheduledContextAssessment
 	Ready       []capacity.PendingBead
 	Plan        capacity.DispatchPlan
+	WIPDeferred []capacity.WIPDeferral
+}
+
+// loadSchedulerConfig returns the town scheduler config, or the defaults when
+// none is configured.
+func loadSchedulerConfig(townRoot string) (*capacity.SchedulerConfig, error) {
+	settings, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return nil, fmt.Errorf("loading town settings: %w", err)
+	}
+	if settings.Scheduler == nil {
+		return capacity.DefaultSchedulerConfig(), nil
+	}
+	return settings.Scheduler, nil
+}
+
+// schedulerWIPCap builds the per-rig WIP cap from scheduler config and the
+// capacity snapshot's per-rig pending-MR counts.
+func schedulerWIPCap(cfg *capacity.SchedulerConfig, snapshot polecatCapacitySnapshot) capacity.WIPCap {
+	return capacity.WIPCap{
+		PendingMRs:   snapshot.PendingMRByRig,
+		Limit:        cfg.GetMaxPendingMRs,
+		ExemptLabels: cfg.GetWIPCapExemptLabels(),
+	}
+}
+
+// annotateWIPCap marks ready assessments that the WIP cap holds back, so
+// `gt scheduler list/status` show them as paused with the wip-cap reason.
+func annotateWIPCap(assessments []scheduledContextAssessment, wip capacity.WIPCap) {
+	for i := range assessments {
+		a := &assessments[i]
+		a.wipDeferred = ""
+		if !a.ready || a.fields == nil {
+			continue
+		}
+		reason := wip.RigReason(a.fields.TargetRig)
+		if reason == "" {
+			continue
+		}
+		if ok, _ := capacity.WIPCapExempt(pendingBeadFromAssessment(*a), wip.ExemptLabels); ok {
+			continue
+		}
+		a.wipDeferred = reason
+	}
+}
+
+// printWIPDeferrals logs one line per rig held by the WIP cap, in the same
+// shape as the daemon's pressure deferrals.
+func printWIPDeferrals(deferred []capacity.WIPDeferral) {
+	byRig := map[string][]string{}
+	reasons := map[string]string{}
+	var rigs []string
+	for _, d := range deferred {
+		if _, seen := byRig[d.Rig]; !seen {
+			rigs = append(rigs, d.Rig)
+		}
+		byRig[d.Rig] = append(byRig[d.Rig], d.Bead.WorkBeadID)
+		reasons[d.Rig] = d.Reason
+	}
+	sort.Strings(rigs)
+	for _, rig := range rigs {
+		fmt.Printf("%s Deferring new work for rig %s: %s (%d bead(s) held: %s)\n",
+			style.Dim.Render("⏸"), rig, reasons[rig], len(byRig[rig]), strings.Join(byRig[rig], ","))
+	}
 }
 
 func buildSchedulerDispatchPlan(townRoot string, batchOverride int, cleanup bool) (*schedulerDispatchPlan, error) {
@@ -141,8 +205,10 @@ func buildSchedulerDispatchPlan(townRoot string, batchOverride int, cleanup bool
 		return nil, fmt.Errorf("loading polecat capacity: %w", err)
 	}
 
+	wipCap := schedulerWIPCap(schedulerCfg, snapshot)
+	annotateWIPCap(assessments, wipCap)
 	ready := readySlingContextsFromAssessments(assessments)
-	dispatchPlan := capacity.PlanDispatch(snapshot.Free, batchSize, ready)
+	dispatchPlan, wipDeferred := capacity.PlanDispatchWithWIPCap(snapshot.Free, batchSize, ready, wipCap)
 	if len(ready) > 0 {
 		switch {
 		case state.Paused:
@@ -162,6 +228,7 @@ func buildSchedulerDispatchPlan(townRoot string, batchOverride int, cleanup bool
 		Assessments: assessments,
 		Ready:       ready,
 		Plan:        dispatchPlan,
+		WIPDeferred: wipDeferred,
 	}, nil
 }
 
@@ -289,6 +356,8 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		}
 		return 0, nil
 	}
+
+	printWIPDeferrals(dispatchPlan.WIPDeferred)
 
 	// Wire up the DispatchCycle
 	// Recovery admission is owned by the pressure-checked daemon tick. A
@@ -421,6 +490,7 @@ func printSchedulerDryRunPlan(dispatchPlan *schedulerDispatchPlan) {
 			dispatchPlan.MaxPolecats, len(dispatchPlan.Scheduled))
 		return
 	}
+	printWIPDeferrals(dispatchPlan.WIPDeferred)
 	printDryRunPlan(dispatchPlan.Plan, dispatchPlan.Capacity, dispatchPlan.BatchSize)
 }
 
@@ -428,6 +498,9 @@ func printDispatchNoOp(report capacity.DispatchReport, snapshot polecatCapacityS
 	switch report.Reason {
 	case "none":
 		fmt.Println("No ready beads scheduled for dispatch")
+	case "wip-cap":
+		fmt.Printf("\n%s WIP cap: %d ready bead(s) deferred until pending MRs land\n",
+			style.Dim.Render("⏸"), report.Skipped)
 	case "capacity":
 		fmt.Printf("\n%s No capacity: %d ready bead(s) waiting (working: %d recovery_blocked: %d reservations: %d reusable_idle: %d pending_mr: %d)\n",
 			style.Dim.Render("○"), report.Skipped, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle, snapshot.PendingMR)
@@ -455,6 +528,8 @@ func printDryRunPlan(plan capacity.DispatchPlan, snapshot polecatCapacitySnapsho
 		switch plan.Reason {
 		case "capacity":
 			fmt.Printf("No capacity: %s, %d ready bead(s) waiting\n", capStr, totalReady)
+		case "wip-cap":
+			fmt.Printf("No dispatchable beads: WIP cap holds %d ready bead(s) until pending MRs land\n", totalReady)
 		case "validation":
 			fmt.Printf("No dispatchable beads: validation failed for %d candidate(s)\n", totalReady)
 		default:
@@ -513,6 +588,9 @@ type scheduledContextAssessment struct {
 	ready             bool
 	recoveryError     string
 	unblocksPreserved int
+	// wipDeferred is the WIP-cap reason when the row is ready but its rig
+	// is at scheduler.max_pending_mrs; "" otherwise.
+	wipDeferred string
 }
 
 // pauseReason explains, in one short phrase, why `gt scheduler list` shows a
@@ -520,7 +598,7 @@ type scheduledContextAssessment struct {
 // every silent stall; every non-ready row must be able to say why.
 func (a scheduledContextAssessment) pauseReason() string {
 	if a.ready {
-		return ""
+		return a.wipDeferred
 	}
 	if a.recoveryError != "" {
 		return "recovery: " + a.recoveryError
@@ -932,20 +1010,26 @@ func readySlingContextsFromAssessments(assessments []scheduledContextAssessment)
 			continue
 		}
 
-		result = append(result, capacity.PendingBead{
-			ID:              assessment.context.issue.ID,
-			WorkBeadID:      assessment.fields.WorkBeadID,
-			Title:           assessment.info.Title,
-			TargetRig:       assessment.fields.TargetRig,
-			Description:     assessment.context.issue.Description,
-			Labels:          workLabels,
-			Context:         assessment.fields,
-			ContextWorkDir:  assessment.context.workDir,
-			ContextBeadsDir: assessment.context.beadsDir,
-		})
+		result = append(result, pendingBeadFromAssessment(assessment))
 	}
 
 	return result
+}
+
+func pendingBeadFromAssessment(assessment scheduledContextAssessment) capacity.PendingBead {
+	return capacity.PendingBead{
+		ID:              assessment.context.issue.ID,
+		WorkBeadID:      assessment.fields.WorkBeadID,
+		Title:           assessment.info.Title,
+		TargetRig:       assessment.fields.TargetRig,
+		Description:     assessment.context.issue.Description,
+		Labels:          assessment.info.Labels,
+		Context:         assessment.fields,
+		ContextWorkDir:  assessment.context.workDir,
+		ContextBeadsDir: assessment.context.beadsDir,
+		Priority:        assessment.info.Priority,
+		HasPriority:     assessment.found,
+	}
 }
 
 // dispatchSingleBead dispatches one scheduled bead via executeSling.
