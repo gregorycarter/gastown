@@ -1608,7 +1608,16 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		return nil, fmt.Errorf("listing convoys: %w", err)
 	}
 
-	// Check each convoy for stranded state
+	// Read every convoy's tracked issues first so scheduling status is checked
+	// once per scan. areScheduled lists open sling contexts in every rig
+	// database; calling it per convoy repeated that identical scan N times.
+	type convoyTracked struct {
+		convoy     convoyListIssue
+		baseBranch string
+		tracked    []trackedIssueInfo
+	}
+	var pending []convoyTracked
+	var allTrackedIDs []string
 	for _, convoy := range convoys {
 		// Extract base_branch from convoy description fields
 		var baseBranch string
@@ -1623,6 +1632,16 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 			fmt.Fprintf(os.Stderr, "⚠ Warning: skipping convoy %s: %v\n", convoy.ID, err)
 			continue
 		}
+		pending = append(pending, convoyTracked{convoy: convoy, baseBranch: baseBranch, tracked: tracked})
+		for _, t := range tracked {
+			allTrackedIDs = append(allTrackedIDs, t.ID)
+		}
+	}
+	scheduledSet := areScheduled(allTrackedIDs)
+
+	// Check each convoy for stranded state
+	for _, item := range pending {
+		convoy, baseBranch, tracked := item.convoy, item.baseBranch, item.tracked
 		// Empty convoys (0 tracked issues) are stranded — they need
 		// attention (auto-close via convoy check or manual cleanup).
 		if len(tracked) == 0 {
@@ -1642,13 +1661,6 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		// Town-level beads (hq- prefix with path=".") are excluded because
 		// they can't be dispatched via gt sling -- they're handled by the deacon.
 		// Non-slingable types (epics, convoys, etc.) are also excluded.
-
-		// Batch-check scheduling status for all tracked issues (single DB query).
-		var trackedIDs []string
-		for _, t := range tracked {
-			trackedIDs = append(trackedIDs, t.ID)
-		}
-		scheduledSet := areScheduled(trackedIDs)
 
 		var readyIssues []string
 		for _, t := range tracked {
