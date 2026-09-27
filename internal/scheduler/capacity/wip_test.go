@@ -120,7 +120,7 @@ func TestGetMaxPendingMRs(t *testing.T) {
 	if got := (&SchedulerConfig{MaxPendingMRs: &neg}).GetMaxPendingMRs("x"); got != 0 {
 		t.Fatalf("negative clamps to 0, got %d", got)
 	}
-	if got := nilCfg.GetWIPCapExemptLabels(); strings.Join(got, ",") != "release-remediation,ci-train-failure" {
+	if got := nilCfg.GetWIPCapExemptLabels(); strings.Join(got, ",") != "release-remediation,ci-train-failure,landing-unblock" {
 		t.Fatalf("default exempt labels = %v", got)
 	}
 	if got := (&SchedulerConfig{WIPCapExemptLabels: []string{}}).GetWIPCapExemptLabels(); len(got) != 0 {
