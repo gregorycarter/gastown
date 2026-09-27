@@ -657,6 +657,9 @@ type scheduledContextAssessment struct {
 	// respawnLimited is the hold reason when the row is ready but its
 	// per-bead respawn limit is exhausted; "" otherwise.
 	respawnLimited string
+	// rigHold is "rig parked"/"rig docked" when the target rig takes no
+	// work; its work bead is not read at all.
+	rigHold string
 }
 
 // pauseReason explains, in one short phrase, why `gt scheduler list` shows a
@@ -668,6 +671,9 @@ func (a scheduledContextAssessment) pauseReason() string {
 			return a.respawnLimited
 		}
 		return a.wipDeferred
+	}
+	if a.rigHold != "" {
+		return a.rigHold
 	}
 	if a.recoveryError != "" {
 		return "recovery: " + a.recoveryError
@@ -963,6 +969,19 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 		return candidates[i].context.issue.ID < candidates[j].context.issue.ID
 	})
 
+	// Parked/docked rigs take no work: do not read their work beads or scan
+	// their databases. Their rows stay visible as paused "rig parked".
+	rigHolds := scheduledRigHolds(townRoot, candidates)
+	if len(rigHolds) > 0 {
+		kept := workBeadIDs[:0]
+		for _, c := range candidates {
+			if rigHolds[c.fields.TargetRig] == "" {
+				kept = append(kept, c.fields.WorkBeadID)
+			}
+		}
+		workBeadIDs = kept
+	}
+
 	workBeadInfo := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
 	// Only databases that hold a found work bead need a `bd blocked` scan. A
 	// missing ID is never ready and already reports "work bead not found";
@@ -984,6 +1003,13 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 			continue
 		}
 		seenWork[workBeadID] = true
+
+		if hold := rigHolds[candidate.fields.TargetRig]; hold != "" {
+			candidate.rigHold = hold
+			candidate.ready = false
+			assessments = append(assessments, candidate)
+			continue
+		}
 
 		info, found := workBeadInfo[workBeadID]
 		candidate.info = info
@@ -1408,6 +1434,33 @@ func listAllSlingContextRecords(townRoot string) ([]slingContextRecord, error) {
 
 type blockedWorkQuery func(beadsDir string, groupedIDs []string) ([]byte, error)
 
+// rigParkedOrDockedFn reports whether a rig takes no work. Injected for tests.
+var rigParkedOrDockedFn = IsRigParkedOrDocked
+
+// scheduledRigHolds returns target rig -> "rig parked"/"rig docked" for every
+// held rig among the candidates, checking each rig once.
+func scheduledRigHolds(townRoot string, candidates []scheduledContextAssessment) map[string]string {
+	holds := map[string]string{}
+	checked := map[string]bool{}
+	for _, c := range candidates {
+		rig := c.fields.TargetRig
+		if checked[rig] {
+			continue
+		}
+		checked[rig] = true
+		if held, reason := rigParkedOrDockedFn(townRoot, rig); held {
+			if reason == "" {
+				reason = "parked"
+			}
+			holds[rig] = "rig " + reason
+		}
+	}
+	return holds
+}
+
+// blockedQueryConcurrency caps concurrent per-database bd blocked scans.
+const blockedQueryConcurrency = 4
+
 // blockedWorkQueryFn is the blocked query assessScheduledContexts uses.
 // Injected for tests.
 var blockedWorkQueryFn blockedWorkQuery = runBlockedWorkQuery
@@ -1465,8 +1518,30 @@ func listBlockedWorkBeadBlockersAndSourcesWithRunner(townRoot string, workBeadID
 	idsByBeadsDir := groupBeadIDsByResolvedBeadsDir(townRoot, workBeadIDs)
 	failCount := 0
 	var lastErr error
-	for beadsDir, groupedIDs := range idsByBeadsDir {
-		blockedOut, err := query(beadsDir, groupedIDs)
+	// Scan databases concurrently (bounded), then merge in sorted order so
+	// the result does not depend on scheduling or map iteration.
+	beadsDirs := make([]string, 0, len(idsByBeadsDir))
+	for beadsDir := range idsByBeadsDir {
+		beadsDirs = append(beadsDirs, beadsDir)
+	}
+	sort.Strings(beadsDirs)
+	outs := make([][]byte, len(beadsDirs))
+	errs := make([]error, len(beadsDirs))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, blockedQueryConcurrency)
+	for i, beadsDir := range beadsDirs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, beadsDir string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			outs[i], errs[i] = query(beadsDir, idsByBeadsDir[beadsDir])
+		}(i, beadsDir)
+	}
+	wg.Wait()
+	for i, beadsDir := range beadsDirs {
+		groupedIDs := idsByBeadsDir[beadsDir]
+		blockedOut, err := outs[i], errs[i]
 		if err != nil {
 			failCount++
 			lastErr = err

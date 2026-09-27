@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
 func writeTwoRigRoutes(t *testing.T) string {
@@ -116,7 +119,10 @@ func TestBlockedQuerySkipsDatabasesWithOnlyMissingWorkBeads(t *testing.T) {
 	info := map[string]beadStatusInfo{"a-1": {Status: "open"}, "b-1": {Status: "open"}}
 
 	queried := map[string]int{}
+	var mu sync.Mutex
 	_, _, unknown, err := listBlockedWorkBeadBlockersAndSourcesWithRunner(townRoot, foundWorkBeadIDs(ids, info), func(beadsDir string, _ []string) ([]byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		queried[beadsDir]++
 		return []byte(`[]`), nil
 	})
@@ -131,5 +137,112 @@ func TestBlockedQuerySkipsDatabasesWithOnlyMissingWorkBeads(t *testing.T) {
 	}
 	if len(queried) != 2 {
 		t.Fatalf("queried %d databases, want 2 (one per rig): %v", len(queried), queried)
+	}
+}
+
+// Parked/docked rigs are checked once per rig and their rows stay visible as
+// paused "rig parked" with the context title, without reading the work bead.
+func TestScheduledRigHoldsMarksParkedRowsWithoutReadingWork(t *testing.T) {
+	orig := rigParkedOrDockedFn
+	t.Cleanup(func() { rigParkedOrDockedFn = orig })
+	checks := map[string]int{}
+	rigParkedOrDockedFn = func(_ string, rig string) (bool, string) {
+		checks[rig]++
+		switch rig {
+		case "bridge_town_core":
+			return true, "parked"
+		case "old":
+			return true, "docked"
+		}
+		return false, ""
+	}
+	mk := func(ctxID, work, rig string) scheduledContextAssessment {
+		return scheduledContextAssessment{
+			context: slingContextRecord{issue: &beads.Issue{ID: ctxID, Title: "sling-context: " + work}},
+			fields:  &capacity.SlingContextFields{WorkBeadID: work, TargetRig: rig},
+		}
+	}
+	candidates := []scheduledContextAssessment{
+		mk("c1", "bt-1", "bridge_town_core"), mk("c2", "bt-2", "bridge_town_core"),
+		mk("c3", "hisn-1", "hisn"), mk("c4", "o-1", "old"),
+	}
+	holds := scheduledRigHolds("/town", candidates)
+	if holds["bridge_town_core"] != "rig parked" || holds["old"] != "rig docked" || holds["hisn"] != "" {
+		t.Fatalf("holds = %v", holds)
+	}
+	for rig, n := range checks {
+		if n != 1 {
+			t.Fatalf("rig %s checked %d times, want once", rig, n)
+		}
+	}
+
+	parked := candidates[0]
+	parked.rigHold = holds["bridge_town_core"]
+	rows := scheduledBeadInfosFromAssessments([]scheduledContextAssessment{parked})
+	if len(rows) != 1 {
+		t.Fatalf("parked row dropped: %v", rows)
+	}
+	row := rows[0]
+	if !row.Blocked || row.Reason != "rig parked" || row.ID != "bt-1" || row.TargetRig != "bridge_town_core" || row.Title != "sling-context: bt-1" || row.Status != "open" {
+		t.Fatalf("parked row = %+v", row)
+	}
+}
+
+// Per-database bd blocked scans run concurrently, capped, with a result that
+// does not depend on completion order.
+func TestBlockedQueriesRunConcurrentlyCappedAndDeterministic(t *testing.T) {
+	townRoot := t.TempDir()
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	var routes []beads.Route
+	var ids []string
+	for i := 0; i < 7; i++ {
+		rig := fmt.Sprintf("rig%d", i)
+		if err := os.MkdirAll(filepath.Join(townRoot, rig, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		routes = append(routes, beads.Route{Prefix: fmt.Sprintf("r%d-", i), Path: rig})
+		ids = append(ids, fmt.Sprintf("r%d-a", i))
+	}
+	if err := os.MkdirAll(townBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := beads.WriteRoutes(townBeadsDir, routes); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	inFlight, maxInFlight := 0, 0
+	query := func(_ string, grouped []string) ([]byte, error) {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		mu.Unlock()
+		time.Sleep(30 * time.Millisecond)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		// Every database reports the same shared bead with a different
+		// blocker; the merged answer must be stable across runs.
+		return []byte(fmt.Sprintf(`[{"id":"shared","blocked_by":[%q]},{"id":%q,"blocked_by":["x"]}]`, grouped[0], grouped[0])), nil
+	}
+	var first []string
+	for run := 0; run < 5; run++ {
+		blockers, _, unknown, err := listBlockedWorkBeadBlockersAndSourcesWithRunner(townRoot, ids, query)
+		if err != nil || len(unknown) != 0 {
+			t.Fatalf("err=%v unknown=%v", err, unknown)
+		}
+		if len(blockers) != 8 {
+			t.Fatalf("blockers = %v", blockers)
+		}
+		if run == 0 {
+			first = blockers["shared"]
+		} else if fmt.Sprint(blockers["shared"]) != fmt.Sprint(first) {
+			t.Fatalf("non-deterministic merge: %v vs %v", blockers["shared"], first)
+		}
+	}
+	if maxInFlight > blockedQueryConcurrency || maxInFlight < 2 {
+		t.Fatalf("max in-flight = %d, want 2..%d", maxInFlight, blockedQueryConcurrency)
 	}
 }
