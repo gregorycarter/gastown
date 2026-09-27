@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -622,5 +623,39 @@ func TestAnnotateWIPCapPausesOnlyNewWork(t *testing.T) {
 		if info.Blocked {
 			t.Fatalf("under the cap nothing is paused: %+v", info)
 		}
+	}
+}
+
+func TestSchedulerRespawnHoldSkipsLimitedFreshWorkOnly(t *testing.T) {
+	orig := shouldBlockRespawnFn
+	t.Cleanup(func() { shouldBlockRespawnFn = orig })
+	shouldBlockRespawnFn = func(_, beadID string) bool {
+		return beadID == "hisn-0xhy" || beadID == "hisn-4e4.11.106"
+	}
+	hold := schedulerRespawnHold("/town")
+	mk := func(id string, recovery bool) capacity.PendingBead {
+		fields := &capacity.SlingContextFields{WorkBeadID: id, TargetRig: "hisn"}
+		if recovery {
+			fields.ResumeMR = "hisn-wisp-mr"
+		}
+		return capacity.PendingBead{ID: "ctx-" + id, WorkBeadID: id, TargetRig: "hisn", Context: fields}
+	}
+	ready := []capacity.PendingBead{mk("hisn-0xhy", false), mk("hisn-4e4.11.106", false)}
+	for i := 0; i < 6; i++ {
+		ready = append(ready, mk(fmt.Sprintf("hisn-n%d", i), false))
+	}
+	plan, deferred := capacity.PlanDispatchWithHolds(5, 5, ready, capacity.WIPCap{}, hold)
+	if len(plan.ToDispatch) != 5 || plan.ToDispatch[0].WorkBeadID != "hisn-n0" {
+		t.Fatalf("free capacity must go to the next ready beads: %+v", plan)
+	}
+	if len(deferred) != 2 || deferred[0].Reason != "respawn-limit: reset with gt sling respawn-reset hisn-0xhy" {
+		t.Fatalf("deferred = %+v", deferred)
+	}
+	if got := hold(mk("hisn-0xhy", true)); got != "" {
+		t.Fatalf("recovery resumes an existing worker and must not be respawn-held: %q", got)
+	}
+	respawnErr := fmt.Errorf("respawn limit reached for hisn-0xhy (3 attempts). This bead keeps failing")
+	if !isDispatchDeferral(respawnErr) || isDispatchDeferral(errors.New("formula failed")) {
+		t.Fatal("only respawn-limit errors are dispatch deferrals")
 	}
 }

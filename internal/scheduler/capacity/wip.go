@@ -1,6 +1,9 @@
 package capacity
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // WIPCap is the per-rig work-in-progress limit on unlanded merge requests.
 // When a rig's pending-MR count reaches its limit, dispatch of NEW work for
@@ -15,12 +18,23 @@ type WIPCap struct {
 	ExemptLabels []string
 }
 
-// WIPDeferral records one bead held back by the WIP cap.
-type WIPDeferral struct {
+// Deferral records one ready bead held back at planning time. Held beads never
+// enter the batch, so they cannot use up a batch or capacity slot.
+type Deferral struct {
 	Bead   PendingBead
 	Rig    string
+	Kind   string // "wip-cap" | "respawn-limit"
 	Reason string
 }
+
+// WIPDeferral is kept as an alias for readability at WIP-cap call sites.
+type WIPDeferral = Deferral
+
+// Deferral kinds.
+const (
+	DeferralWIPCap       = "wip-cap"
+	DeferralRespawnLimit = "respawn-limit"
+)
 
 // WIPCapReason renders the deferral reason for a rig at its cap.
 func WIPCapReason(pending, limit int) string {
@@ -80,25 +94,61 @@ func (w WIPCap) Apply(ready []PendingBead) ([]PendingBead, []WIPDeferral) {
 			admitted = append(admitted, b)
 			continue
 		}
-		deferred = append(deferred, WIPDeferral{Bead: b, Rig: b.TargetRig, Reason: reason})
+		deferred = append(deferred, Deferral{Bead: b, Rig: b.TargetRig, Kind: DeferralWIPCap, Reason: reason})
 	}
 	return admitted, deferred
 }
 
-// PlanDispatchWithWIPCap applies the WIP cap and then PlanDispatch. Deferred
-// beads count as skipped; when the cap held back beads the reason carries
-// "wip-cap" ("wip-cap" alone when nothing else was dispatchable).
-func PlanDispatchWithWIPCap(availableCapacity, batchSize int, ready []PendingBead, wip WIPCap) (DispatchPlan, []WIPDeferral) {
-	admitted, deferred := wip.Apply(ready)
+// HoldReady splits ready into beads admitted for planning and beads held by
+// hold (a non-empty reason holds the bead). Order is preserved.
+func HoldReady(ready []PendingBead, kind string, hold func(PendingBead) string) ([]PendingBead, []Deferral) {
+	if hold == nil {
+		return ready, nil
+	}
+	var admitted []PendingBead
+	var held []Deferral
+	for _, b := range ready {
+		if reason := hold(b); reason != "" {
+			held = append(held, Deferral{Bead: b, Rig: b.TargetRig, Kind: kind, Reason: reason})
+			continue
+		}
+		admitted = append(admitted, b)
+	}
+	return admitted, held
+}
+
+// PlanDispatchWithWIPCap applies the WIP cap and then PlanDispatch.
+func PlanDispatchWithWIPCap(availableCapacity, batchSize int, ready []PendingBead, wip WIPCap) (DispatchPlan, []Deferral) {
+	return PlanDispatchWithHolds(availableCapacity, batchSize, ready, wip, nil)
+}
+
+// PlanDispatchWithHolds removes per-bead holds before planning: first beads
+// whose respawn limit is exhausted (respawnHold returns a reason), then beads
+// held by the rig's WIP cap. Held beads count as skipped and never occupy a
+// batch or capacity slot, so the next ready beads are planned in their place.
+// The plan reason carries each hold kind ("wip-cap", "respawn-limit"), alone
+// when nothing else was dispatchable or as a "+kind" suffix otherwise.
+func PlanDispatchWithHolds(availableCapacity, batchSize int, ready []PendingBead, wip WIPCap, respawnHold func(PendingBead) string) (DispatchPlan, []Deferral) {
+	admitted, deferred := HoldReady(ready, DeferralRespawnLimit, respawnHold)
+	admitted, wipDeferred := wip.Apply(admitted)
+	deferred = append(deferred, wipDeferred...)
 	if len(deferred) == 0 {
 		return PlanDispatch(availableCapacity, batchSize, ready), nil
+	}
+	var kinds []string
+	seen := map[string]bool{}
+	for _, d := range deferred {
+		if !seen[d.Kind] {
+			seen[d.Kind] = true
+			kinds = append(kinds, d.Kind)
+		}
 	}
 	plan := PlanDispatch(availableCapacity, batchSize, admitted)
 	plan.Skipped += len(deferred)
 	if len(admitted) == 0 || plan.Reason == "none" {
-		plan.Reason = "wip-cap"
+		plan.Reason = strings.Join(kinds, "+")
 	} else {
-		plan.Reason += "+wip-cap"
+		plan.Reason += "+" + strings.Join(kinds, "+")
 	}
 	return plan, deferred
 }

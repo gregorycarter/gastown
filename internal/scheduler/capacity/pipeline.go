@@ -99,8 +99,14 @@ func FilterMessagingBeads(beads []PendingBead) ([]PendingBead, int) {
 // DispatchPlan is the output of PlanDispatch — what to dispatch and why.
 type DispatchPlan struct {
 	ToDispatch []PendingBead
-	Skipped    int
-	Reason     string // "capacity" | "batch" | "ready" | "none"
+	// Backfill holds the remaining ready beads, in order, beyond ToDispatch.
+	// When a planned bead is deferred at dispatch time (see
+	// DispatchCycle.IsDeferral) its slot is not used up; RunPlan pulls the
+	// next Backfill bead instead, so one stuck bead at the head of the queue
+	// cannot starve the rest of it.
+	Backfill []PendingBead
+	Skipped  int
+	Reason   string // "capacity" | "batch" | "ready" | "none"
 }
 
 // FailureAction indicates what to do after a dispatch failure.
@@ -186,8 +192,13 @@ func PlanDispatch(availableCapacity, batchSize int, ready []PendingBead) Dispatc
 		reason = reason + "+messaging-filtered"
 	}
 
+	var backfill []PendingBead
+	if toDispatch < len(ready) {
+		backfill = append([]PendingBead(nil), ready[toDispatch:]...)
+	}
 	return DispatchPlan{
 		ToDispatch: ready[:toDispatch],
+		Backfill:   backfill,
 		Skipped:    skipped,
 		Reason:     reason,
 	}

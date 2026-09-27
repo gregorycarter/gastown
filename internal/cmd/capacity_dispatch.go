@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/witness"
 )
 
 // crossRigEscalationDebounce is the minimum interval between cross-rig prefix
@@ -84,7 +85,37 @@ type schedulerDispatchPlan struct {
 	Assessments []scheduledContextAssessment
 	Ready       []capacity.PendingBead
 	Plan        capacity.DispatchPlan
-	WIPDeferred []capacity.WIPDeferral
+	WIPDeferred []capacity.Deferral
+}
+
+// shouldBlockRespawnFn is the per-bead respawn circuit breaker check (the one
+// spawnPolecatForSling enforces). Injected for tests.
+var shouldBlockRespawnFn = witness.ShouldBlockRespawn
+
+// respawnLimitReason explains a respawn-limited bead.
+func respawnLimitReason(workBeadID string) string {
+	return "respawn-limit: reset with gt sling respawn-reset " + workBeadID
+}
+
+// schedulerRespawnHold returns the planning-time respawn-limit hold. Only
+// fresh spawns hit the respawn breaker; same-worker recovery contexts resume
+// an existing polecat and are never held here.
+func schedulerRespawnHold(townRoot string) func(capacity.PendingBead) string {
+	return func(b capacity.PendingBead) string {
+		if b.Context != nil && b.Context.IsRecovery() {
+			return ""
+		}
+		if b.WorkBeadID == "" || !shouldBlockRespawnFn(townRoot, b.WorkBeadID) {
+			return ""
+		}
+		return respawnLimitReason(b.WorkBeadID)
+	}
+}
+
+// isDispatchDeferral reports whether a dispatch error only defers this bead:
+// its slot goes to the next ready bead in the same cycle.
+func isDispatchDeferral(err error) bool {
+	return classifyDispatchFailure(err) == dispatchFailureRespawnLimit
 }
 
 // loadSchedulerConfig returns the town scheduler config, or the defaults when
@@ -110,6 +141,19 @@ func schedulerWIPCap(cfg *capacity.SchedulerConfig, snapshot polecatCapacitySnap
 	}
 }
 
+// annotateRespawnLimit marks ready assessments whose respawn limit is
+// exhausted, so list/status show them paused with the reset command.
+func annotateRespawnLimit(assessments []scheduledContextAssessment, hold func(capacity.PendingBead) string) {
+	for i := range assessments {
+		a := &assessments[i]
+		a.respawnLimited = ""
+		if !a.ready || a.fields == nil || hold == nil {
+			continue
+		}
+		a.respawnLimited = hold(pendingBeadFromAssessment(*a))
+	}
+}
+
 // annotateWIPCap marks ready assessments that the WIP cap holds back, so
 // `gt scheduler list/status` show them as paused with the wip-cap reason.
 func annotateWIPCap(assessments []scheduledContextAssessment, wip capacity.WIPCap) {
@@ -132,11 +176,16 @@ func annotateWIPCap(assessments []scheduledContextAssessment, wip capacity.WIPCa
 
 // printWIPDeferrals logs one line per rig held by the WIP cap, in the same
 // shape as the daemon's pressure deferrals.
-func printWIPDeferrals(deferred []capacity.WIPDeferral) {
+func printWIPDeferrals(deferred []capacity.Deferral) {
 	byRig := map[string][]string{}
 	reasons := map[string]string{}
 	var rigs []string
 	for _, d := range deferred {
+		if d.Kind == capacity.DeferralRespawnLimit {
+			fmt.Printf("%s Skipping %s (%s); trying the next ready bead\n",
+				style.Dim.Render("⏸"), d.Bead.WorkBeadID, d.Reason)
+			continue
+		}
 		if _, seen := byRig[d.Rig]; !seen {
 			rigs = append(rigs, d.Rig)
 		}
@@ -206,9 +255,11 @@ func buildSchedulerDispatchPlan(townRoot string, batchOverride int, cleanup bool
 	}
 
 	wipCap := schedulerWIPCap(schedulerCfg, snapshot)
+	respawnHold := schedulerRespawnHold(townRoot)
+	annotateRespawnLimit(assessments, respawnHold)
 	annotateWIPCap(assessments, wipCap)
 	ready := readySlingContextsFromAssessments(assessments)
-	dispatchPlan, wipDeferred := capacity.PlanDispatchWithWIPCap(snapshot.Free, batchSize, ready, wipCap)
+	dispatchPlan, wipDeferred := capacity.PlanDispatchWithHolds(snapshot.Free, batchSize, ready, wipCap, respawnHold)
 	if len(ready) > 0 {
 		switch {
 		case state.Paused:
@@ -373,6 +424,14 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 			admitted = append(admitted, pending)
 		}
 		dispatchPlan.Plan.ToDispatch = admitted
+		var backfill []capacity.PendingBead
+		for _, pending := range dispatchPlan.Plan.Backfill {
+			if pending.Context != nil && pending.Context.IsRecovery() {
+				continue // already counted in Skipped by the planner
+			}
+			backfill = append(backfill, pending)
+		}
+		dispatchPlan.Plan.Backfill = backfill
 	}
 	successfulRigs := make(map[string]bool)
 	// Track polecat names from dispatch results, keyed by context bead ID.
@@ -434,6 +493,7 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 			}
 			recordDispatchFailure(beadsForPendingContext(townRoot, b), b, err)
 		},
+		IsDeferral: isDispatchDeferral,
 		SpawnDelay: dispatchPlan.SpawnDelay,
 	}
 
@@ -441,7 +501,7 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 	if err != nil {
 		return 0, fmt.Errorf("dispatch cycle failed: %w", err)
 	}
-	if len(dispatchPlan.Plan.ToDispatch) > 0 && report.Dispatched == 0 && report.Failed == 0 {
+	if len(dispatchPlan.Plan.ToDispatch) > 0 && report.Dispatched == 0 && report.Failed == 0 && report.Deferred == 0 {
 		return 0, fmt.Errorf("scheduler dispatch invariant violation: plan had %d dispatchable bead(s) but no dispatch result", len(dispatchPlan.Plan.ToDispatch))
 	}
 
@@ -463,9 +523,9 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		}
 	}
 
-	if report.Dispatched > 0 || report.Failed > 0 {
-		fmt.Printf("\n%s Dispatched %d, failed %d (reason: %s)\n",
-			style.Bold.Render("✓"), report.Dispatched, report.Failed, report.Reason)
+	if report.Dispatched > 0 || report.Failed > 0 || report.Deferred > 0 {
+		fmt.Printf("\n%s Dispatched %d, failed %d, deferred %d (reason: %s)\n",
+			style.Bold.Render("✓"), report.Dispatched, report.Failed, report.Deferred, report.Reason)
 	} else if report.Skipped > 0 {
 		printDispatchNoOp(report, dispatchPlan.Capacity)
 	} else if !isDaemonDispatch() {
@@ -501,6 +561,9 @@ func printDispatchNoOp(report capacity.DispatchReport, snapshot polecatCapacityS
 	case "wip-cap":
 		fmt.Printf("\n%s WIP cap: %d ready bead(s) deferred until pending MRs land\n",
 			style.Dim.Render("⏸"), report.Skipped)
+	case "respawn-limit", "respawn-limit+wip-cap":
+		fmt.Printf("\n%s No dispatchable beads: %d ready bead(s) held (reason: %s)\n",
+			style.Dim.Render("⏸"), report.Skipped, report.Reason)
 	case "capacity":
 		fmt.Printf("\n%s No capacity: %d ready bead(s) waiting (working: %d recovery_blocked: %d reservations: %d reusable_idle: %d pending_mr: %d)\n",
 			style.Dim.Render("○"), report.Skipped, snapshot.Working, snapshot.RecoveryBlocked, snapshot.Reservations, snapshot.ReusableIdle, snapshot.PendingMR)
@@ -591,6 +654,9 @@ type scheduledContextAssessment struct {
 	// wipDeferred is the WIP-cap reason when the row is ready but its rig
 	// is at scheduler.max_pending_mrs; "" otherwise.
 	wipDeferred string
+	// respawnLimited is the hold reason when the row is ready but its
+	// per-bead respawn limit is exhausted; "" otherwise.
+	respawnLimited string
 }
 
 // pauseReason explains, in one short phrase, why `gt scheduler list` shows a
@@ -598,6 +664,9 @@ type scheduledContextAssessment struct {
 // every silent stall; every non-ready row must be able to say why.
 func (a scheduledContextAssessment) pauseReason() string {
 	if a.ready {
+		if a.respawnLimited != "" {
+			return a.respawnLimited
+		}
 		return a.wipDeferred
 	}
 	if a.recoveryError != "" {

@@ -72,6 +72,12 @@ type DispatchCycle struct {
 	// OnFailure is called after failed dispatch.
 	OnFailure func(PendingBead, error)
 
+	// IsDeferral reports whether a dispatch error is a per-bead deferral
+	// (e.g. the bead's respawn limit) rather than a failure or back-pressure.
+	// A deferred bead does not use up its batch/capacity slot: RunPlan moves
+	// on to the next plan.Backfill bead in the same cycle. nil = no deferrals.
+	IsDeferral func(error) bool
+
 	// BatchSize caps items dispatched per cycle.
 	BatchSize int
 
@@ -83,8 +89,11 @@ type DispatchCycle struct {
 type DispatchReport struct {
 	Dispatched int
 	Failed     int
-	Skipped    int
-	Reason     string // "capacity" | "batch" | "ready" | "none"
+	// Deferred counts beads skipped at dispatch time by IsDeferral; their
+	// slots were offered to the next ready beads.
+	Deferred int
+	Skipped  int
+	Reason   string // "capacity" | "batch" | "ready" | "none"
 }
 
 // Plan returns the dispatch plan without executing. Used for dry-run.
@@ -122,9 +131,37 @@ func (c *DispatchCycle) RunPlan(plan DispatchPlan) (DispatchReport, error) {
 		Reason:  plan.Reason,
 	}
 
-	for i, b := range plan.ToDispatch {
+	// Each planned bead holds one slot. A success or a genuine failure uses
+	// the slot; a deferral releases it to the next backfill candidate.
+	slots := len(plan.ToDispatch)
+	candidates := make([]PendingBead, 0, len(plan.ToDispatch)+len(plan.Backfill))
+	candidates = append(candidates, plan.ToDispatch...)
+	candidates = append(candidates, plan.Backfill...)
+	used := 0
+	for i := 0; i < len(candidates) && used < slots; i++ {
+		b := candidates[i]
+		if i >= len(plan.ToDispatch) && report.Skipped > 0 {
+			// A backfill bead is now attempted instead of skipped.
+			report.Skipped--
+		}
+		deferred := func(err error) bool {
+			if c.IsDeferral == nil || !c.IsDeferral(err) {
+				return false
+			}
+			report.Deferred++
+			report.Skipped++
+			if c.OnFailure != nil {
+				c.OnFailure(b, err)
+			}
+			return true
+		}
+
 		if c.Validate != nil {
 			if err := c.Validate(b); err != nil {
+				if deferred(err) {
+					continue
+				}
+				used++
 				report.Failed++
 				if c.OnFailure != nil {
 					c.OnFailure(b, err)
@@ -134,12 +171,17 @@ func (c *DispatchCycle) RunPlan(plan DispatchPlan) (DispatchReport, error) {
 		}
 
 		if err := c.Execute(b); err != nil {
+			if deferred(err) {
+				continue
+			}
+			used++
 			report.Failed++
 			if c.OnFailure != nil {
 				c.OnFailure(b, err)
 			}
 			continue
 		}
+		used++
 
 		// OnSuccess must succeed (e.g., closing the sling context) to prevent
 		// re-dispatch on the next cycle. Retry before giving up.
@@ -168,8 +210,8 @@ func (c *DispatchCycle) RunPlan(plan DispatchPlan) (DispatchReport, error) {
 
 		report.Dispatched++
 
-		// Inter-spawn delay (skip after last item)
-		if c.SpawnDelay > 0 && i < len(plan.ToDispatch)-1 {
+		// Inter-spawn delay (skip after the last slot)
+		if c.SpawnDelay > 0 && used < slots && i < len(candidates)-1 {
 			time.Sleep(c.SpawnDelay)
 		}
 	}

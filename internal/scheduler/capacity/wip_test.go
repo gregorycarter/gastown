@@ -2,6 +2,7 @@ package capacity
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -124,5 +125,105 @@ func TestGetMaxPendingMRs(t *testing.T) {
 	}
 	if got := (&SchedulerConfig{WIPCapExemptLabels: []string{}}).GetWIPCapExemptLabels(); len(got) != 0 {
 		t.Fatalf("explicit empty exempt list must stay empty: %v", got)
+	}
+}
+
+func readyQueue(ids ...string) []PendingBead {
+	var out []PendingBead
+	for _, id := range ids {
+		out = append(out, newWork(id))
+	}
+	return out
+}
+
+func workIDs(beads []PendingBead) string {
+	var ids []string
+	for _, b := range beads {
+		ids = append(ids, b.WorkBeadID)
+	}
+	return strings.Join(ids, ",")
+}
+
+// Two respawn-limited beads at the head of the queue must not starve the rest:
+// 2026-09-27 06:13–07:05Z hisn dispatched nothing with 22 ready and 5 free.
+func TestPlanDispatchWithHoldsSkipsRespawnLimitedHead(t *testing.T) {
+	ready := readyQueue("hisn-0xhy", "hisn-4e4.11.106", "hisn-a", "hisn-b", "hisn-c", "hisn-d")
+	limited := map[string]bool{"hisn-0xhy": true, "hisn-4e4.11.106": true}
+	hold := func(b PendingBead) string {
+		if limited[b.WorkBeadID] {
+			return "respawn-limit"
+		}
+		return ""
+	}
+	plan, deferred := PlanDispatchWithHolds(5, 3, ready, wipTestCap(0, 8), hold)
+	if got := workIDs(plan.ToDispatch); got != "hisn-a,hisn-b,hisn-c" {
+		t.Fatalf("planned %s, want the next ready beads", got)
+	}
+	if len(deferred) != 2 || deferred[0].Kind != DeferralRespawnLimit {
+		t.Fatalf("deferred = %+v", deferred)
+	}
+	if plan.Reason != "batch+respawn-limit" || plan.Skipped != 3 {
+		t.Fatalf("plan = %+v", plan)
+	}
+
+	// Recovery is never classified by the hold itself; callers decide. A
+	// queue made only of held beads reports the hold as the reason.
+	plan, _ = PlanDispatchWithHolds(5, 3, readyQueue("hisn-0xhy"), wipTestCap(0, 8), hold)
+	if plan.Reason != "respawn-limit" || len(plan.ToDispatch) != 0 {
+		t.Fatalf("all-held plan = %+v", plan)
+	}
+}
+
+// Dispatch-time deferral (the bead's respawn limit tripped after planning)
+// releases the slot to the next ready bead in the same cycle.
+func TestRunPlanBackfillsDeferredBeads(t *testing.T) {
+	errRespawn := errors.New("respawn limit reached for x (3 attempts)")
+	ready := readyQueue("hisn-0xhy", "hisn-4e4.11.106", "hisn-a", "hisn-b", "hisn-c")
+	plan := PlanDispatch(5, 2, ready)
+	var dispatched []string
+	var failures []string
+	cycle := &DispatchCycle{
+		IsDeferral: func(err error) bool { return errors.Is(err, errRespawn) },
+		Execute: func(b PendingBead) error {
+			if b.WorkBeadID == "hisn-0xhy" || b.WorkBeadID == "hisn-4e4.11.106" {
+				return errRespawn
+			}
+			dispatched = append(dispatched, b.WorkBeadID)
+			return nil
+		},
+		OnFailure: func(b PendingBead, err error) { failures = append(failures, b.WorkBeadID) },
+	}
+	report, err := cycle.RunPlan(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(dispatched, ",") != "hisn-a,hisn-b" {
+		t.Fatalf("dispatched %v, want hisn-a,hisn-b", dispatched)
+	}
+	if report.Dispatched != 2 || report.Failed != 0 || report.Deferred != 2 || report.Skipped != 3 {
+		t.Fatalf("report = %+v", report)
+	}
+	if strings.Join(failures, ",") != "hisn-0xhy,hisn-4e4.11.106" {
+		t.Fatalf("OnFailure must still see deferrals for logging: %v", failures)
+	}
+}
+
+// A genuine failure still uses its slot: backfill is only for deferrals.
+func TestRunPlanGenuineFailureUsesSlot(t *testing.T) {
+	plan := PlanDispatch(5, 2, readyQueue("hisn-bad", "hisn-a", "hisn-b"))
+	var dispatched []string
+	cycle := &DispatchCycle{
+		IsDeferral: func(error) bool { return false },
+		Execute: func(b PendingBead) error {
+			if b.WorkBeadID == "hisn-bad" {
+				return errors.New("formula failed")
+			}
+			dispatched = append(dispatched, b.WorkBeadID)
+			return nil
+		},
+	}
+	report, _ := cycle.RunPlan(plan)
+	if strings.Join(dispatched, ",") != "hisn-a" || report.Failed != 1 || report.Deferred != 0 || report.Skipped != 1 {
+		t.Fatalf("dispatched=%v report=%+v", dispatched, report)
 	}
 }
