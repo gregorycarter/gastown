@@ -75,10 +75,12 @@ type SchedulerConfig struct {
 const DefaultMaxPendingMRs = 8
 
 // DefaultWIPCapExemptLabels mark work that unblocks landing (tracked release
-// remediation, CI train failures) and therefore must not wait behind the cap.
+// remediation, CI train failures, fixes to the landing machinery itself) and
+// therefore must not wait behind the cap.
 var DefaultWIPCapExemptLabels = []string{
 	"release-remediation",
 	"ci-train-failure",
+	"landing-unblock",
 }
 
 // GetMaxPendingMRs returns the WIP cap for rig: the per-rig override when
