@@ -796,9 +796,46 @@ func beadStatusInfoFromBeadInfo(info *beadInfo) beadStatusInfo {
 	}
 }
 
+// bdShowBatchSize bounds the IDs passed to one `bd show --json` call so a
+// large queue never builds an unbounded argv; each chunk is one bd round-trip.
+const bdShowBatchSize = 40
+
+// bdShowBatchFn runs one batched `bd show --json <ids...>` against beadsDir.
+// Injected for tests.
+var bdShowBatchFn = func(beadsDir string, ids []string) ([]byte, error) {
+	// Use Beads wrapper to get proper BEADS_DIR resolution, --allow-stale,
+	// and BEADS_DOLT_PORT translation (matching how all other bd-invoking
+	// functions work).
+	b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
+	args := append([]string{"show", "--json"}, ids...)
+	return b.Run(args...)
+}
+
+// beadInfoFallbackFn is the per-ID lookup used only for IDs the routed batch
+// did not return. Injected for tests.
+var beadInfoFallbackFn = getBeadInfoFromTownRoot
+
+// chunkIDs splits ids into consecutive slices of at most size elements.
+func chunkIDs(ids []string, size int) [][]string {
+	if size <= 0 {
+		size = len(ids)
+	}
+	var chunks [][]string
+	for start := 0; start < len(ids); start += size {
+		end := start + size
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunks = append(chunks, ids[start:end])
+	}
+	return chunks
+}
+
 // batchFetchBeadInfoByIDs returns a map of bead ID → status+title+labels for specific beads.
 // Uses `bd show` with multiple IDs per rig directory instead of fetching all beads.
 // This avoids the O(minutes) latency of `bd list --all --json --limit=0` on large repos.
+// IDs are grouped by their routed beads dir and chunked (bdShowBatchSize), so
+// the command costs ceil(N/bdShowBatchSize) bd calls per database.
 func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatusInfo {
 	result := make(map[string]beadStatusInfo)
 	if len(ids) == 0 {
@@ -807,38 +844,41 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 
 	requestedIDs := uniqueNonEmptyIDs(ids)
 	idsByBeadsDir := groupBeadIDsByResolvedBeadsDir(townRoot, requestedIDs)
-	for beadsDir, groupedIDs := range idsByBeadsDir {
-		// Use Beads wrapper to get proper BEADS_DIR resolution, --allow-stale,
-		// and BEADS_DOLT_PORT translation (matching how all other bd-invoking
-		// functions work). Route IDs directly instead of trying every beads dir;
-		// scheduler status/list/run sit on operator hot paths, and repeated bd show
+	beadsDirs := make([]string, 0, len(idsByBeadsDir))
+	for beadsDir := range idsByBeadsDir {
+		beadsDirs = append(beadsDirs, beadsDir)
+	}
+	sort.Strings(beadsDirs)
+	for _, beadsDir := range beadsDirs {
+		// Route IDs directly instead of trying every beads dir; scheduler
+		// status/list/run sit on operator hot paths, and repeated bd show
 		// fanout dominates latency in large towns.
-		b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
-		args := append([]string{"show", "--json"}, groupedIDs...)
-		out, err := b.Run(args...)
-		if err != nil {
-			continue
-		}
-		var items []struct {
-			ID        string   `json:"id"`
-			Status    string   `json:"status"`
-			Title     string   `json:"title"`
-			Labels    []string `json:"labels"`
-			Assignee  string   `json:"assignee"`
-			Priority  int      `json:"priority"`
-			CreatedAt string   `json:"created_at"`
-		}
-		if err := json.Unmarshal(out, &items); err != nil {
-			continue
-		}
-		for _, item := range items {
-			result[item.ID] = beadStatusInfo{
-				Status:    item.Status,
-				Title:     item.Title,
-				Labels:    item.Labels,
-				Assignee:  item.Assignee,
-				Priority:  item.Priority,
-				CreatedAt: item.CreatedAt,
+		for _, chunk := range chunkIDs(idsByBeadsDir[beadsDir], bdShowBatchSize) {
+			out, err := bdShowBatchFn(beadsDir, chunk)
+			if err != nil {
+				continue
+			}
+			var items []struct {
+				ID        string   `json:"id"`
+				Status    string   `json:"status"`
+				Title     string   `json:"title"`
+				Labels    []string `json:"labels"`
+				Assignee  string   `json:"assignee"`
+				Priority  int      `json:"priority"`
+				CreatedAt string   `json:"created_at"`
+			}
+			if err := json.Unmarshal(out, &items); err != nil {
+				continue
+			}
+			for _, item := range items {
+				result[item.ID] = beadStatusInfo{
+					Status:    item.Status,
+					Title:     item.Title,
+					Labels:    item.Labels,
+					Assignee:  item.Assignee,
+					Priority:  item.Priority,
+					CreatedAt: item.CreatedAt,
+				}
 			}
 		}
 	}
@@ -847,7 +887,7 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 		if _, found := result[id]; found {
 			continue
 		}
-		info, err := getBeadInfoFromTownRoot(townRoot, id)
+		info, err := beadInfoFallbackFn(townRoot, id)
 		if err != nil {
 			continue
 		}
@@ -924,7 +964,13 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 	})
 
 	workBeadInfo := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
-	blockers, blockedSources, blockedUnknownIDs, blockedErr := listBlockedWorkBeadBlockersAndSourcesWithRunner(townRoot, workBeadIDs, runBlockedWorkQuery)
+	// Only databases that hold a found work bead need a `bd blocked` scan. A
+	// missing ID is never ready and already reports "work bead not found";
+	// routing it (e.g. "[deleted:...]" falls back to the town DB) used to
+	// trigger a whole-database bd blocked scan of HQ that dominated status
+	// latency (hisn-4s8b.2).
+	blockedQueryIDs := foundWorkBeadIDs(workBeadIDs, workBeadInfo)
+	blockers, blockedSources, blockedUnknownIDs, blockedErr := listBlockedWorkBeadBlockersAndSourcesWithRunner(townRoot, blockedQueryIDs, blockedWorkQueryFn)
 	blockedWorkIDs := make(map[string]bool, len(blockers))
 	for id := range blockers {
 		blockedWorkIDs[id] = true
@@ -1361,6 +1407,21 @@ func listAllSlingContextRecords(townRoot string) ([]slingContextRecord, error) {
 }
 
 type blockedWorkQuery func(beadsDir string, groupedIDs []string) ([]byte, error)
+
+// blockedWorkQueryFn is the blocked query assessScheduledContexts uses.
+// Injected for tests.
+var blockedWorkQueryFn blockedWorkQuery = runBlockedWorkQuery
+
+// foundWorkBeadIDs returns the IDs present in info, preserving order.
+func foundWorkBeadIDs(ids []string, info map[string]beadStatusInfo) []string {
+	found := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := info[id]; ok {
+			found = append(found, id)
+		}
+	}
+	return found
+}
 
 func runBlockedWorkQuery(beadsDir string, _ []string) ([]byte, error) {
 	// Use Beads wrapper to get proper BEADS_DIR resolution, --allow-stale,

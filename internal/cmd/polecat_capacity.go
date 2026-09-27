@@ -261,6 +261,12 @@ func configuredSchedulerMaxPolecats(townRoot string) (int, error) {
 	return schedulerCfg.GetMaxPolecats(), nil
 }
 
+// listAgentBeadsFn lists the town agent beads for the capacity snapshot.
+// Injected for tests.
+var listAgentBeadsFn = func(b *beads.Beads) (map[string]*beads.Issue, error) {
+	return b.ListAgentBeads()
+}
+
 func polecatCapacitySnapshotForTown(townRoot string) (polecatCapacitySnapshot, error) {
 	max, err := configuredSchedulerMaxPolecats(townRoot)
 	if err != nil {
@@ -296,6 +302,7 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		return snapshot, fmt.Errorf("listing tmux sessions for polecat capacity: %w", err)
 	}
 	sessions := newPolecatSessionSet(sessionNames)
+	var agents map[string]*beads.Issue
 	for rigName := range rigsConfig.Rigs {
 		rigPath := filepath.Join(townRoot, rigName)
 		if _, err := os.Stat(rigPath); err != nil {
@@ -313,9 +320,14 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		}
 
 		rigBeads := beads.New(rigPath)
-		agents, err := rigBeads.ListAgentBeads()
-		if err != nil {
-			return snapshot, fmt.Errorf("listing agent beads for %s capacity: %w", rigName, err)
+		// Agent beads are town-owned: every rig client routes ListAgentBeads
+		// to the same town database, so read them once per snapshot instead
+		// of once per rig (hisn-4s8b.2).
+		if agents == nil {
+			agents, err = listAgentBeadsFn(rigBeads)
+			if err != nil {
+				return snapshot, fmt.Errorf("listing agent beads for %s capacity: %w", rigName, err)
+			}
 		}
 		activeWork, err := listActivePolecatWorkByName(rigBeads, rigName)
 		if err != nil {
