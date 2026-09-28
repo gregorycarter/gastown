@@ -341,8 +341,21 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 // resume). Recovery drains the merge queue instead of adding to it, so the
 // daemon still admits it while host pressure defers new work.
 func recoveryOnlyFilter(b capacity.PendingBead) bool {
-	return b.Context != nil && b.Context.IsRecovery()
+	if b.Context != nil && b.Context.IsRecovery() {
+		return true
+	}
+	// Fixes to the landing machinery itself unblock the merge queue, so they
+	// are admitted under pressure like recovery (operator policy 2026-09-28).
+	for _, label := range b.Labels {
+		if label == pressureAdmitLabel {
+			return true
+		}
+	}
+	return false
 }
+
+// pressureAdmitLabel marks new work that host pressure must not defer.
+const pressureAdmitLabel = "landing-unblock"
 
 // filterDispatchPlan keeps only beads that keep returns true for, refilling the
 // planned slots from the backfill so a matching bead deeper in the queue still

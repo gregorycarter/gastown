@@ -33,3 +33,15 @@ func TestFilterDispatchPlanNilKeepsPlan(t *testing.T) {
 		t.Fatalf("nil filter changed plan: %+v", plan)
 	}
 }
+
+func TestRecoveryOnlyFilterAdmitsLandingUnblock(t *testing.T) {
+	fresh := capacity.PendingBead{ID: "a", Context: &capacity.SlingContextFields{}}
+	unblock := capacity.PendingBead{ID: "b", Context: &capacity.SlingContextFields{}, Labels: []string{"m1d", "landing-unblock"}}
+	other := capacity.PendingBead{ID: "c", Context: &capacity.SlingContextFields{}, Labels: []string{"m1d"}}
+	if recoveryOnlyFilter(fresh) || recoveryOnlyFilter(other) {
+		t.Fatal("ordinary new work must stay deferred under pressure")
+	}
+	if !recoveryOnlyFilter(unblock) {
+		t.Fatal("landing-unblock work must be admitted under pressure")
+	}
+}
