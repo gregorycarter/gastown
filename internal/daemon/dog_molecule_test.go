@@ -1,199 +1,114 @@
 package daemon
 
 import (
-	"reflect"
+	"bytes"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
-func TestParseWispID(t *testing.T) {
-	tests := []struct {
-		name   string
-		input  string
-		wantID string
-	}{
-		{
-			name:   "standard wisp output",
-			input:  "✓ Spawned wisp: gt-wisp-abc123 — Reap stale wisps",
-			wantID: "gt-wisp-abc123",
-		},
-		{
-			name:   "wisp ID with ANSI codes",
-			input:  "\033[32m✓\033[0m Spawned wisp: \033[1mgt-wisp-xyz789\033[0m — Title",
-			wantID: "gt-wisp-xyz789",
-		},
-		{
-			name:   "empty output",
-			input:  "",
-			wantID: "",
-		},
-		{
-			name:   "no wisp ID in output",
-			input:  "Error: something went wrong",
-			wantID: "",
-		},
-		{
-			name:   "wisp ID at end of line",
-			input:  "Created gt-wisp-def456",
-			wantID: "gt-wisp-def456",
-		},
+// fakeBdRecorder installs a bd stand-in that records every invocation.
+func fakeBdRecorder(t *testing.T) (bdPath, marker string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stub")
 	}
+	dir := t.TempDir()
+	marker = filepath.Join(dir, "invoked")
+	bdPath = filepath.Join(dir, "bd")
+	script := "#!/bin/sh\necho \"$@\" >> " + marker + "\necho 'Spawned wisp: hq-wisp-fake1'\n"
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bdPath, marker
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := parseWispID(tt.input)
-			if got != tt.wantID {
-				t.Errorf("parseWispID(%q) = %q, want %q", tt.input, got, tt.wantID)
-			}
-		})
+// Dog runs must not create wisps: pouring a persistent molecule on every
+// periodic run leaked ~2,500 wisps/day in hq (blocked step chains could not be
+// closed in listing order, and the root then refused to close).
+func TestDogMolDoesNotCreateWisps(t *testing.T) {
+	bdPath, marker := fakeBdRecorder(t)
+	d := &Daemon{logger: log.New(io.Discard, "", 0), bdPath: bdPath}
+
+	mol := d.pourDogMolecule("mol-dog-doctor", map[string]string{"port": "3307"})
+	mol.closeStep("probe")
+	mol.failStep("inspect", "boom")
+	mol.closeStep("report")
+	mol.close()
+
+	if _, err := os.Stat(marker); err == nil {
+		got, _ := os.ReadFile(marker)
+		t.Fatalf("dog molecule invoked bd (would create wisps): %s", got)
 	}
 }
 
-func TestStripANSI(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{"no ANSI", "hello", "hello"},
-		{"color code", "\033[32mgreen\033[0m", "green"},
-		{"bold", "\033[1mbold\033[0m", "bold"},
-		{"multiple codes", "\033[32m✓\033[0m \033[1mtext\033[0m", "✓ text"},
-		{"empty", "", ""},
-	}
+func TestDogMolLogsFailedStepsOnceOnClose(t *testing.T) {
+	var buf bytes.Buffer
+	d := &Daemon{logger: log.New(&buf, "", 0)}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := stripANSI(tt.input)
-			if got != tt.want {
-				t.Errorf("stripANSI(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
+	mol := d.pourDogMolecule("mol-dog-jsonl", nil)
+	mol.closeStep("export")
+	mol.failStep("push", "spike detected")
+	mol.closeStep("push") // a later close must not hide the failure
+	mol.close()
+	mol.close() // idempotent: deferred close plus explicit close
+
+	out := buf.String()
+	if strings.Count(out, "dog_run:") != 1 {
+		t.Fatalf("want exactly one dog_run line, got %q", out)
+	}
+	if !strings.Contains(out, "mol-dog-jsonl") || !strings.Contains(out, "push: spike detected") {
+		t.Fatalf("missing formula or failure reason: %q", out)
 	}
 }
 
-func TestParseChildrenJSON(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		wantIDs []string
-		wantErr bool
-	}{
-		{
-			name:    "bare array",
-			input:   `[{"id":"a","title":"Probe","status":"open"}]`,
-			wantIDs: []string{"a"},
-		},
-		{
-			name:    "map wrapper from bd show",
-			input:   `{"hq-wisp-root":[{"id":"hq-wisp-a","title":"Probe","status":"open"},{"id":"hq-wisp-b","title":"Report","status":"open"}]}`,
-			wantIDs: []string{"hq-wisp-a", "hq-wisp-b"},
-		},
-		{
-			name:    "empty map wrapper",
-			input:   `{"hq-wisp-root":[]}`,
-			wantIDs: []string{},
-		},
-		{
-			name:    "schema metadata with children",
-			input:   `{"hq-wisp-root":[{"id":"hq-wisp-a","title":"Probe","status":"open"}],"schema_version":1}`,
-			wantIDs: []string{"hq-wisp-a"},
-		},
-		{
-			name:    "schema metadata with empty children",
-			input:   `{"hq-wisp-root":[],"schema_version":1}`,
-			wantIDs: []string{},
-		},
-		{
-			name:    "multiple child arrays are deterministic",
-			input:   `{"hq-wisp-b":[{"id":"b-step","title":"Report","status":"open"}],"schema_version":1,"hq-wisp-a":[{"id":"a-step","title":"Probe","status":"open"}]}`,
-			wantIDs: []string{"a-step", "b-step"},
-		},
-		{
-			name:    "schema key is metadata even if array-valued",
-			input:   `{"schema_version":[{"id":"metadata","title":"Ignore","status":"open"}],"hq-wisp-root":[{"id":"hq-wisp-a","title":"Probe","status":"open"}]}`,
-			wantIDs: []string{"hq-wisp-a"},
-		},
-		{
-			name:    "empty array",
-			input:   `[]`,
-			wantIDs: []string{},
-		},
-		{
-			name:    "empty input",
-			input:   `   `,
-			wantErr: true,
-		},
-		{
-			name:    "malformed bare array",
-			input:   `[`,
-			wantErr: true,
-		},
-		{
-			name:    "malformed object envelope",
-			input:   `{"hq-wisp-root":[`,
-			wantErr: true,
-		},
-		{
-			name:    "invalid json",
-			input:   `not json`,
-			wantErr: true,
-		},
-		{
-			name:    "malformed child array",
-			input:   `{"hq-wisp-root":[{"id":1}],"schema_version":1}`,
-			wantErr: true,
-		},
-		{
-			name:    "non-array child payload",
-			input:   `{"hq-wisp-root":1,"schema_version":1}`,
-			wantErr: true,
-		},
-		{
-			name:    "metadata only is not silent skip-all",
-			input:   `{"schema_version":1}`,
-			wantErr: true,
-		},
-		{
-			name:    "empty object is not silent skip-all",
-			input:   `{}`,
-			wantErr: true,
-		},
-	}
+func TestDogMolQuietOnSuccess(t *testing.T) {
+	var buf bytes.Buffer
+	d := &Daemon{logger: log.New(&buf, "", 0)}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseChildrenJSON(tt.input)
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Errorf("unexpected error: %v", err)
-				return
-			}
+	mol := d.pourDogMolecule("mol-dog-checkpoint", nil)
+	mol.closeStep("scan")
+	mol.closeStep("checkpoint")
+	mol.closeStep("report")
+	mol.close()
 
-			gotIDs := make([]string, 0, len(got))
-			for _, child := range got {
-				gotIDs = append(gotIDs, child.ID)
-			}
-			if !reflect.DeepEqual(gotIDs, tt.wantIDs) {
-				t.Errorf("got child IDs %v, want %v", gotIDs, tt.wantIDs)
-			}
-		})
+	if buf.Len() != 0 {
+		t.Fatalf("successful run should not log, got %q", buf.String())
 	}
 }
 
-func TestDogMolGracefulDegradation(t *testing.T) {
-	// A dogMol with empty rootID should be a no-op for all operations.
-	dm := &dogMol{
-		rootID:  "",
-		stepIDs: make(map[string]string),
-	}
-
-	// These should not panic or error — graceful degradation.
+func TestDogMolNilSafe(t *testing.T) {
+	var dm *dogMol
 	dm.closeStep("scan")
-	dm.failStep("scan", "test failure")
+	dm.failStep("scan", "x")
 	dm.close()
+
+	var d *Daemon
+	mol := d.pourDogMolecule("mol-dog-doctor", nil)
+	mol.failStep("probe", "")
+	mol.close() // no logger: must not panic
+}
+
+// runDoctorDog fired every 5 minutes and poured a molecule that no agent ever
+// executed; the tick must now be bead-free.
+func TestRunDoctorDogCreatesNoWisps(t *testing.T) {
+	bdPath, marker := fakeBdRecorder(t)
+	d := &Daemon{
+		logger: log.New(io.Discard, "", 0),
+		bdPath: bdPath,
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			DoctorDog: &DoctorDogConfig{Enabled: true},
+		}},
+	}
+
+	d.runDoctorDog()
+
+	if _, err := os.Stat(marker); err == nil {
+		got, _ := os.ReadFile(marker)
+		t.Fatalf("runDoctorDog invoked bd: %s", got)
+	}
 }

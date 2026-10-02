@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"strconv"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
@@ -89,32 +88,23 @@ func doctorDogDatabases(config *DaemonPatrolConfig) []string {
 	return []string{"hq", "gt", "mo"}
 }
 
-// runDoctorDog pours a mol-dog-doctor molecule for agent execution.
-// The daemon is a thin ticker — it creates the molecule and agents (Deacon)
-// execute the formula steps (probe, inspect, report). This follows ZFC:
-// daemons schedule, agents decide and act.
+// runDoctorDog is the doctor_dog patrol tick.
+//
+// It used to pour a mol-dog-doctor molecule "for agent execution" and then
+// close it on return, so no agent ever ran the probe/inspect/report steps; the
+// only effect was one leaked root and its chained step wisps every 5 minutes
+// (the bulk of hq's open "Report findings and return to kennel" wisps). The
+// Dolt health checks the formula describes run in-process in
+// ensureDoltServerRunning (EnsureRunning + LastWarnings, logged by
+// pourDoctorMolecule), so this tick no longer creates any beads.
 func (d *Daemon) runDoctorDog() {
 	if !d.isPatrolActive("doctor_dog") {
 		return
 	}
 
-	d.logger.Printf("doctor_dog: pouring molecule for agent execution")
-
-	port := d.doltServerPort()
-	latencyThreshold, orphanCount, backupStaleSec := doctorDogThresholds(d.patrolConfig)
-
-	mol := d.pourDogMolecule(constants.MolDogDoctor, map[string]string{
-		"port":              strconv.Itoa(port),
-		"latency_threshold": strconv.FormatFloat(latencyThreshold, 'f', 0, 64) + "ms",
-		"orphan_threshold":  strconv.Itoa(orphanCount),
-		"backup_threshold":  strconv.FormatFloat(backupStaleSec, 'f', 0, 64) + "s",
-	})
+	mol := d.pourDogMolecule(constants.MolDogDoctor, nil)
 	defer mol.close()
-
-	if mol.rootID == "" {
-		d.logger.Printf("doctor_dog: molecule pour failed (non-fatal), skipping cycle")
-		return
-	}
-
-	d.logger.Printf("doctor_dog: poured %s → %s", constants.MolDogDoctor, mol.rootID)
+	mol.closeStep("probe")
+	mol.closeStep("inspect")
+	mol.closeStep("report")
 }
