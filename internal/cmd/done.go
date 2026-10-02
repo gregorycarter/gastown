@@ -956,6 +956,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	var convoyInfo *ConvoyInfo // Populated if issue is tracked by a convoy
 	var sourceIssueForNoMerge *beads.Issue
 	var sourceBD *beads.Beads
+	var conflictTask *conflictRemediationTask
 	if exitType == ExitCompleted {
 		if branch == defaultBranch || branch == "master" {
 			return fmt.Errorf("cannot submit %s/master branch to merge queue", defaultBranch)
@@ -1007,6 +1008,12 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			}
 			sourceIssueForNoMerge = sourceInfo.Issue
 			sourceBD = sourceInfo.BD
+			if parsed, recognized, parseErr := parseConflictRemediationTask(sourceIssueForNoMerge); recognized {
+				if parseErr != nil {
+					return fmt.Errorf("invalid conflict remediation task: %w", parseErr)
+				}
+				conflictTask = parsed
+			}
 			if af := beads.ParseAttachmentFields(sourceIssueForNoMerge); af != nil {
 				if af.NoMerge || af.ReviewOnly {
 					isNoMergeTask = true
@@ -1680,6 +1687,105 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			goto notifyWitness
 		}
 
+		if conflictTask != nil {
+			failConflictSubmission := func(err error) {
+				mrFailed = true
+				errMsg := fmt.Sprintf("conflict remediation handoff failed: %v", err)
+				doneErrors = append(doneErrors, errMsg)
+				style.PrintWarning("%s\nThe original MR was not confirmed as ready. Witness will be notified.", errMsg)
+			}
+
+			originalMR, showErr := sourceBD.Show(conflictTask.OriginalMRID)
+			if showErr != nil || originalMR == nil {
+				if showErr == nil {
+					showErr = fmt.Errorf("original merge request %s is missing", conflictTask.OriginalMRID)
+				}
+				failConflictSubmission(showErr)
+				goto notifyWitness
+			}
+
+			originalSource, sourceErr := resolveSubmitSourceIssue(cwd, conflictTask.OriginalIssueID)
+			if sourceErr != nil {
+				failConflictSubmission(sourceErr)
+				goto notifyWitness
+			}
+			if validateErr := validateMergeRequestSource(originalMR, conflictTask.OriginalIssueID, originalSource.Issue); validateErr != nil {
+				failConflictSubmission(validateErr)
+				goto notifyWitness
+			}
+
+			originalFields, validateErr := validateConflictRemediationMR(conflictTask, originalMR, target)
+			if validateErr != nil {
+				failConflictSubmission(validateErr)
+				goto notifyWitness
+			}
+			if branch != originalFields.Branch {
+				// Conflict work is normally pushed to the original branch. If this
+				// checkout uses another branch, only resume the original MR when its
+				// remote branch already points at this exact submitted commit.
+				if verifyErr := g.VerifyPushedCommit("origin", originalFields.Branch, commitSHA); verifyErr != nil {
+					failConflictSubmission(fmt.Errorf("original branch %s does not point at submitted commit %s: %w", originalFields.Branch, shortHash(commitSHA), verifyErr))
+					goto notifyWitness
+				}
+			}
+
+			preVerifiedAt := ""
+			preVerifiedBase := ""
+			if donePreVerified {
+				preVerifiedAt = time.Now().UTC().Format(time.RFC3339)
+				verifiedBaseRef := g.CleanBaseRef("origin", defaultBranch, target)
+				if verifiedBase, baseErr := g.Rev(verifiedBaseRef); baseErr == nil {
+					preVerifiedBase = verifiedBase
+				} else {
+					style.PrintWarning("could not resolve %s for pre-verified base: %v (pre-verification data incomplete)", verifiedBaseRef, baseErr)
+				}
+			}
+
+			updatedDescription, updateErr := conflictRemediationMRDescription(originalMR, originalFields, conflictTask.TaskID, commitSHA, donePreVerified, preVerifiedAt, preVerifiedBase)
+			if updateErr != nil {
+				failConflictSubmission(updateErr)
+				goto notifyWitness
+			}
+			if updateErr = sourceBD.Update(originalMR.ID, beads.UpdateOptions{Description: &updatedDescription}); updateErr != nil {
+				failConflictSubmission(fmt.Errorf("updating original MR %s: %w", originalMR.ID, updateErr))
+				goto notifyWitness
+			}
+			updatedMR, readErr := sourceBD.Show(originalMR.ID)
+			if readErr != nil || updatedMR == nil {
+				if readErr == nil {
+					readErr = fmt.Errorf("updated original MR %s is missing", originalMR.ID)
+				}
+				failConflictSubmission(fmt.Errorf("reading updated original MR: %w", readErr))
+				goto notifyWitness
+			}
+			updatedFields, validateErr := validateConflictRemediationMR(conflictTask, updatedMR, target)
+			if validateErr != nil || updatedFields.CommitSHA != commitSHA {
+				if validateErr == nil {
+					validateErr = fmt.Errorf("original MR %s records commit %s instead of %s", updatedMR.ID, updatedFields.CommitSHA, commitSHA)
+				}
+				failConflictSubmission(fmt.Errorf("updated MR verification failed: %w", validateErr))
+				goto notifyWitness
+			}
+
+			if closeErr := closeConflictRemediationTask(sourceBD, conflictTask.TaskID, originalMR.ID, commitSHA); closeErr != nil {
+				failConflictSubmission(closeErr)
+				goto notifyWitness
+			}
+
+			mrID = originalMR.ID
+			if agentBeadID != "" {
+				if activeErr := bd.ForAgentBead().UpdateAgentActiveMR(agentBeadID, mrID); activeErr != nil {
+					style.PrintWarning("could not update agent bead with active_mr: %v", activeErr)
+				}
+				cpBd := beads.New(cwd).ForAgentBead()
+				writeDoneCheckpoint(cpBd, agentBeadID, CheckpointMRCreated, mrID)
+			}
+			fmt.Printf("%s Resumed original merge request for conflict task\n", style.Bold.Render("✓"))
+			fmt.Printf("  MR ID: %s\n", style.Bold.Render(mrID))
+			fmt.Printf("  Commit: %s\n", shortHash(commitSHA))
+			goto afterMR
+		}
+
 		// Resume: skip MR creation if already completed in a previous run (gt-aufru).
 		// Mirrors the push checkpoint pattern above. Without this, every retry
 		// re-attempts bd.Create which hits unique constraints or creates duplicates.
@@ -1706,7 +1812,6 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			}
 			// If MR lookup fails, fall through to create/find MR normally.
 		}
-
 		// Check if MR bead already exists for this branch+SHA (idempotency)
 		if commitSHA != "" {
 			existingMR, err = bd.FindMRForBranchAndSHA(branch, commitSHA)
