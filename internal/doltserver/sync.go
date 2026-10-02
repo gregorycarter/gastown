@@ -580,12 +580,64 @@ func SyncDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 	return results
 }
 
+// DefaultPurgeOlderThan is the minimum age (bd --older-than syntax) a closed
+// ephemeral bead must reach before PurgeClosedEphemerals deletes it. It matches
+// the reaper's default purge age (168h).
+const DefaultPurgeOlderThan = "7d"
+
 // PurgeClosedEphemerals runs "bd purge" for a specific rig database to remove
-// closed ephemeral beads (wisps, convoys) before pushing to DoltHub.
-// Returns the number of beads purged and any error encountered.
+// closed ephemeral beads (wisps, convoys) closed at least DefaultPurgeOlderThan
+// ago. Returns the number of beads purged (or, for a dry run, the number that
+// would be purged) and any error encountered.
 // Errors are non-fatal — the caller should log them but continue with sync.
 // Must be called while the Dolt server is still running (bd purge needs SQL access).
 func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
+	return PurgeClosedEphemeralsOlderThan(townRoot, dbName, DefaultPurgeOlderThan, dryRun)
+}
+
+// purgeArgs builds the bd purge arguments (before any --allow-stale prefix).
+// bd purge (>= 1.2) only previews unless --force is given, and exits non-zero
+// when it finds candidates without --force, so a real run must pass --force.
+// olderThan scopes the purge to beads closed at least that long ago; empty
+// means no age filter.
+func purgeArgs(olderThan string, dryRun bool) []string {
+	args := []string{"purge", "--json"}
+	if olderThan != "" {
+		args = append(args, "--older-than", olderThan)
+	}
+	if dryRun {
+		args = append(args, "--dry-run")
+	} else {
+		args = append(args, "--force")
+	}
+	return args
+}
+
+// parsePurgeCount extracts the purged count from bd purge --json output.
+// bd 1.2.x reports "purged_count" for real runs and for the empty case, and
+// "purge_count" for --dry-run previews. The bool result is false when
+// neither key is present.
+func parsePurgeCount(stdout []byte) (int, bool, error) {
+	jsonBytes := extractJSON(stdout)
+	var result struct {
+		PurgedCount *int `json:"purged_count"`
+		PurgeCount  *int `json:"purge_count"`
+	}
+	if err := json.Unmarshal(jsonBytes, &result); err != nil {
+		return 0, false, err
+	}
+	switch {
+	case result.PurgedCount != nil:
+		return *result.PurgedCount, true, nil
+	case result.PurgeCount != nil:
+		return *result.PurgeCount, true, nil
+	}
+	return 0, false, nil
+}
+
+// PurgeClosedEphemeralsOlderThan is PurgeClosedEphemerals with an explicit
+// minimum closed age (bd --older-than syntax, e.g. "7d"; empty = no filter).
+func PurgeClosedEphemeralsOlderThan(townRoot, dbName, olderThan string, dryRun bool) (int, error) {
 	// Resolve the beads directory for this rig (read-only — never create dirs during purge)
 	beadsDir := FindRigBeadsDir(townRoot, dbName)
 
@@ -617,10 +669,7 @@ func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 	// generous timeout as a circuit breaker against future regressions.
 	env := beads.BuildMutationPinnedBDEnv(os.Environ(), beadsDir)
 	// Probe --allow-stale support with the same hardened target env used by purge.
-	args := beads.MaybePrependAllowStaleWithEnv(env, []string{"purge", "--json"})
-	if dryRun {
-		args = append(args, "--dry-run")
-	}
+	args := beads.MaybePrependAllowStaleWithEnv(env, purgeArgs(olderThan, dryRun))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -647,24 +696,18 @@ func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 	}
 
 	// Parse JSON output (from stdout only) to get purged count.
-	// bd may emit non-JSON warning lines before the JSON object,
-	// so extract the first JSON object from stdout.
-	jsonBytes := extractJSON(stdout.Bytes())
-	var result struct {
-		PurgedCount *int `json:"purged_count"`
-	}
-	if err := json.Unmarshal(jsonBytes, &result); err != nil {
+	// bd may emit non-JSON warning lines before the JSON object.
+	count, ok, err := parsePurgeCount(stdout.Bytes())
+	if err != nil {
 		return 0, fmt.Errorf("bd purge for %s: unexpected output format: %s", dbName, strings.TrimSpace(stdout.String()))
 	}
-
-	// Warn if purged_count field was missing from the JSON response — may indicate
+	// Warn if the count field was missing from the JSON response — may indicate
 	// a schema mismatch (e.g., field renamed). An explicit 0 is a valid success case.
-	if result.PurgedCount == nil {
+	if !ok {
 		fmt.Fprintf(os.Stderr, "Warning: bd purge for %s: purged_count field missing (raw: %s)\n", dbName, strings.TrimSpace(stdout.String()))
 		return 0, nil
 	}
-
-	return *result.PurgedCount, nil
+	return count, nil
 }
 
 // extractJSON finds the first JSON object in raw output that may contain

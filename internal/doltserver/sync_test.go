@@ -203,7 +203,7 @@ exit 2
 	log := string(data)
 	for _, want := range []string{
 		"args=--allow-stale version",
-		"args=--allow-stale purge --json",
+		"args=--allow-stale purge --json --older-than 7d --force",
 		"BEADS_DIR=" + beadsDir,
 		"BEADS_DOLT_SERVER_DATABASE=gastown",
 		"BEADS_DOLT_SERVER_HOST=127.0.0.2",
@@ -247,4 +247,57 @@ func initDoltDB(dir string) error {
 	cmd := exec.Command("dolt", "init", "--name", "test", "--email", "test@test.com")
 	cmd.Dir = dir
 	return cmd.Run()
+}
+
+func TestPurgeArgsForcesRealRunsAndScopesAge(t *testing.T) {
+	tests := []struct {
+		name      string
+		olderThan string
+		dryRun    bool
+		want      string
+	}{
+		{"real run forces", "7d", false, "purge --json --older-than 7d --force"},
+		{"dry run never forces", "7d", true, "purge --json --older-than 7d --dry-run"},
+		{"no age filter", "", false, "purge --json --force"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := strings.Join(purgeArgs(tt.olderThan, tt.dryRun), " ")
+			if got != tt.want {
+				t.Fatalf("purgeArgs(%q, %v) = %q, want %q", tt.olderThan, tt.dryRun, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParsePurgeCountBd121Shapes(t *testing.T) {
+	tests := []struct {
+		name   string
+		out    string
+		want   int
+		wantOK bool
+	}{
+		// bd 1.2.1 `purge --force --json` (emitSweepResult)
+		{"force result", `{"dependencies":4,"events":9,"labels":2,"purged_count":12}`, 12, true},
+		// bd 1.2.1 empty sweep (emitSweepEmpty)
+		{"empty", `{"message":"No closed ephemeral beads to purge","purged_count":0}`, 0, true},
+		// bd 1.2.1 `purge --dry-run --json` (emitSweepDryRun)
+		{"dry run", `{"dependencies":0,"dry_run":true,"events":0,"labels":0,"purge_count":5}`, 5, true},
+		{"warning preamble", "Warning: something\n{\"purged_count\":3}\n", 3, true},
+		{"missing key", `{"other":1}`, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok, err := parsePurgeCount([]byte(tt.out))
+			if err != nil {
+				t.Fatalf("parsePurgeCount: %v", err)
+			}
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("parsePurgeCount = (%d, %v), want (%d, %v)", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+	if _, _, err := parsePurgeCount([]byte("not json")); err == nil {
+		t.Fatal("parsePurgeCount(non-JSON) = nil error, want error")
+	}
 }
