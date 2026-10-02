@@ -543,6 +543,62 @@ func TestRecoveryHookFallbackFindsActiveAssignmentWithoutAgentBead(t *testing.T)
 	}
 }
 
+func TestRecoveryActiveAssignmentBlocksLiveAssignedSession(t *testing.T) {
+	setupPolecatTestRegistry(t)
+	const assignee = "gastown/polecats/nitro"
+	activeIssue := &beads.Issue{ID: "gt-work", Status: beads.StatusHooked, Assignee: assignee}
+	lister := &fakeIssueLister{issues: []*beads.Issue{activeIssue}}
+	assignedIssue, err := findActiveAssignedIssueForRecovery([]issueLister{lister}, assignee)
+	if err != nil || assignedIssue == nil || assignedIssue.ID != activeIssue.ID {
+		t.Fatalf("findActiveAssignedIssueForRecovery() = (%+v, %v), want hooked assignment", assignedIssue, err)
+	}
+
+	input := polecat.WorkstateInput{
+		State:          polecat.StateIdle,
+		SessionKnown:   true,
+		SessionRunning: true,
+		CleanupStatus:  polecat.CleanupClean,
+	}
+	status := &RecoveryStatus{}
+	applyRecoveryAssignedWork(&input, status, assignedIssue, nil, "")
+	got := polecat.DecideWorkstate(input)
+	if got.SafeToNuke || got.Verdict != polecat.WorkstateVerdictNeedsRecovery {
+		t.Fatalf("live assigned recovery disposition = %+v, want cleanup blocked", got)
+	}
+	if len(got.Blockers) == 0 || !strings.Contains(got.Blockers[0], "assigned_work=gt-work status=hooked") {
+		t.Fatalf("blockers = %v, want assigned hooked work", got.Blockers)
+	}
+
+	listItem := buildPolecatInventoryItem(
+		"gastown",
+		"nitro",
+		&beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: string(polecat.CleanupClean)},
+		activeIssue,
+		newPolecatSessionSet([]string{"gt-nitro"}),
+	)
+	if !listItem.SessionRunning || listItem.State != polecat.StateWorking || listItem.Disposition.SafeToNuke {
+		t.Fatalf("polecat list live assignment = %+v disposition=%+v, want WORKING and unsafe", listItem, listItem.Disposition)
+	}
+}
+
+func TestRecoveryActiveAssignmentLookupFailureFailsClosed(t *testing.T) {
+	input := polecat.WorkstateInput{
+		State:          polecat.StateIdle,
+		SessionKnown:   true,
+		SessionRunning: true,
+		CleanupStatus:  polecat.CleanupClean,
+	}
+	status := &RecoveryStatus{}
+	applyRecoveryAssignedWork(&input, status, nil, errors.New("beads unavailable"), "")
+	got := polecat.DecideWorkstate(input)
+	if got.SafeToNuke || got.Verdict != polecat.WorkstateVerdictNeedsRecovery {
+		t.Fatalf("lookup error disposition = %+v, want cleanup blocked", got)
+	}
+	if len(status.Diagnostics) != 1 || !strings.Contains(status.Diagnostics[0], "assigned_work_lookup_failed") {
+		t.Fatalf("diagnostics = %v, want assigned-work lookup failure", status.Diagnostics)
+	}
+}
+
 func TestRecoveryHookFallbackLookupFailureAndGitErrorFailClosed(t *testing.T) {
 	_, _, hookBlocker := recoveryHookFallback(errors.New("agent bead unavailable"), []issueLister{
 		&fakeIssueLister{err: errors.New("beads unavailable")},

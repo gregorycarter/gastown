@@ -1078,6 +1078,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		gitState, gitErr = getGitStateWithTargets(p.ClonePath, targetRefs)
 		gitStateLoaded = true
 	}
+	assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 
 	if err != nil || fields == nil {
 		// No agent bead or no cleanup_status - fall back to git check.
@@ -1126,9 +1127,10 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		if hookBlocker != "" {
 			input.HookBead = hookBead
 		}
+		activeWork, activeWorkErr := findActiveAssignedIssueForRecovery(recoveryHookStores(r.Path, bd), assignee)
+		applyRecoveryAssignedWork(&input, &status, activeWork, activeWorkErr, hookBead)
 		input.PushFailed = fields.PushFailed
 		input.MRFailed = fields.MRFailed
-		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 		partialSpawn, diagnostic := partialSpawnWithoutDurableHook(bd, fields, assignee, status.Issue)
 		if diagnostic != "" {
 			status.Diagnostics = append(status.Diagnostics, diagnostic)
@@ -1323,7 +1325,7 @@ func recoveryHookStores(rigPath string, rigBeads issueLister) []issueLister {
 }
 
 // recoveryHookFallback checks work assignments directly when the agent bead
-// cannot provide parsed fields. Hooked work is stored on the assigned issue,
+// cannot provide parsed fields. Active work is stored on the assigned issue,
 // so the query remains available even when the agent bead is missing or
 // malformed.
 func recoveryHookFallback(agentLookupErr error, stores []issueLister, assignee string) (hookBead string, diagnostics []string, blocker string) {
@@ -1342,23 +1344,41 @@ func recoveryHookFallback(agentLookupErr error, stores []issueLister, assignee s
 }
 
 // findActiveAssignedBeadForRecovery queries the work bead itself, independently
-// of the agent bead's hook_bead field. An assignment in either hooked or
-// in_progress state must keep the polecat from being declared safe to nuke.
+// of the agent bead's hook_bead field. Active assigned work must keep the
+// polecat from being declared safe to nuke.
 func findActiveAssignedBeadForRecovery(stores []issueLister, assignee string) (string, error) {
+	issue, err := findActiveAssignedIssueForRecovery(stores, assignee)
+	if err != nil || issue == nil {
+		return "", err
+	}
+	return issue.ID, nil
+}
+
+// findActiveAssignedIssueForRecovery queries the assigned work bead directly,
+// independently of the agent bead's hook_bead field. This mirrors polecat list
+// so stale agent metadata cannot make active assigned work appear safe to nuke.
+func findActiveAssignedIssueForRecovery(stores []issueLister, assignee string) (*beads.Issue, error) {
 	if strings.TrimSpace(assignee) == "" {
-		return "", fmt.Errorf("assignee is empty")
+		return nil, fmt.Errorf("assignee is empty")
 	}
 	if len(stores) == 0 {
-		return "", fmt.Errorf("no beads stores available")
+		return nil, fmt.Errorf("no beads stores available")
 	}
 
+	activeStatuses := []string{
+		string(beads.IssueStatusHooked),
+		string(beads.StatusInProgress),
+		string(beads.StatusOpen),
+		string(beads.StatusBlocked),
+		string(beads.StatusDeferred),
+	}
 	var lookupErrors []string
 	for storeIndex, store := range stores {
 		if store == nil {
 			lookupErrors = append(lookupErrors, fmt.Sprintf("store %d unavailable", storeIndex+1))
 			continue
 		}
-		for _, activeStatus := range []string{beads.StatusHooked, "in_progress"} {
+		for _, activeStatus := range activeStatuses {
 			issues, err := store.List(beads.ListOptions{
 				Status:   activeStatus,
 				Assignee: assignee,
@@ -1370,19 +1390,41 @@ func findActiveAssignedBeadForRecovery(stores []issueLister, assignee string) (s
 			}
 			for _, issue := range issues {
 				if issue == nil {
-					return "", fmt.Errorf("store %d status=%s returned a nil issue", storeIndex+1, activeStatus)
+					return nil, fmt.Errorf("store %d status=%s returned a nil issue", storeIndex+1, activeStatus)
 				}
 				if issue.ID == "" || issue.Status != activeStatus || issue.Assignee != assignee {
-					return "", fmt.Errorf("store %d status=%s returned malformed assignment (id=%q status=%q assignee=%q)", storeIndex+1, activeStatus, issue.ID, issue.Status, issue.Assignee)
+					return nil, fmt.Errorf("store %d status=%s returned malformed assignment (id=%q status=%q assignee=%q)", storeIndex+1, activeStatus, issue.ID, issue.Status, issue.Assignee)
 				}
-				return issue.ID, nil
+				if !assessPolecatAssignedIssueWork(issue).BlocksCleanup {
+					continue
+				}
+				return issue, nil
 			}
 		}
 	}
 	if len(lookupErrors) > 0 {
-		return "", fmt.Errorf("%s", strings.Join(lookupErrors, "; "))
+		return nil, fmt.Errorf("%s", strings.Join(lookupErrors, "; "))
 	}
-	return "", nil
+	return nil, nil
+}
+
+func applyRecoveryAssignedWork(input *polecat.WorkstateInput, status *RecoveryStatus, issue *beads.Issue, lookupErr error, agentHookBead string) {
+	if lookupErr != nil {
+		input.ActiveWorkBlocker = fmt.Sprintf("assigned_work status=lookup_error: %v", lookupErr)
+		if status != nil {
+			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("assigned_work_lookup_failed: %v", lookupErr))
+		}
+		return
+	}
+	if issue == nil || issue.ID == agentHookBead {
+		return
+	}
+	evidence := assessPolecatAssignedIssueWork(issue)
+	if !evidence.BlocksCleanup {
+		return
+	}
+	input.ActiveWorkBlocker = evidence.Blocker
+	input.ActiveWorkCountsTowardCapacity = evidence.CountsTowardCapacity
 }
 
 func cleanupStatusBlocker(status polecat.CleanupStatus) string {
