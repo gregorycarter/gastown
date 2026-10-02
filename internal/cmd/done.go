@@ -2418,6 +2418,12 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 					fmt.Fprintf(os.Stderr, "Warning: couldn't close hooked bead %s: %v\n", hookedBeadID, err)
 				}
 			}
+		} else if err == nil && hookedBead != nil {
+			// The source bead is already terminal: polecats close no-change and
+			// investigation work themselves (`bd close --reason "no-changes: ..."`)
+			// before gt done. The block above skips terminal beads, so the
+			// attached molecule and its steps were never closed.
+			closeMoleculeOfTerminalBead(hookBd, hookedBead)
 		}
 	}
 
@@ -2783,4 +2789,31 @@ func purgeClosedEphemeralBeads(bd *beads.Beads) {
 	if outStr != "" && outStr != "0" {
 		fmt.Fprintf(os.Stderr, "Purged closed ephemeral beads: %s\n", outStr)
 	}
+}
+
+// closeMoleculeOfTerminalBead closes the molecule (steps, then root) still
+// attached to a source bead that was already closed. Best effort: gt done must
+// not fail on cleanup.
+func closeMoleculeOfTerminalBead(bd *beads.Beads, bead *beads.Issue) {
+	if bd == nil || bead == nil || !beads.IssueStatus(bead.Status).IsTerminal() {
+		return
+	}
+	attachment := beads.ParseAttachmentFields(bead)
+	if attachment == nil || attachment.AttachedMolecule == "" {
+		return
+	}
+	moleculeID := attachment.AttachedMolecule
+	mol, err := bd.Show(moleculeID)
+	if err != nil || mol == nil || beads.IssueStatus(mol.Status).IsTerminal() {
+		return // gone, unreadable, or already closed
+	}
+	n, err := forceCloseDescendants(bd, moleculeID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: couldn't close all molecule steps of %s: %v\n", moleculeID, err)
+	}
+	if err := bd.ForceCloseWithReason("done: source bead "+bead.ID+" already closed", moleculeID); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: couldn't close attached molecule %s: %v\n", moleculeID, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Closed molecule %s (%d step(s)) of already-closed %s\n", moleculeID, n, bead.ID)
 }
