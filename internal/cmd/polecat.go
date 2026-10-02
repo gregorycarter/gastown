@@ -1081,10 +1081,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 
 	if err != nil || fields == nil {
 		// No agent bead or no cleanup_status - fall back to git check.
-		hookBead, hookDiagnostics, hookLookupBlocker := recoveryHookFallback(err, fields, []issueLister{
-			bd,
-			beads.New(beads.GetTownBeadsPath(beads.FindTownRoot(r.Path))),
-		}, fmt.Sprintf("%s/polecats/%s", rigName, polecatName))
+		hookBead, hookDiagnostics, hookLookupBlocker := recoveryHookFallback(err, recoveryHookStores(r.Path, bd), fmt.Sprintf("%s/polecats/%s", rigName, polecatName))
 		input.HookBead = hookBead
 		status.Diagnostics = append(status.Diagnostics, hookDiagnostics...)
 		if hookLookupBlocker != "" {
@@ -1175,6 +1172,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 
 	status.CleanupStatus = input.CleanupStatus
 	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr)
+	appendRecoveryGitStateDiagnostic(&status, p.ClonePath, gitState, gitErr)
 	disposition := polecat.DecideWorkstate(input)
 	applyWorkstateDispositionToRecoveryStatus(&status, disposition)
 
@@ -1313,11 +1311,22 @@ type issueLister interface {
 	List(opts beads.ListOptions) ([]*beads.Issue, error)
 }
 
+func recoveryHookStores(rigPath string, rigBeads issueLister) []issueLister {
+	stores := []issueLister{rigBeads}
+	if townRoot := beads.FindTownRoot(rigPath); townRoot != "" {
+		townBeadsPath := beads.ResolveBeadsDir(beads.GetTownBeadsPath(townRoot))
+		if townBeadsPath != "" {
+			stores = append(stores, beads.New(townBeadsPath))
+		}
+	}
+	return stores
+}
+
 // recoveryHookFallback checks work assignments directly when the agent bead
 // cannot provide parsed fields. Hooked work is stored on the assigned issue,
 // so the query remains available even when the agent bead is missing or
 // malformed.
-func recoveryHookFallback(agentLookupErr error, fields *beads.AgentFields, stores []issueLister, assignee string) (hookBead string, diagnostics []string, blocker string) {
+func recoveryHookFallback(agentLookupErr error, stores []issueLister, assignee string) (hookBead string, diagnostics []string, blocker string) {
 	if agentLookupErr != nil {
 		diagnostics = append(diagnostics, fmt.Sprintf("agent_bead_lookup_failed: %v", agentLookupErr))
 	} else {
@@ -1530,6 +1539,13 @@ func recoveryGitStateBlocker(worktreePath string, gitState *GitState, gitErr err
 		return fmt.Sprintf("git_state=has_stash stash_count=%d", gitState.StashCount)
 	}
 	return fmt.Sprintf("git_state=has_uncommitted uncommitted_files=%d", len(gitState.UncommittedFiles))
+}
+
+func appendRecoveryGitStateDiagnostic(status *RecoveryStatus, worktreePath string, gitState *GitState, gitErr error) {
+	if status == nil || gitErr == nil {
+		return
+	}
+	status.Diagnostics = append(status.Diagnostics, recoveryGitStateBlocker(worktreePath, gitState, gitErr))
 }
 
 func recoveryActionsForBlockers(blockers []string) []string {

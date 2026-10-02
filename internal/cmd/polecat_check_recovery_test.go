@@ -32,6 +32,17 @@ func (f fakeIssueShower) Show(issueID string) (*beads.Issue, error) {
 	return f.issue, f.err
 }
 
+type fakeIssueLister struct {
+	issues []*beads.Issue
+	err    error
+	calls  []beads.ListOptions
+}
+
+func (f *fakeIssueLister) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	f.calls = append(f.calls, opts)
+	return f.issues, f.err
+}
+
 type fakeCleanupUpdater struct {
 	err    error
 	id     string
@@ -494,6 +505,74 @@ func TestHookBeadSafeForCleanup(t *testing.T) {
 				t.Fatalf("blocker = %q, want contains %q", blocker, tt.wantBlocker)
 			}
 		})
+	}
+}
+
+func TestRecoveryHookFallbackFindsActiveAssignmentWithoutAgentBead(t *testing.T) {
+	assignee := "gastown/polecats/nitro"
+	for _, tt := range []struct {
+		name      string
+		lookupErr error
+		wantDiag  string
+	}{
+		{name: "agent bead lookup unavailable", lookupErr: errors.New("agent bead database unavailable"), wantDiag: "agent_bead_lookup_failed"},
+		{name: "agent bead fields malformed", wantDiag: "agent_bead_fields_unavailable"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			lister := &fakeIssueLister{issues: []*beads.Issue{{ID: "gt-work", Status: beads.StatusHooked, Assignee: assignee}}}
+			hookBead, diagnostics, blocker := recoveryHookFallback(tt.lookupErr, []issueLister{lister}, assignee)
+			if hookBead != "gt-work" || blocker != "" {
+				t.Fatalf("recoveryHookFallback() = (%q, %v), want active hook and no lookup blocker", hookBead, blocker)
+			}
+			if len(diagnostics) == 0 || !strings.Contains(diagnostics[0], tt.wantDiag) {
+				t.Fatalf("diagnostics = %v, want %q", diagnostics, tt.wantDiag)
+			}
+			if len(lister.calls) == 0 || lister.calls[0].Status != beads.StatusHooked || lister.calls[0].Assignee != assignee {
+				t.Fatalf("list calls = %+v, want hooked assignments for %q", lister.calls, assignee)
+			}
+
+			disposition := polecat.DecideWorkstate(polecat.WorkstateInput{
+				State:         polecat.StateIdle,
+				CleanupStatus: polecat.CleanupClean,
+				HookBead:      hookBead,
+			})
+			if disposition.Verdict != "NEEDS_RECOVERY" || !strings.Contains(strings.Join(disposition.Blockers, ";"), "has work on hook (gt-work)") {
+				t.Fatalf("active assignment disposition = %+v, want NEEDS_RECOVERY blocked by the hook", disposition)
+			}
+		})
+	}
+}
+
+func TestRecoveryHookFallbackLookupFailureAndGitErrorFailClosed(t *testing.T) {
+	_, _, hookBlocker := recoveryHookFallback(errors.New("agent bead unavailable"), []issueLister{
+		&fakeIssueLister{err: errors.New("beads unavailable")},
+	}, "gastown/polecats/nitro")
+	if !strings.Contains(hookBlocker, "hook_lookup_failed") {
+		t.Fatalf("hook lookup blocker = %q, want fail-closed diagnostic", hookBlocker)
+	}
+
+	const worktreePath = "/tmp/polecat"
+	gitErr := errors.New("git executable unavailable")
+	input := polecat.WorkstateInput{
+		State:                          polecat.StateIdle,
+		CleanupStatus:                  polecat.CleanupUnknown,
+		ActiveWorkBlocker:              hookBlocker,
+		ActiveWorkCountsTowardCapacity: true,
+	}
+	applyGitStateToWorkstateInput(&input, worktreePath, nil, gitErr)
+	disposition := polecat.DecideWorkstate(input)
+	if disposition.Verdict != "NEEDS_RECOVERY" {
+		t.Fatalf("fallback disposition = %+v, want NEEDS_RECOVERY", disposition)
+	}
+	wantGitDiagnostic := "git_state=unknown path=" + worktreePath + ": git executable unavailable"
+	if !strings.Contains(strings.Join(disposition.Blockers, ";"), wantGitDiagnostic) {
+		t.Fatalf("blockers = %v, want explicit Git path diagnostic %q", disposition.Blockers, wantGitDiagnostic)
+	}
+
+	status := RecoveryStatus{}
+	appendRecoveryGitStateDiagnostic(&status, worktreePath, nil, gitErr)
+	if len(status.Diagnostics) != 1 || status.Diagnostics[0] != wantGitDiagnostic {
+		t.Fatalf("diagnostics = %v, want explicit Git path diagnostic %q", status.Diagnostics, wantGitDiagnostic)
 	}
 }
 
