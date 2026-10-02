@@ -94,6 +94,49 @@ func TestSessionName(t *testing.T) {
 	}
 }
 
+func TestParseSessionCreatedTimeUsesHostLocation(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 27, 50, 0, time.UTC)
+	wantCreated := time.Date(2026, 9, 5, 11, 3, 29, 0, time.UTC)
+	wantUptime := 5061 * time.Second
+
+	tests := []struct {
+		name    string
+		created string
+		loc     *time.Location
+	}{
+		{
+			name:    "UTC host",
+			created: "2026-09-05 11:03:29",
+			loc:     time.UTC,
+		},
+		{
+			name:    "UTC+04 host",
+			created: "2026-09-05 15:03:29",
+			loc:     time.FixedZone("UTC+04", 4*60*60),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			created, ok := parseSessionCreatedTime(tt.created, tt.loc)
+			if !ok {
+				t.Fatalf("parseSessionCreatedTime(%q) failed", tt.created)
+			}
+			if !created.Equal(wantCreated) {
+				t.Errorf("created = %s, want %s", created, wantCreated)
+			}
+
+			uptime := now.Sub(created)
+			if uptime < 0 {
+				t.Fatalf("uptime = %s, want non-negative", uptime)
+			}
+			if uptime != wantUptime {
+				t.Errorf("uptime = %s, want %s", uptime, wantUptime)
+			}
+		})
+	}
+}
+
 func TestSessionManagerPolecatDir(t *testing.T) {
 	r := &rig.Rig{
 		Name:     "gastown",
