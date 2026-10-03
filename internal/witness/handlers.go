@@ -3177,7 +3177,8 @@ func closeMoleculeWithDescendants(bd *BdCli, workDir, moleculeID string) (int, e
 
 	// Close the molecule itself
 	reason := "Orphaned mol-polecat-work — owning polecat no longer exists (issue #1381)"
-	if err := bd.Run(workDir, "close", moleculeID, "-r", reason); err != nil {
+	// --force: the root refuses a plain close while any step is open.
+	if err := bd.Run(workDir, "close", moleculeID, "--force", "-r", reason); err != nil {
 		closeErr := fmt.Errorf("closing molecule %s: %w", moleculeID, err)
 		if descErr != nil {
 			return closed, fmt.Errorf("%w; also: %v", closeErr, descErr)
@@ -3235,7 +3236,9 @@ func closeDescendantsViaCLI(bd *BdCli, workDir, parentID string) (int, error) {
 	if len(idsToClose) > 0 {
 		reason := "Orphaned mol-polecat-work step — owning polecat no longer exists"
 		args := append([]string{"close"}, idsToClose...)
-		args = append(args, "-r", reason)
+		// --force: formula steps are chained with blocks deps, and bd refuses
+		// a plain close of a blocked step, which left the whole chain open.
+		args = append(args, "--force", "-r", reason)
 		if err := bd.Run(workDir, args...); err != nil {
 			errs = append(errs, fmt.Errorf("closing children of %s: %w", parentID, err))
 		} else {

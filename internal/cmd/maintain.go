@@ -45,7 +45,7 @@ All operations run via SQL on the running server — no downtime needed.
 
 This encapsulates the maintenance procedure:
   1. Backup all databases (dolt backup sync)
-  2. Reap closed wisps from each database
+  2. Reap closed wisps (closed 7+ days ago) from each database
   3. Flatten databases over commit threshold
   4. Run dolt_gc() on each database
 

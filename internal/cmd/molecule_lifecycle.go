@@ -359,23 +359,29 @@ squashed_at: %s
 
 // closeDescendants recursively closes all descendant issues of a parent.
 // Returns the count of issues closed. Logs warnings on errors but doesn't fail.
+//
+// Every caller is finishing the molecule (gt done, burn, squash, handoff,
+// patrol cleanup) and force-closes the root next, so steps are closed with
+// --force too. Formula steps are chained with blocks deps; a plain `bd close`
+// of the open steps is refused ("cannot close blocked issue"), the root is
+// still force-closed, and `bd purge` (gt done) later deletes the closed root
+// with its parent-child edges, leaving the steps open and parentless forever.
 func closeDescendants(b *beads.Beads, parentID string) int {
-	count, err := closeDescendantsImpl(b, parentID, false)
+	count, err := closeDescendantsImpl(b, parentID)
 	if err != nil {
 		style.PrintWarning("closing descendants of %s: %v", parentID, err)
 	}
 	return count
 }
 
-// forceCloseDescendants is like closeDescendants but uses force-close,
-// which succeeds even for beads in invalid states. Returns the count of
+// forceCloseDescendants is like closeDescendants but returns the count of
 // issues closed and any error encountered. Callers should check the error
 // to avoid closing a parent while children survive (gt-7lx3).
 func forceCloseDescendants(b *beads.Beads, parentID string) (int, error) {
-	return closeDescendantsImpl(b, parentID, true)
+	return closeDescendantsImpl(b, parentID)
 }
 
-func closeDescendantsImpl(b *beads.Beads, parentID string, force bool) (int, error) {
+func closeDescendantsImpl(b *beads.Beads, parentID string) (int, error) {
 	children, err := b.List(beads.ListOptions{
 		Parent: parentID,
 		Status: "all",
@@ -392,7 +398,7 @@ func closeDescendantsImpl(b *beads.Beads, parentID string, force bool) (int, err
 	totalClosed := 0
 	var errs []error
 	for _, child := range children {
-		closed, childErr := closeDescendantsImpl(b, child.ID, force)
+		closed, childErr := closeDescendantsImpl(b, child.ID)
 		totalClosed += closed
 		if childErr != nil {
 			errs = append(errs, childErr)
@@ -408,13 +414,7 @@ func closeDescendantsImpl(b *beads.Beads, parentID string, force bool) (int, err
 	}
 
 	if len(idsToClose) > 0 {
-		var closeErr error
-		if force {
-			closeErr = b.ForceCloseWithReason("burned: force-close descendants", idsToClose...)
-		} else {
-			closeErr = b.Close(idsToClose...)
-		}
-		if closeErr != nil {
+		if closeErr := b.ForceCloseWithReason("burned: force-close descendants", idsToClose...); closeErr != nil {
 			errs = append(errs, fmt.Errorf("closing children of %s: %w", parentID, closeErr))
 		} else {
 			totalClosed += len(idsToClose)

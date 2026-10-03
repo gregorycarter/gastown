@@ -228,7 +228,7 @@ stays up and running agents are not disrupted. Falls back to CLI push (which
 requires stopping the server) only when the server is not running.
 
 This command automates the tedious process of pushing each database individually:
-  1. Optionally purges closed ephemeral beads (--gc)
+  1. Optionally purges closed ephemeral beads older than 7 days (--gc)
   2. Iterates databases in .dolt-data/
   3. For each database with a configured remote, pushes via SQL or CLI
   4. Reports success/failure per database

@@ -1125,8 +1125,8 @@ func (d *Daemon) ensureDoltServerRunning() {
 	}
 }
 
-// pourDoctorMolecule creates a mol-dog-doctor molecule to track a health anomaly.
-// Runs asynchronously — molecule lifecycle is observability, not control flow.
+// pourDoctorMolecule records a Dolt health anomaly in the daemon log. It tracks
+// the mol-dog-doctor steps in memory only (see dogMol); no wisps are created.
 func (d *Daemon) pourDoctorMolecule(warnings []string) {
 	mol := d.pourDogMolecule(constants.MolDogDoctor, map[string]string{
 		"port": strconv.Itoa(d.doltServer.config.Port),
