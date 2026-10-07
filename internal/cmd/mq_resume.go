@@ -27,7 +27,7 @@ var mqResumeJSON, mqResumeDryRun bool
 
 func init() {
 	c := &cobra.Command{Use: "resume <rig> <mr-id>", Short: "Queue admission-aware recovery on the original worker and MR",
-		Long: "Queue recovery of an existing blocked Hisn MR. No worker starts here: the normal daemon pressure/capacity tick admits the original worker. No new source, molecule, branch or MR is created.",
+		Long: "Queue recovery of an existing blocked Hisn or Kasb MR. No worker starts here: the normal daemon pressure/capacity tick admits the original worker. No new source, molecule, branch or MR is created.",
 		Args: cobra.ExactArgs(2), RunE: runMQResume}
 	c.Flags().BoolVar(&mqResumeJSON, "json", false, "Output the queued identity as JSON")
 	c.Flags().BoolVar(&mqResumeDryRun, "dry-run", false, "Validate without creating scheduler context")
@@ -69,8 +69,8 @@ type mqResumeResult struct {
 }
 
 var mqResumeSHA = regexp.MustCompile(`^[a-f0-9]{40}$`)
-var mqResumeMR = regexp.MustCompile(`^hisn-wisp-[a-z0-9]+$`)
-var mqResumeBranch = regexp.MustCompile(`^polecat/([a-z0-9_-]+)/(hisn-[a-z0-9]+(?:\.[1-9][0-9]*)*)(?:[+@][a-z0-9_-]+)?$`)
+var mqResumeMR = regexp.MustCompile(`^(?:hisn|kasb)-wisp-[a-z0-9]+$`)
+var mqResumeBranch = regexp.MustCompile(`^polecat/([a-z0-9_-]+)/((?:hisn|kasb)-[a-z0-9]+(?:\.[1-9][0-9]*)*)(?:[+@][a-z0-9_-]+)?$`)
 
 func mqResumeHash(s string) string {
 	h := sha256.Sum256([]byte(s))
@@ -84,7 +84,8 @@ func mqResumeHeld(issue *beads.Issue) bool {
 // This is deliberately an opt-in contract for Hisn's durable recovery receipt.
 // It does not reinterpret Bridge Town's reject-and-resling workflow.
 func validateMQResumeRecords(rigName, mrID string, show func(string) (*beads.Issue, error)) (*mqResumeState, error) {
-	if rigName != "hisn" || !mqResumeMR.MatchString(mrID) {
+	spec, specErr := recoveryRig(rigName)
+	if specErr != nil || !strings.HasPrefix(mrID, spec.Prefix+"-wisp-") || !mqResumeMR.MatchString(mrID) {
 		return nil, fmt.Errorf("unsupported rig or recovery MR")
 	}
 	mr, err := show(mrID)
@@ -99,7 +100,7 @@ func validateMQResumeRecords(rigName, mrID string, show func(string) (*beads.Iss
 		return nil, fmt.Errorf("invalid MR mapping")
 	}
 	match := mqResumeBranch.FindStringSubmatch(f.Branch)
-	if match == nil || match[1] != f.Worker || match[2] != f.SourceIssue {
+	if match == nil || match[1] != f.Worker || match[2] != f.SourceIssue || !strings.HasPrefix(f.SourceIssue, spec.Prefix+"-") {
 		return nil, fmt.Errorf("MR worker/branch/source mismatch")
 	}
 	// Reject duplicate structured fields rather than relying on last-one-wins.
@@ -141,7 +142,7 @@ func validateMQResumeRecords(rigName, mrID string, show func(string) (*beads.Iss
 	if _, err := time.Parse(time.RFC3339Nano, record.CreatedAt); err != nil {
 		return nil, fmt.Errorf("invalid recovery time")
 	}
-	wantInstructions := fmt.Sprintf("Original worker hisn/%s: recover source %s on %s; resolve/rebase onto %s, commit as Greg Carter <email@gregorycarter.net>, run and publish renewed exact-HEAD preflight, push only this worker branch with an explicit expected-old-head lease, run node tools/delivery/resubmit.mjs %s --apply, then gt done --pre-verified. Preserve this MR and source; do not create conflict/verifier tasks or close the source.", record.Worker, record.Source, record.Branch, record.Base, record.MR)
+	wantInstructions := recoveryInstructions(record)
 	if record.Instructions != wantInstructions {
 		return nil, fmt.Errorf("recovery instruction contract changed")
 	}
@@ -205,12 +206,13 @@ func validateMQResumeDependencies(issue *beads.Issue, show func(string) (*beads.
 	return nil
 }
 
-func mqResumeBeads(townRoot string) *beads.Beads {
-	root := filepath.Join(townRoot, "hisn", "mayor", "rig")
+func mqResumeBeads(townRoot string, rigs ...string) *beads.Beads {
+	rigName := recoveryName(rigs)
+	root := filepath.Join(townRoot, rigName, "mayor", "rig")
 	// Keep the stable worktree cwd, but pin the rig's actual database. The
 	// resolver follows redirects; it does not search upward from mayor/rig.
 	// Prefix-routed Show can mask a bad pin that unprefixed List/Create cannot.
-	return beads.NewWithBeadsDir(root, beads.ResolveBeadsDir(filepath.Join(townRoot, "hisn")))
+	return beads.NewWithBeadsDir(root, beads.ResolveBeadsDir(filepath.Join(townRoot, rigName)))
 }
 
 func mqResumeGit(root string, args ...string) (string, error) {
@@ -240,6 +242,10 @@ func validateMQResumeWorker(townRoot string, state *mqResumeState, b *beads.Bead
 
 func validateMQResumeWorkerWith(townRoot string, state *mqResumeState, ops mqResumeWorkerOps) error {
 	r := state.Record
+	spec, err := recoveryRig(r.Rig)
+	if err != nil {
+		return err
+	}
 	root := filepath.Join(townRoot, r.Rig, "polecats", r.Worker)
 	if stat, err := os.Stat(filepath.Join(root, r.Rig)); err == nil && stat.IsDir() {
 		root = filepath.Join(root, r.Rig)
@@ -270,7 +276,7 @@ func validateMQResumeWorkerWith(townRoot string, state *mqResumeState, ops mqRes
 		}
 	}
 	origin, err := ops.git(root, "remote", "get-url", "origin")
-	if err != nil || strings.TrimSuffix(origin, ".git") != "https://github.com/gregorycarter/hisn-core" {
+	if err != nil || strings.TrimSuffix(origin, ".git") != spec.Origin {
 		return fmt.Errorf("foreign worker origin")
 	}
 	if r.Kind != "dependency-resume" {
@@ -288,7 +294,7 @@ func validateMQResumeWorkerWith(townRoot string, state *mqResumeState, ops mqRes
 			return fmt.Errorf("original worker has other active work")
 		}
 	}
-	running, err := ops.running(session.PolecatSessionName("hisn", r.Worker))
+	running, err := ops.running(session.PolecatSessionName(spec.Prefix, r.Worker))
 	if err != nil {
 		return fmt.Errorf("worker session state unavailable: %w", err)
 	}
@@ -300,13 +306,13 @@ func validateMQResumeWorkerWith(townRoot string, state *mqResumeState, ops mqRes
 }
 
 func loadMQResumeState(townRoot, rigName, mrID string) (*mqResumeState, error) {
-	if rigName != "hisn" {
-		return nil, fmt.Errorf("same-MR recovery is opt-in for hisn only")
+	if _, err := recoveryRig(rigName); err != nil {
+		return nil, err
 	}
 	if blocked, reason := IsRigParkedOrDocked(townRoot, rigName); blocked {
 		return nil, fmt.Errorf("rig %s", reason)
 	}
-	b := mqResumeBeads(townRoot)
+	b := mqResumeBeads(townRoot, rigName)
 	state, err := validateMQResumeRecords(rigName, mrID, b.Show)
 	if err != nil {
 		return nil, err
@@ -321,10 +327,10 @@ func validateMQResumeContext(townRoot string, fields *capacity.SlingContextField
 	var state *mqResumeState
 	var err error
 	if fields.ResumeDependency {
-		if fields.TargetRig != "hisn" || fields.ResumeMR != "" {
+		if _, specErr := recoveryRig(fields.TargetRig); specErr != nil || fields.ResumeMR != "" {
 			return nil, fmt.Errorf("invalid dependency recovery context")
 		}
-		state, err = loadDependencyResume(townRoot, fields.WorkBeadID)
+		state, err = loadDependencyResume(townRoot, fields.WorkBeadID, fields.TargetRig)
 	} else {
 		state, err = loadMQResumeState(townRoot, fields.TargetRig, fields.ResumeMR)
 	}
@@ -360,7 +366,7 @@ func runMQResume(cmd *cobra.Command, args []string) error {
 	}
 	result := mqResumeOutput(state, "ready-to-queue", "")
 	if !mqResumeDryRun {
-		b := mqResumeBeads(townRoot)
+		b := mqResumeBeads(townRoot, args[0])
 		result, err = queueMQResume(townRoot, state, func() (*mqResumeState, error) { return loadMQResumeState(townRoot, args[0], args[1]) }, b.ListOpenSlingContexts, b.CreateSlingContext)
 		if err != nil {
 			return err
@@ -378,13 +384,13 @@ func validateMQResumeCaller(role, rigName, actor string) error {
 	if role == "" {
 		return nil
 	}
-	if role == "hisn/refinery" && rigName == "hisn" && actor == "hisn/refinery" {
+	if _, err := recoveryRig(rigName); err == nil && role == rigName+"/refinery" && actor == role {
 		return nil
 	}
 	if role == "mayor" && (actor == "mayor" || actor == "mayor/") {
 		return nil
 	}
-	return fmt.Errorf("same-MR resume requires the Hisn Refinery, Mayor or a neutral operator")
+	return fmt.Errorf("same-MR resume requires the owning Refinery, Mayor or a neutral operator")
 }
 
 func mqResumeOutput(state *mqResumeState, status, contextID string) mqResumeResult {
@@ -507,7 +513,7 @@ func dispatchMQResume(townRoot string, fields *capacity.SlingContextFields) (*Sl
 			if err := mqResumeHookCommand(townRoot, state, fields).Run(); err != nil {
 				return fmt.Errorf("hook failed: %w", err)
 			}
-			hooked, err := mqResumeBeads(townRoot).Show(fields.WorkBeadID)
+			hooked, err := mqResumeBeads(townRoot, fields.TargetRig).Show(fields.WorkBeadID)
 			if err != nil {
 				return err
 			}
@@ -517,12 +523,12 @@ func dispatchMQResume(townRoot string, fields *capacity.SlingContextFields) (*Sl
 }
 
 func mqResumeHookCommand(townRoot string, state *mqResumeState, fields *capacity.SlingContextFields) *bdCmd {
-	root := filepath.Join(townRoot, "hisn", "mayor", "rig")
+	root := filepath.Join(townRoot, fields.TargetRig, "mayor", "rig")
 	actor := fields.TargetRig + "/polecats/" + fields.ResumeWorker
 	// Dir controls cwd but its implicit pin does not search upward. Match the
 	// read/context wrapper's rig authority, including rig .beads redirects.
 	return BdCmd("update", fields.WorkBeadID, "--if-status="+state.Source.Status, "--status=hooked", "--assignee="+actor).
-		Dir(root).WithBeadsDir(beads.ResolveBeadsDir(filepath.Join(townRoot, "hisn"))).WithAutoCommit()
+		Dir(root).WithBeadsDir(beads.ResolveBeadsDir(filepath.Join(townRoot, fields.TargetRig))).WithAutoCommit()
 }
 
 func verifyMQResumeHook(source, hooked *beads.Issue, actor string) error {

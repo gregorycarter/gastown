@@ -12,7 +12,8 @@ import (
 )
 
 func shouldCheckpointBlockedDone(rig, exitType, issue string) bool {
-	return rig == "hisn" && (exitType == ExitDeferred || exitType == ExitEscalated) && strings.HasPrefix(issue, "hisn-") && !strings.Contains(issue, "-wfs-") && !strings.Contains(issue, "-wisp-")
+	spec, err := recoveryRig(rig)
+	return err == nil && (exitType == ExitDeferred || exitType == ExitEscalated) && strings.HasPrefix(issue, spec.Prefix+"-") && !strings.Contains(issue, "-wfs-") && !strings.Contains(issue, "-wisp-")
 }
 
 type blockedDoneHandoff struct {
@@ -27,7 +28,11 @@ type blockedDoneHandoff struct {
 // A deferred exit preserves a remotely resumable branch and a bounded handoff
 // before releasing the worker. Failed pushes leave the original session intact.
 func checkpointBlockedDone(town, cwd, actor, issue, branch, exitType string) error {
-	b := mqResumeBeads(town)
+	spec, err := recoveryRigForSource(issue)
+	if err != nil || !strings.HasPrefix(actor, spec.Name+"/polecats/") {
+		return fmt.Errorf("blocked exit rig/source mismatch")
+	}
+	b := mqResumeBeads(town, spec.Name)
 	source, err := b.Show(issue)
 	if err != nil {
 		return err
@@ -78,17 +83,21 @@ func checkpointBlockedDone(town, cwd, actor, issue, branch, exitType string) err
 	if err := checkpoint.Write(cwd, cp); err != nil {
 		return err
 	}
+	preservedAssignee := ""
+	if spec.Name == "kasb_core" {
+		preservedAssignee = actor
+	}
 	if err := BdCmd("update", issue, "--if-status="+source.Status, "--if-assignee="+actor,
-		"--status=blocked", "--assignee=", "--set-metadata=handoff="+string(raw),
+		"--status=blocked", "--assignee="+preservedAssignee, "--set-metadata=handoff="+string(raw),
 		"--set-metadata=holdUntil="+handoff.HoldUntil).Dir(cwd).
-		WithBeadsDir(beads.ResolveBeadsDir(filepath.Join(town, "hisn"))).WithAutoCommit().Run(); err != nil {
+		WithBeadsDir(beads.ResolveBeadsDir(filepath.Join(town, spec.Name))).WithAutoCommit().Run(); err != nil {
 		return err
 	}
 	after, err := b.Show(issue)
 	if err != nil {
 		return err
 	}
-	if after.Status != "blocked" || after.Assignee != "" || after.Description != source.Description {
+	if after.Status != "blocked" || after.Assignee != preservedAssignee || after.Description != source.Description {
 		return fmt.Errorf("blocked exit source update unconfirmed")
 	}
 	return nil

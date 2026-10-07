@@ -125,12 +125,17 @@ func onlyWorkerRuntime(processes []byte, root string) bool {
 }
 
 func inspectWaitingWorker(town string, source *beads.Issue) (*waitingEvidence, error) {
-	worker := strings.TrimPrefix(source.Assignee, "hisn/polecats/")
+	spec, specErr := recoveryRigForSource(source.ID)
+	if specErr != nil {
+		return nil, specErr
+	}
+	rigName := spec.Name
+	worker := strings.TrimPrefix(source.Assignee, rigName+"/polecats/")
 	if worker == source.Assignee || !workerNamePattern.MatchString(worker) || (source.Status != "in_progress" && source.Status != "hooked") {
 		return nil, fmt.Errorf("not active worker ownership")
 	}
-	root := filepath.Join(town, "hisn", "polecats", worker, "hisn")
-	home := filepath.Join(town, ".runtime", "codex-homes", "hisn", "polecats", worker)
+	root := filepath.Join(town, rigName, "polecats", worker, rigName)
+	home := filepath.Join(town, ".runtime", "codex-homes", rigName, "polecats", worker)
 	var launch struct {
 		Timestamp        time.Time
 		PID              int
@@ -147,7 +152,7 @@ func inspectWaitingWorker(town string, source *beads.Issue) (*waitingEvidence, e
 		return nil, fmt.Errorf("runtime ownership mismatch")
 	}
 	t := tmux.NewTmux()
-	sid := session.PolecatSessionName("hisn", worker)
+	sid := session.PolecatSessionName(spec.Prefix, worker)
 	info, err := t.GetSessionInfo(sid)
 	if err != nil {
 		return nil, err
@@ -174,7 +179,7 @@ func inspectWaitingWorker(town string, source *beads.Issue) (*waitingEvidence, e
 		return nil, err
 	}
 	for _, line := range strings.Split(string(containers), "\n") {
-		if strings.HasPrefix(line, "hisn-jest-") || strings.HasPrefix(line, "hisn-unit-pg-") || strings.Contains(line, root) {
+		if strings.HasPrefix(line, spec.Prefix+"-jest-") || strings.HasPrefix(line, spec.Prefix+"-unit-pg-") || strings.Contains(line, root) {
 			return nil, fmt.Errorf("test or checkout container active")
 		}
 	}
@@ -220,13 +225,22 @@ func inspectWaitingWorker(town string, source *beads.Issue) (*waitingEvidence, e
 		return nil, err
 	}
 	files, _ := filepath.Glob(filepath.Join(root, ".delivery", "preflight", head+"-*.json"))
+	if rigName == "kasb_core" {
+		files, _ = filepath.Glob(filepath.Join(root, ".delivery", "preflight-receipts", "*.json"))
+	}
 	var receipt string
 	var latest time.Time
 	var passed bool
 	for _, p := range files {
 		var r struct {
 			Head, Bead, Status string
-			CompletedAt        time.Time
+			HeadSHA            string    `json:"head_sha"`
+			SourceBead         string    `json:"source_bead_id"`
+			FinishedAt         time.Time `json:"finished_at"`
+			Commands           []struct {
+				FinishedAt time.Time `json:"finished_at"`
+			} `json:"commands"`
+			CompletedAt time.Time
 		}
 		raw, e := os.ReadFile(p)
 		if e != nil {
@@ -235,10 +249,21 @@ func inspectWaitingWorker(town string, source *beads.Issue) (*waitingEvidence, e
 		if json.Unmarshal(raw, &r) != nil {
 			continue
 		}
+		if rigName == "kasb_core" {
+			if r.Status != "failed" && r.Status != "failed_red_probe" && r.Status != "passed" && r.Status != "passed_non_behavioral" {
+				continue
+			}
+			r.Head, r.Bead, r.CompletedAt = r.HeadSHA, r.SourceBead, r.FinishedAt
+			for _, command := range r.Commands {
+				if command.FinishedAt.After(r.CompletedAt) {
+					r.CompletedAt = command.FinishedAt
+				}
+			}
+		}
 		if r.Head == head && r.Bead == source.ID && r.CompletedAt.After(latest) {
 			latest = r.CompletedAt
 			receipt = p
-			passed = r.Status == "passed"
+			passed = r.Status == "passed" || r.Status == "passed_non_behavioral"
 		}
 	}
 	if receipt == "" || passed || latest.After(completed) || latest.Before(launch.Timestamp) {
@@ -247,12 +272,16 @@ func inspectWaitingWorker(town string, source *beads.Issue) (*waitingEvidence, e
 	return &waitingEvidence{Worker: worker, Source: source.ID, Branch: branch, Head: head, Rollout: rollout, Preflight: receipt, Completed: completed}, nil
 }
 
-func reconcileWaitingWorkers(town string, dry bool) ([]waitingEvidence, error) {
+func reconcileWaitingWorkers(town string, dry bool, rigs ...string) ([]waitingEvidence, error) {
+	rigName := recoveryName(rigs)
+	if _, err := recoveryRig(rigName); err != nil {
+		return nil, err
+	}
 	result := []waitingEvidence{}
-	if parked, _ := IsRigParkedOrDocked(town, "hisn"); parked {
+	if parked, _ := IsRigParkedOrDocked(town, rigName); parked {
 		return result, nil
 	}
-	b := mqResumeBeads(town)
+	b := mqResumeBeads(town, rigName)
 	for _, status := range []string{"in_progress", "hooked"} {
 		sources, err := b.List(beads.ListOptions{Status: status, Limit: 0, Priority: -1})
 		if err != nil {
@@ -281,11 +310,11 @@ func reconcileWaitingWorkers(town string, dry bool) ([]waitingEvidence, error) {
 				if err != nil || *again != *evidence {
 					return
 				}
-				root := filepath.Join(town, "hisn", "polecats", evidence.Worker, "hisn")
+				root := filepath.Join(town, rigName, "polecats", evidence.Worker, rigName)
 				// A failed preflight is an explicit hold, not permission to resling the
 				// same completed prerequisites. Retain exact evidence for disposition.
 				note := fmt.Sprintf("Completed worker turn waiting after failed preflight. Preserved branch %s at %s. Proof: %s; runtime: %s. Resolve failure and remove needs-review before recovery.", evidence.Branch, evidence.Head, evidence.Preflight, evidence.Rollout)
-				if err = BdCmd("update", source.ID, "--if-status="+fresh.Status, "--if-assignee="+fresh.Assignee, "--add-label=needs-review", "--append-notes="+note).Dir(root).WithBeadsDir(beads.ResolveBeadsDir(filepath.Join(town, "hisn"))).WithAutoCommit().Run(); err != nil {
+				if err = BdCmd("update", source.ID, "--if-status="+fresh.Status, "--if-assignee="+fresh.Assignee, "--add-label=needs-review", "--append-notes="+note).Dir(root).WithBeadsDir(beads.ResolveBeadsDir(filepath.Join(town, rigName))).WithAutoCommit().Run(); err != nil {
 					return
 				}
 				if err = checkpointBlockedDone(town, root, fresh.Assignee, source.ID, evidence.Branch, ExitDeferred); err != nil {
@@ -296,7 +325,7 @@ func reconcileWaitingWorkers(town string, dry bool) ([]waitingEvidence, error) {
 				if err != nil || *last != *evidence {
 					return
 				}
-				manager, _, err := getSessionManager("hisn")
+				manager, _, err := getSessionManager(rigName)
 				if err != nil {
 					return
 				}
@@ -313,9 +342,9 @@ func reconcileWaitingWorkers(town string, dry bool) ([]waitingEvidence, error) {
 
 func init() {
 	var dry bool
-	c := &cobra.Command{Use: "reconcile-waiting hisn", Short: "Preserve completed worker turns waiting after failed preflight", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if args[0] != "hisn" {
-			return fmt.Errorf("only hisn is enabled")
+	c := &cobra.Command{Use: "reconcile-waiting <rig>", Short: "Preserve completed worker turns waiting after failed preflight", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if _, err := recoveryRig(args[0]); err != nil {
+			return err
 		}
 		if err := validateMQResumeCaller(os.Getenv("GT_ROLE"), os.Getenv("GT_RIG"), os.Getenv("BD_ACTOR")); err != nil {
 			return err
@@ -324,7 +353,7 @@ func init() {
 		if err != nil {
 			return err
 		}
-		rows, err := reconcileWaitingWorkers(town, dry)
+		rows, err := reconcileWaitingWorkers(town, dry, args[0])
 		if err != nil {
 			return err
 		}

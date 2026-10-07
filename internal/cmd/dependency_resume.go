@@ -18,9 +18,9 @@ var workerNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 func init() {
 	var dry bool
-	c := &cobra.Command{Use: "recover-dependencies hisn", Short: "Queue preserved workers whose recorded dependencies have closed", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if args[0] != "hisn" {
-			return fmt.Errorf("dependency recovery is opt-in for hisn")
+	c := &cobra.Command{Use: "recover-dependencies <rig>", Short: "Queue preserved workers whose recorded dependencies have closed", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if _, err := recoveryRig(args[0]); err != nil {
+			return err
 		}
 		if err := validateMQResumeCaller(os.Getenv("GT_ROLE"), os.Getenv("GT_RIG"), os.Getenv("BD_ACTOR")); err != nil {
 			return err
@@ -29,7 +29,7 @@ func init() {
 		if err != nil {
 			return err
 		}
-		result, err := recoverDependencies(town, dry)
+		result, err := recoverDependencies(town, dry, args[0])
 		if err != nil {
 			return err
 		}
@@ -43,9 +43,13 @@ func dependencyResumeSource(source *beads.Issue, show func(string) (*beads.Issue
 	if source == nil || (source.Status != "open" && source.Status != "blocked") || mqResumeHeld(source) || capacity.IsMessagingBead(source.Labels) || source.Type == "epic" {
 		return "", fmt.Errorf("not preserved dependency-blocked work")
 	}
-	worker := strings.TrimPrefix(source.Assignee, "hisn/polecats/")
+	spec, err := recoveryRigForSource(source.ID)
+	if err != nil {
+		return "", err
+	}
+	worker := strings.TrimPrefix(source.Assignee, spec.Name+"/polecats/")
 	if worker == source.Assignee || !workerNamePattern.MatchString(worker) {
-		return "", fmt.Errorf("source has no original Hisn worker")
+		return "", fmt.Errorf("source has no original recovery worker")
 	}
 	for _, label := range source.Labels {
 		if strings.HasPrefix(label, "awaiting-merge:") || label == "needs-review" || label == "needs-rebase" {
@@ -69,11 +73,16 @@ func dependencyResumeSource(source *beads.Issue, show func(string) (*beads.Issue
 
 // No resets, fresh molecules, new MRs or remote-head assumptions: unpublished
 // commits stay on the original branch. Dirty worktrees remain preserved for review.
-func loadDependencyResume(town, id string) (*mqResumeState, error) {
-	if blocked, reason := IsRigParkedOrDocked(town, "hisn"); blocked {
+func loadDependencyResume(town, id string, rigs ...string) (*mqResumeState, error) {
+	rigName := recoveryName(rigs)
+	spec, err := recoveryRig(rigName)
+	if err != nil || !strings.HasPrefix(id, spec.Prefix+"-") {
+		return nil, fmt.Errorf("source/rig mismatch")
+	}
+	if blocked, reason := IsRigParkedOrDocked(town, rigName); blocked {
 		return nil, fmt.Errorf("rig %s", reason)
 	}
-	b := mqResumeBeads(town)
+	b := mqResumeBeads(town, rigName)
 	source, err := b.Show(id)
 	if err != nil {
 		return nil, err
@@ -98,7 +107,7 @@ func loadDependencyResume(town, id string) (*mqResumeState, error) {
 			return nil, fmt.Errorf("existing MR %s requires same-MR recovery", mr.ID)
 		}
 	}
-	root := filepath.Join(town, "hisn", "polecats", worker, "hisn")
+	root := filepath.Join(town, rigName, "polecats", worker, rigName)
 	branch, err := mqResumeGit(root, "branch", "--show-current")
 	if err != nil {
 		return nil, err
@@ -115,7 +124,7 @@ func loadDependencyResume(town, id string) (*mqResumeState, error) {
 		ID, Status, Assignee, Description string
 		Labels                            []string
 	}{source.ID, source.Status, source.Assignee, source.Description, source.Labels})
-	r := mqResumeRecord{SchemaVersion: 1, Kind: "dependency-resume", Rig: "hisn", Source: id, Worker: worker, Branch: branch, Submitted: head, DescriptionSHA256: mqResumeHash(string(signature))}
+	r := mqResumeRecord{SchemaVersion: 1, Kind: "dependency-resume", Rig: rigName, Source: id, Worker: worker, Branch: branch, Submitted: head, DescriptionSHA256: mqResumeHash(string(signature))}
 	r.Instructions = fmt.Sprintf("Resume preserved source %s on this original worker and branch. Its recorded prerequisites are closed. Preserve unpublished commits. Fetch main, integrate the prerequisite fixes, finish the original work and run required preflight. Reuse any original MR; never create replacement work. If blocked again, record the actual prerequisite and stop cleanly.", id)
 	raw, _ := json.Marshal(r)
 	state := &mqResumeState{Source: source, Record: r, ReceiptHash: mqResumeHash(string(raw))}
@@ -125,7 +134,11 @@ func loadDependencyResume(town, id string) (*mqResumeState, error) {
 	return state, nil
 }
 
-func recoverDependencies(town string, dry bool) ([]mqResumeResult, error) {
+func recoverDependencies(town string, dry bool, rigs ...string) ([]mqResumeResult, error) {
+	rigName := recoveryName(rigs)
+	if _, err := recoveryRig(rigName); err != nil {
+		return nil, err
+	}
 	result := []mqResumeResult{}
 	max, err := configuredSchedulerMaxPolecats(town)
 	if err != nil {
@@ -141,27 +154,27 @@ func recoverDependencies(town string, dry bool) ([]mqResumeResult, error) {
 	if scheduler.Paused {
 		return result, nil
 	}
-	if blocked, _ := IsRigParkedOrDocked(town, "hisn"); blocked {
+	if blocked, _ := IsRigParkedOrDocked(town, rigName); blocked {
 		return result, nil
 	}
-	b := mqResumeBeads(town)
+	b := mqResumeBeads(town, rigName)
 	for _, status := range []string{"blocked", "open"} {
 		sources, err := b.List(beads.ListOptions{Status: status, Limit: 0, Priority: -1})
 		if err != nil {
 			return nil, err
 		}
 		for _, source := range sources {
-			if !strings.HasPrefix(source.Assignee, "hisn/polecats/") {
+			if !strings.HasPrefix(source.Assignee, rigName+"/polecats/") {
 				continue
 			}
-			state, err := loadDependencyResume(town, source.ID)
+			state, err := loadDependencyResume(town, source.ID, rigName)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Dependency recovery %s retained: %v\n", source.ID, err)
 				continue
 			}
 			row := mqResumeOutput(state, "ready-to-queue", "")
 			if !dry {
-				row, err = queueMQResume(town, state, func() (*mqResumeState, error) { return loadDependencyResume(town, source.ID) }, b.ListOpenSlingContexts, b.CreateSlingContext, b.UpdateSlingContextFields)
+				row, err = queueMQResume(town, state, func() (*mqResumeState, error) { return loadDependencyResume(town, source.ID, rigName) }, b.ListOpenSlingContexts, b.CreateSlingContext, b.UpdateSlingContextFields)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Dependency recovery %s retained: %v\n", source.ID, err)
 					continue
@@ -176,13 +189,16 @@ func recoverDependencies(town string, dry bool) ([]mqResumeResult, error) {
 		return result, err
 	}
 	for _, mr := range mrs {
-		state, err := loadMQResumeState(town, "hisn", mr.ID)
+		state, err := loadMQResumeState(town, rigName, mr.ID)
+		if err != nil && rigName == "kasb_core" {
+			state, err = prepareKasbRecovery(town, mr.ID, dry)
+		}
 		if err != nil {
 			continue
 		}
 		row := mqResumeOutput(state, "ready-to-queue", "")
 		if !dry {
-			row, err = queueMQResume(town, state, func() (*mqResumeState, error) { return loadMQResumeState(town, "hisn", mr.ID) }, b.ListOpenSlingContexts, b.CreateSlingContext, b.UpdateSlingContextFields)
+			row, err = queueMQResume(town, state, func() (*mqResumeState, error) { return loadMQResumeState(town, rigName, mr.ID) }, b.ListOpenSlingContexts, b.CreateSlingContext, b.UpdateSlingContextFields)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "MR recovery %s retained: %v\n", mr.ID, err)
 				continue
