@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
+	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -79,6 +80,9 @@ func outputPrimeContext(ctx RoleContext) (string, error) {
 		DogName:       ctx.Polecat, // ctx.Polecat holds the dog name for RoleDog
 		MayorSession:  session.MayorSessionName(),
 		DeaconSession: session.DeaconSessionName(),
+	}
+	if roleName == constants.RoleRefinery {
+		data.CustomPatrolFormula = formula.IsCustomized("mol-refinery-patrol", ctx.TownRoot, ctx.Rig)
 	}
 
 	// Render and output

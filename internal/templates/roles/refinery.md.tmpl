@@ -97,7 +97,7 @@ directory.
 - If integration-target merging is enabled: use MR target when present, fallback `{{ .DefaultBranch }}`
 - If integration-target merging is disabled: always use `{{ .DefaultBranch }}`
 
-**Example: Handling a Conflict**
+{{ if not .CustomPatrolFormula }}**Example: Handling a Conflict**
 ```bash
 git checkout -b temp origin/polecat/rictus-12345
 # Resolve <rebase-target> per Target Resolution Rule above.
@@ -109,7 +109,22 @@ git status                    # See what conflicted
 gt mail send {{ .RigName }}/witness -s "MERGE_FAILED" -m "Branch polecat/rictus-12345 has unresolvable conflicts. Source issue reopened."
 ```
 
-## Patrol Molecule: mol-refinery-patrol
+{{ end }}{{ if .CustomPatrolFormula }}## Patrol Molecule: mol-refinery-patrol (town/rig formula)
+
+**This town supplies its own `mol-refinery-patrol` formula.** Its steps, rendered
+further down in this prime output, are the ONLY merge and landing procedure.
+Follow them exactly, including the landing command they name.
+
+- **NEVER** merge or push the target branch by hand (`git merge`, `git push origin
+  <target>`, cherry-pick or force-push), even when it looks quicker or a script
+  fails. A failure is reported and handled as the formula says.
+- Do not run your own test gate or manual rebase procedure unless the formula's
+  steps tell you to.
+- Re-read the formula steps after every handoff, compaction or restart. A fresh
+  session that improvises a manual merge can land unreviewed history, such as
+  `WIP: checkpoint (auto)` commits, that the landing tooling would have removed.
+
+{{ else }}## Patrol Molecule: mol-refinery-patrol
 
 Your work is defined by the `mol-refinery-patrol` molecule with these steps:
 
@@ -126,7 +141,7 @@ Your work is defined by the `mol-refinery-patrol` molecule with these steps:
 11. **patrol-cleanup** — End-of-cycle inbox hygiene
 12. **burn-or-loop** — Burn wisp, loop or exit
 
-## Startup Protocol: Propulsion
+{{ end }}## Startup Protocol: Propulsion
 
 > **The Universal Gas Town Propulsion Principle: If you find something on your hook, YOU RUN IT.**
 
@@ -172,7 +187,9 @@ Each patrol cycle uses a wisp (ephemeral molecule):
 ═══════════════════════════════════════════════════════════════
 ```
 
-Step emojis:
+{{ if .CustomPatrolFormula }}Use the step names and banners of your patrol formula.
+
+{{ else }}Step emojis:
 | Step | Emoji | Description |
 |------|-------|-------------|
 | inbox-check | 📥 | Messages, escalations |
@@ -251,7 +268,7 @@ git branch -d polecat/<worker>
 
 **burn-or-loop**: Decision point — continue or handoff.
 
-### Report and Loop (or Exit)
+{{ end }}### Report and Loop (or Exit)
 
 Print summary banner, then report and decide:
 
@@ -274,7 +291,7 @@ RSS_MB=$(( $(ps -o rss= -p $$) / 1024 ))
 
 **NEVER sleep-poll manually.** Use `gt mol step await-signal`.
 
-## CRITICAL: Sequential Rebase Protocol
+{{ if not .CustomPatrolFormula }}## CRITICAL: Sequential Rebase Protocol
 
 ```
 WRONG (parallel merge - causes conflicts):
@@ -310,19 +327,23 @@ gt mail send {{ .RigName }}/witness -s "MERGE_FAILED" \
   -m "Branch polecat/<worker> has unresolvable conflicts with target. Source issue reopened for re-slinging."
 ```
 
-## Key Commands
+{{ end }}## Key Commands
 
 ### Patrol
 - `{{ cmd }} hook` — Check for hooked patrol
 - `{{ cmd }} patrol new` — Create patrol (root-only wisp)
 - `{{ cmd }} patrol report --summary "..."` — Close current patrol, start next cycle
 
-### Git Operations
+{{ if .CustomPatrolFormula }}### Git Operations
+- `git fetch origin` — Fetch all remote branches
+- Landing: only through the command your patrol formula names. Never `git push` the target branch by hand.
+
+{{ else }}### Git Operations
 - `git fetch origin` — Fetch all remote branches
 - `git rebase origin/<rebase-target>` — Rebase on resolved target (per Target Resolution Rule)
 - `git push origin <merge-target>` — Push merged changes to resolved target (per Target Resolution Rule)
 
-**IMPORTANT**: Merge queue source of truth is `{{ cmd }} mq list {{ .RigName }}`, NOT git branches.
+{{ end }}**IMPORTANT**: Merge queue source of truth is `{{ cmd }} mq list {{ .RigName }}`, NOT git branches.
 
 ### Beads CLI Reference
 ```bash

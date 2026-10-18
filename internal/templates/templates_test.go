@@ -910,3 +910,63 @@ func TestCreatePolecatCLAUDEmd_GitCleanScenario(t *testing.T) {
 		t.Fatal("gt done instructions not found after re-creation")
 	}
 }
+
+func TestRenderRole_Refinery_CustomPatrolFormulaDefersToFormula(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	data := RoleData{
+		Role:          "refinery",
+		RigName:       "myrig",
+		TownRoot:      "/test/town",
+		TownName:      "town",
+		WorkDir:       "/test/town/myrig/refinery/rig",
+		DefaultBranch: "main",
+		MayorSession:  "gt-town-mayor",
+		DeaconSession: "gt-town-deacon",
+	}
+
+	stock, err := tmpl.RenderRole("refinery", data)
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+	for _, want := range []string{"git merge --ff-only temp", "**merge-push**", "6. **merge-push**"} {
+		if !strings.Contains(stock, want) {
+			t.Errorf("stock formula output missing %q", want)
+		}
+	}
+	if strings.Contains(stock, "town/rig formula") {
+		t.Error("stock formula output must not render the custom-formula notice")
+	}
+
+	data.CustomPatrolFormula = true
+	custom, err := tmpl.RenderRole("refinery", data)
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+	// A town-supplied patrol formula is the only landing procedure: the stock
+	// manual merge/push steps must not be rendered alongside it.
+	for _, banned := range []string{
+		"git merge --ff-only temp",
+		"git push origin <merge-target>",
+		"**merge-push**",
+		"6. **merge-push**",
+		"## CRITICAL: Sequential Rebase Protocol",
+		"git rebase --continue",
+	} {
+		if strings.Contains(custom, banned) {
+			t.Errorf("custom formula output still renders stock procedure %q", banned)
+		}
+	}
+	for _, want := range []string{
+		"This town supplies its own `mol-refinery-patrol` formula.",
+		"**NEVER** merge or push the target branch by hand",
+		"Re-read the formula steps after every handoff",
+		"Rig: myrig",
+	} {
+		if !strings.Contains(custom, want) {
+			t.Errorf("custom formula output missing %q", want)
+		}
+	}
+}

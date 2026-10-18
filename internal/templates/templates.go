@@ -71,6 +71,12 @@ type RoleData struct {
 	IssuePrefix   string   // beads issue prefix
 	MayorSession  string   // e.g., "gt-ai-mayor" - dynamic mayor session name
 	DeaconSession string   // e.g., "gt-ai-deacon" - dynamic deacon session name
+
+	// CustomPatrolFormula is true when the town or rig supplies its own patrol
+	// formula for this role (content differs from the embedded one). Role
+	// templates then defer to the formula instead of rendering the stock
+	// procedure, so a fresh session cannot follow two conflicting procedures.
+	CustomPatrolFormula bool
 }
 
 // SpawnData contains information for spawn assignment messages.

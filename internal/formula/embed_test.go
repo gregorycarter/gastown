@@ -982,3 +982,38 @@ func TestGetEmbeddedFormulaContent(t *testing.T) {
 		t.Error("expected error for non-existent formula")
 	}
 }
+
+func TestIsCustomized(t *testing.T) {
+	town := t.TempDir()
+	name := "mol-refinery-patrol"
+	embedded, err := GetEmbeddedFormulaContent(name)
+	if err != nil {
+		t.Fatalf("embedded %s: %v", name, err)
+	}
+	if IsCustomized(name, town, "myrig") {
+		t.Fatal("no override: the embedded formula is not customized")
+	}
+
+	townFormulas := filepath.Join(town, ".beads", "formulas")
+	if err := os.MkdirAll(townFormulas, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	townFile := filepath.Join(townFormulas, name+".formula.toml")
+	if err := os.WriteFile(townFile, embedded, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if IsCustomized(name, town, "myrig") {
+		t.Fatal("an installed copy identical to the embedded formula is not customized")
+	}
+
+	if err := os.WriteFile(townFile, append(append([]byte{}, embedded...), []byte("\n# town policy\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !IsCustomized(name, town, "myrig") {
+		t.Fatal("a town formula that differs from the embedded one is customized")
+	}
+
+	if IsCustomized("no-such-formula", town, "myrig") {
+		t.Fatal("an unresolvable formula is not customized")
+	}
+}

@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -95,6 +96,21 @@ func ResolveFormulaContent(name, townRoot, rigName string) ([]byte, error) {
 
 	// Tier 3: embedded (system fallback)
 	return GetEmbeddedFormulaContent(name)
+}
+
+// IsCustomized reports whether the formula that ResolveFormulaContent would use
+// differs from the embedded copy, i.e. the town or rig supplies its own policy.
+// A formula that cannot be resolved at all is not customized.
+func IsCustomized(name, townRoot, rigName string) bool {
+	resolved, err := ResolveFormulaContent(name, townRoot, rigName)
+	if err != nil {
+		return false
+	}
+	embedded, err := GetEmbeddedFormulaContent(name)
+	if err != nil {
+		return true
+	}
+	return !bytes.Equal(resolved, embedded)
 }
 
 // GetEmbeddedFormulaContent returns the raw content of an embedded formula by name.
