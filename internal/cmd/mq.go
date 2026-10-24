@@ -198,7 +198,7 @@ type mqPostMergeManager interface {
 
 type mqPostMergeGit interface {
 	VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error
-	VerifySubmittedWorkLanded(remote, branch, commit string) error
+	SubmittedWorkLandingReceipt(remote, branch, commit string) (string, error)
 	PushRemoteBranchTip(remote, branch string) (string, error)
 	HasOpenPullRequest(ref git.PullRequestRef) bool
 	Rev(ref string) (string, error)
@@ -635,9 +635,16 @@ func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest) er
 	// sequential rebase the landed commit IDs differ, so the proof also accepts a
 	// complete patch-equivalent series on the fetched target (bt-9or5). Anything
 	// less fails closed.
-	if err := rigGit.VerifySubmittedWorkLanded("origin", target, commit); err != nil {
-		return fmt.Errorf("merge proof failed for MR %s: target %s does not contain submitted head %s (exactly or as a complete patch-equivalent series): %w", mr.ID, target, commit, err)
+	landedSHA, err := rigGit.SubmittedWorkLandingReceipt("origin", target, commit)
+	if err != nil {
+		return fmt.Errorf("merge proof failed for MR %s: target %s does not contain submitted head %s with a durable landing receipt: %w", mr.ID, target, commit, err)
 	}
+	if strings.TrimSpace(landedSHA) == "" {
+		return fmt.Errorf("merge proof failed for MR %s: empty landing receipt for target %s and submitted head %s", mr.ID, target, commit)
+	}
+	// Persist the actual proof on the MR and source before ephemeral MR cleanup.
+	// Submitted IDs can change during rebase; commit messages may omit bead IDs.
+	mr.MergeCommit = strings.TrimSpace(landedSHA)
 	return nil
 }
 

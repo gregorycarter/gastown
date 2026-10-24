@@ -2156,37 +2156,46 @@ func (g *Git) VerifyPushedCommitReachableFromPushTarget(remote, branch, commit s
 // the same contract as bridge-town-core's scripts/verify_submitted_work_landed.sh
 // (bt-9or5); the two must be changed together.
 func (g *Git) VerifySubmittedWorkLanded(remote, branch, commit string) error {
+	_, err := g.SubmittedWorkLandingReceipt(remote, branch, commit)
+	return err
+}
+
+// SubmittedWorkLandingReceipt returns a durable SHA for exactly the evidence
+// checked: the submitted SHA when reachable, or the fetched target snapshot
+// containing the complete rebased series. It never uses a stale tracking ref.
+func (g *Git) SubmittedWorkLandingReceipt(remote, branch, commit string) (string, error) {
+	commit = strings.TrimSpace(commit)
 	exactErr := g.VerifyPushedCommitReachableFromPushTarget(remote, branch, commit)
 	if exactErr == nil {
-		return nil
+		return commit, nil
 	}
 	commit = strings.TrimSpace(commit)
 	if commit == "" {
-		return exactErr
+		return "", exactErr
 	}
 	fetchTarget := g.pushTarget(remote)
 	if _, err := g.run("fetch", "--no-tags", fetchTarget, "refs/heads/"+branch); err != nil {
-		return fmt.Errorf("submitted_work_unproven: unable to fetch %s/%s: %w", remote, branch, err)
+		return "", fmt.Errorf("submitted_work_unproven: unable to fetch %s/%s: %w", remote, branch, err)
 	}
 	target, err := g.run("rev-parse", "--verify", "FETCH_HEAD^{commit}")
 	if err != nil {
-		return fmt.Errorf("submitted_work_unproven: unable to resolve fetched %s/%s: %w", remote, branch, err)
+		return "", fmt.Errorf("submitted_work_unproven: unable to resolve fetched %s/%s: %w", remote, branch, err)
 	}
 	mergeBase, err := g.run("merge-base", commit, target)
 	if err != nil {
-		return fmt.Errorf("submitted_work_unproven: commit %s and %s/%s have no common ancestor: %w", shortSHA(commit), remote, branch, err)
+		return "", fmt.Errorf("submitted_work_unproven: commit %s and %s/%s have no common ancestor: %w", shortSHA(commit), remote, branch, err)
 	}
 	countOut, err := g.run("rev-list", "--count", mergeBase+".."+commit)
 	if err != nil {
-		return fmt.Errorf("submitted_work_unproven: unable to count submitted commits for %s: %w", shortSHA(commit), err)
+		return "", fmt.Errorf("submitted_work_unproven: unable to count submitted commits for %s: %w", shortSHA(commit), err)
 	}
 	submittedCount, err := strconv.Atoi(strings.TrimSpace(countOut))
 	if err != nil || submittedCount <= 0 {
-		return fmt.Errorf("submitted_work_unproven: commit %s has no commits beyond the merge base with %s/%s (%w)", shortSHA(commit), remote, branch, exactErr)
+		return "", fmt.Errorf("submitted_work_unproven: commit %s has no commits beyond the merge base with %s/%s (%w)", shortSHA(commit), remote, branch, exactErr)
 	}
 	cherryOut, err := g.Cherry(target, commit)
 	if err != nil {
-		return fmt.Errorf("submitted_work_unproven: unable to compare submitted patches with %s/%s: %w", remote, branch, err)
+		return "", fmt.Errorf("submitted_work_unproven: unable to compare submitted patches with %s/%s: %w", remote, branch, err)
 	}
 	observed, equivalent := 0, 0
 	for _, line := range strings.Split(cherryOut, "\n") {
@@ -2196,25 +2205,25 @@ func (g *Git) VerifySubmittedWorkLanded(remote, branch, commit string) error {
 		}
 		fields := strings.Fields(line)
 		if len(fields) != 2 || len(fields[1]) != 40 || !isHexString(fields[1]) {
-			return fmt.Errorf("submitted_work_unproven: unexpected git cherry output %q; refusing proof", line)
+			return "", fmt.Errorf("submitted_work_unproven: unexpected git cherry output %q; refusing proof", line)
 		}
 		observed++
 		switch fields[0] {
 		case "-":
 			equivalent++
 		case "+":
-			return fmt.Errorf("submitted_work_unproven: submitted commit %s has no patch-equivalent on %s/%s (%w)", shortSHA(fields[1]), remote, branch, exactErr)
+			return "", fmt.Errorf("submitted_work_unproven: submitted commit %s has no patch-equivalent on %s/%s (%w)", shortSHA(fields[1]), remote, branch, exactErr)
 		default:
-			return fmt.Errorf("submitted_work_unproven: unexpected git cherry marker %q; refusing proof", fields[0])
+			return "", fmt.Errorf("submitted_work_unproven: unexpected git cherry marker %q; refusing proof", fields[0])
 		}
 	}
 	if observed != submittedCount {
-		return fmt.Errorf("submitted_work_unproven: submitted series could not be compared completely (%d/%d commits; merge or empty commits are not accepted)", observed, submittedCount)
+		return "", fmt.Errorf("submitted_work_unproven: submitted series could not be compared completely (%d/%d commits; merge or empty commits are not accepted)", observed, submittedCount)
 	}
 	if equivalent == 0 {
-		return fmt.Errorf("submitted_work_unproven: no patch-equivalent commits found for %s on %s/%s (%w)", shortSHA(commit), remote, branch, exactErr)
+		return "", fmt.Errorf("submitted_work_unproven: no patch-equivalent commits found for %s on %s/%s (%w)", shortSHA(commit), remote, branch, exactErr)
 	}
-	return nil
+	return target, nil
 }
 
 func isHexString(s string) bool {

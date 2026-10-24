@@ -3865,6 +3865,13 @@ func TestVerifySubmittedWorkLanded_AcceptsRebasedPatchEquivalentSeries(t *testin
 	if err := g.VerifySubmittedWorkLanded("origin", mainBranch, submitted); err != nil {
 		t.Fatalf("patch-equivalent series should be accepted: %v", err)
 	}
+	landedTip := vswlGit(t, localDir, "rev-parse", "HEAD")
+	// A different local tracking ref must not influence the durable proof.
+	vswlGit(t, localDir, "update-ref", "refs/remotes/origin/"+mainBranch, submitted)
+	receipt, err := g.SubmittedWorkLandingReceipt("origin", mainBranch, submitted)
+	if err != nil || receipt != landedTip {
+		t.Fatalf("rebased receipt=%q err=%v, want fetched target %s", receipt, err, landedTip)
+	}
 }
 
 func TestVerifySubmittedWorkLanded_RejectsUnlandedAndEmptyWork(t *testing.T) {

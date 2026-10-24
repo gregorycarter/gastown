@@ -34,12 +34,14 @@ func (m *fakeMQPostMergeManager) PostMergeMR(mr *refinery.MergeRequest) (*refine
 }
 
 type fakeMQPostMergeGit struct {
-	verifyErr error
-	openPR    bool
-	deleteErr error
-	remoteTip string
-	localHead string
-	tipErr    error
+	verifyErr  error
+	openPR     bool
+	deleteErr  error
+	remoteTip  string
+	localHead  string
+	tipErr     error
+	targetTip  string
+	receiptErr error
 
 	verifiedCommits []string
 	deletedBranches []string
@@ -65,8 +67,20 @@ func (g *fakeMQPostMergeGit) PushRemoteBranchTip(_, _ string) (string, error) {
 	return g.remoteTip, g.tipErr
 }
 
-func (g *fakeMQPostMergeGit) Rev(string) (string, error) {
-	return g.localHead, nil
+func (g *fakeMQPostMergeGit) Rev(string) (string, error) { return g.localHead, nil }
+
+func (g *fakeMQPostMergeGit) SubmittedWorkLandingReceipt(_, _, commit string) (string, error) {
+	g.verifiedCommits = append(g.verifiedCommits, commit)
+	if g.verifyErr != nil {
+		return "", g.verifyErr
+	}
+	if g.receiptErr != nil {
+		return "", g.receiptErr
+	}
+	if g.targetTip != "" {
+		return g.targetTip, nil
+	}
+	return commit, nil
 }
 
 func (g *fakeMQPostMergeGit) DeleteRemoteBranchIfAt(_, branch, expectedHash string) error {
@@ -260,5 +274,30 @@ func TestRunVerifiedMQPostMerge_SourceTargetBranchFailsClosed(t *testing.T) {
 	}
 	if len(rigGit.deletedBranches) != 0 {
 		t.Fatalf("branch deleted when source matched target: %v", rigGit.deletedBranches)
+	}
+}
+
+func TestRunVerifiedMQPostMergePersistsRebasedLandingReceipt(t *testing.T) {
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	g := &fakeMQPostMergeGit{targetTip: "fedcba9876543210", remoteTip: mgr.mr.CommitSHA, localHead: mgr.mr.CommitSHA}
+	if _, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), g, mgr.mr.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if mgr.postMergeMR.MergeCommit != g.targetTip {
+		t.Fatalf("receipt=%q, want verified landed target %q", mgr.postMergeMR.MergeCommit, g.targetTip)
+	}
+	if mgr.postMergeMR.MergeCommit == mgr.postMergeMR.CommitSHA {
+		t.Fatal("receipt incorrectly cites pre-rebase submitted SHA")
+	}
+}
+
+func TestRunVerifiedMQPostMergeTargetReceiptFailurePreservesRecords(t *testing.T) {
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	g := &fakeMQPostMergeGit{receiptErr: errors.New("ref unavailable")}
+	if _, _, err := runVerifiedMQPostMerge(mgr, t.TempDir(), g, mgr.mr.ID, false); err == nil {
+		t.Fatal("missing durable receipt accepted")
+	}
+	if mgr.postMergeCalled || len(g.deletedBranches) > 0 || len(g.localDeleted) > 0 {
+		t.Fatal("receipt failure mutated closure or branch")
 	}
 }
