@@ -100,6 +100,8 @@ type AgentRestartInfo struct {
 	RestartCount   int       `json:"restart_count"`
 	BackoffUntil   time.Time `json:"backoff_until"`
 	CrashLoopSince time.Time `json:"crash_loop_since,omitempty"`
+	HealthySince   time.Time `json:"healthy_since,omitempty"`
+	LastHeartbeat  time.Time `json:"last_heartbeat,omitempty"`
 }
 
 // NewRestartTracker creates a new restart tracker with the given config.
@@ -185,6 +187,8 @@ func (rt *RestartTracker) RecordRestart(agentID string) {
 	}
 
 	info.LastRestart = now
+	info.HealthySince = time.Time{}
+	info.LastHeartbeat = time.Time{}
 	info.RestartCount++
 
 	// Calculate backoff with exponential increase
@@ -226,6 +230,8 @@ func (rt *RestartTracker) RecordPause(agentID string) {
 	}
 
 	info.LastRestart = now
+	info.HealthySince = time.Time{}
+	info.LastHeartbeat = time.Time{}
 	info.BackoffUntil = now.Add(rt.config.PauseBackoff)
 }
 
@@ -246,6 +252,40 @@ func (rt *RestartTracker) RecordSuccess(agentID string) {
 		info.CrashLoopSince = time.Time{}
 		info.BackoffUntil = time.Time{}
 	}
+}
+
+// RecordHealthyHeartbeat recovers a latched crash-loop only after successive
+// real heartbeats span the stability period. A living tmux pane or one startup
+// heartbeat is not health evidence. maxGap accommodates the patrol's 15m wait.
+// The caller persists changed state, including the recovery, across daemon restarts.
+func (rt *RestartTracker) RecordHealthyHeartbeat(agentID string, at, now time.Time, maxGap time.Duration) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	info := rt.state.Agents[agentID]
+	if info == nil || (info.RestartCount == 0 && info.CrashLoopSince.IsZero()) {
+		return false
+	}
+	if at.IsZero() || at.After(now) || now.Sub(at) >= maxGap || !at.After(info.LastRestart) {
+		changed := !info.HealthySince.IsZero() || !info.LastHeartbeat.IsZero()
+		info.HealthySince = time.Time{}
+		info.LastHeartbeat = time.Time{}
+		return changed
+	}
+	if !at.After(info.LastHeartbeat) {
+		return false
+	}
+	if info.HealthySince.IsZero() || at.Sub(info.LastHeartbeat) >= maxGap {
+		info.HealthySince = at
+	}
+	info.LastHeartbeat = at
+	if at.Sub(info.HealthySince) >= rt.config.StabilityPeriod {
+		info.RestartCount = 0
+		info.CrashLoopSince = time.Time{}
+		info.BackoffUntil = time.Time{}
+		info.HealthySince = time.Time{}
+		info.LastHeartbeat = time.Time{}
+	}
+	return true
 }
 
 // IsInCrashLoop returns true if the agent is detected as crash-looping.
@@ -286,6 +326,8 @@ func (rt *RestartTracker) ClearCrashLoop(agentID string) {
 	if exists {
 		info.CrashLoopSince = time.Time{}
 		info.RestartCount = 0
+		info.HealthySince = time.Time{}
+		info.LastHeartbeat = time.Time{}
 		info.BackoffUntil = time.Time{}
 	}
 }

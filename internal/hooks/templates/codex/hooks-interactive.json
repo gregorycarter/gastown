@@ -18,6 +18,10 @@
           {
             "type": "command",
             "command": "{{GT_BIN}} costs record >/dev/null 2>&1 &"
+          },
+          {
+            "type": "command",
+            "command": "{{GT_BIN}} tap deacon-stop-check"
           }
         ]
       }

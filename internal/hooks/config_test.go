@@ -1331,3 +1331,24 @@ func TestMarshalConfig(t *testing.T) {
 		t.Errorf("round-trip lost SessionStart hooks")
 	}
 }
+
+func TestDeaconStopContinuationIsRoleScoped(t *testing.T) {
+	overrides := DefaultOverrides()
+	stop := overrides["deacon"].Stop
+	if len(stop) != 1 || len(stop[0].Hooks) != 2 || !strings.Contains(stop[0].Hooks[1].Command, "deacon-stop-check") {
+		t.Fatalf("Deacon continuation hook missing: %+v", stop)
+	}
+	for _, role := range []string{"mayor", "witness", "refinery", "crew", "polecats"} {
+		cfg := overrides[role]
+		if cfg == nil {
+			continue
+		}
+		for _, entry := range cfg.Stop {
+			for _, hook := range entry.Hooks {
+				if strings.Contains(hook.Command, "deacon-stop-check") {
+					t.Fatalf("Deacon hook leaked to %s", role)
+				}
+			}
+		}
+	}
+}

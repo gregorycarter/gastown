@@ -1602,6 +1602,8 @@ func (d *Daemon) runDegradedBootTriage(b *boot.Boot) {
 func (d *Daemon) ensureDeaconRunning() {
 	const agentID = "deacon"
 
+	d.observeDeaconRecoveryHeartbeat()
+
 	// Check restart tracker for backoff/crash loop
 	if d.restartTracker != nil {
 		if d.restartTracker.IsInCrashLoop(agentID) {
@@ -1619,10 +1621,7 @@ func (d *Daemon) ensureDeaconRunning() {
 
 	if err := mgr.Start(""); err != nil {
 		if err == deacon.ErrAlreadyRunning {
-			// Deacon is running - record success to reset backoff
-			if d.restartTracker != nil {
-				d.restartTracker.RecordSuccess(agentID)
-			}
+			// A living agent process alone does not prove patrol progress.
 			return
 		}
 		d.logger.Printf("Error starting Deacon: %v", err)
@@ -1652,6 +1651,24 @@ func (d *Daemon) deaconGracePeriod() time.Duration {
 	return d.loadOperationalConfig().GetDaemonConfig().DeaconGracePeriodD()
 }
 
+// observeDeaconRecoveryHeartbeat runs before the crash-loop guards so an
+// operator-restarted, genuinely progressing patrol can recover automatically.
+func (d *Daemon) observeDeaconRecoveryHeartbeat() {
+	if d.restartTracker == nil {
+		return
+	}
+	hb := deacon.ReadHeartbeat(d.config.TownRoot)
+	at := time.Time{}
+	if hb != nil {
+		at = hb.Timestamp
+	}
+	if d.restartTracker.RecordHealthyHeartbeat("deacon", at, time.Now(), deacon.HeartbeatVeryStaleThreshold) {
+		if err := d.restartTracker.Save(); err != nil {
+			d.logger.Printf("Warning: failed to save Deacon heartbeat recovery: %v", err)
+		}
+	}
+}
+
 // checkDeaconHeartbeat checks if the Deacon is making progress.
 // This is a belt-and-suspenders fallback in case Boot doesn't detect stuck states.
 // Uses the heartbeat file that the Deacon updates on each patrol cycle.
@@ -1662,6 +1679,7 @@ func (d *Daemon) deaconGracePeriod() time.Duration {
 // - Grace period only applies if heartbeat is from BEFORE we started Deacon
 // - If heartbeat is from AFTER start but stale, Deacon is stuck
 func (d *Daemon) checkDeaconHeartbeat() {
+	d.observeDeaconRecoveryHeartbeat()
 	// Respect crash-loop guard: if the restart tracker says Deacon is in a
 	// crash loop, do not kill the session — the guard is deliberately holding
 	// off restarts to break the cycle. (Fixes #2086)

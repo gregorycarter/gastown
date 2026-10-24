@@ -412,6 +412,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// Deacon roles: patrol-formula-guard (same as witness).
 		// Deacons also run patrols and must use wisps, not persistent molecules.
 		"deacon": {
+			Stop:             []HookEntry{{Matcher: "", Hooks: []Hook{{Type: "command", Command: gtCommand("gt costs record >/dev/null 2>&1 &")}, {Type: "command", Command: gtCommand("gt tap deacon-stop-check")}}}},
 			UserPromptSubmit: []HookEntry{{Matcher: ""}},
 			PreToolUse: []HookEntry{
 				{
