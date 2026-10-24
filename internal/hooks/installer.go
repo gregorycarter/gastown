@@ -51,11 +51,11 @@ func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile st
 	}
 
 	targetPath := installTargetPath(settingsDir, workDir, hooksDir, hooksFile, useSettingsDir)
-	if provider == "claude" && role == "boot" && isSettingsFile(hooksFile) {
+	if provider == "claude" && (role == "boot" || role == "deacon") && isSettingsFile(hooksFile) {
 		_, err := SyncManagedClaudeSettings(Target{
 			Path:     targetPath,
-			Key:      "boot",
-			Role:     "boot",
+			Key:      role,
+			Role:     role,
 			Provider: "claude",
 		}, false)
 		return err

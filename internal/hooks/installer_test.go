@@ -794,3 +794,25 @@ func TestTemplateContentEqual(t *testing.T) {
 		t.Error("expected invalid JSON to not match")
 	}
 }
+
+func TestInstallForRoleDeaconUpgradesExistingStopHook(t *testing.T) {
+	dir := t.TempDir()
+	setTestHome(t, t.TempDir())
+	target := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{"theme":"dark","hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"gt costs record"}]}]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallForRole("claude", dir, dir, "deacon", ".claude", "settings.json", true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "deacon-stop-check") || !strings.Contains(string(got), `"theme": "dark"`) {
+		t.Fatalf("missing continuation or lost settings: %s", got)
+	}
+}
