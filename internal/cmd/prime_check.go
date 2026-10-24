@@ -90,9 +90,45 @@ func runPrimeCheck(cmd *cobra.Command, info RoleInfo, beadID string) error {
 	if err := ensureRoleWorktreeIntegrity(info.WorkDir, info.TownRoot, info.Role); err != nil {
 		return err
 	}
+	gitDir := info.WorkDir
+	townRepository := info.Role == RoleMayor || info.Role == RoleDeacon
+	if townRepository {
+		// Town roles live below the umbrella repository, not in their own
+		// checkouts. Session Git ceilings deliberately prevent upward discovery.
+		// Select the validated town explicitly; never relax the session ceiling.
+		var err error
+		gitDir, err = filepath.EvalSymlinks(info.TownRoot)
+		if err != nil {
+			return err
+		}
+		cwd, err := filepath.EvalSymlinks(info.WorkDir)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(gitDir, cwd)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("role home is outside canonical town %s", gitDir)
+		}
+		if _, err := os.Lstat(filepath.Join(gitDir, ".git")); err != nil {
+			return fmt.Errorf("town repository metadata missing: %w", err)
+		}
+		if err := ensureRoleWorktreeIntegrity(gitDir, gitDir, info.Role); err != nil {
+			return err
+		}
+	}
 	readGit := func(args ...string) (string, error) {
-		out, err := primeCheckCommand(info.WorkDir, "git", args...)
+		out, err := primeCheckCommand(gitDir, "git", args...)
 		return strings.TrimSpace(string(out)), err
+	}
+	repoRoot, err := readGit("rev-parse", "--show-toplevel")
+	if err != nil {
+		return err
+	}
+	if townRepository {
+		actualRoot, err := filepath.EvalSymlinks(repoRoot)
+		if err != nil || actualRoot != gitDir {
+			return fmt.Errorf("Git repository is not the canonical town %s", gitDir)
+		}
 	}
 	branch, err := readGit("branch", "--show-current")
 	if err != nil {
@@ -115,7 +151,7 @@ func runPrimeCheck(cmd *cobra.Command, info RoleInfo, beadID string) error {
 			return fmt.Errorf("worker branch has no work bead; specify --work-bead")
 		}
 	}
-	result := map[string]interface{}{"ok": true, "role": getAgentIdentity(info), "cwd": info.WorkDir, "branch": branch, "head": head, "changed_paths": 0, "checked_at": time.Now().UTC().Format(time.RFC3339)}
+	result := map[string]interface{}{"ok": true, "role": getAgentIdentity(info), "cwd": info.WorkDir, "git_cwd": gitDir, "branch": branch, "head": head, "changed_paths": 0, "checked_at": time.Now().UTC().Format(time.RFC3339)}
 	if status != "" {
 		result["changed_paths"] = len(strings.Split(status, "\n"))
 	}
@@ -143,10 +179,6 @@ func runPrimeCheck(cmd *cobra.Command, info RoleInfo, beadID string) error {
 	}
 	// Content hashes let callers detect policy changes without ingesting the
 	// documents on every write. No memory, mail, markers or hook state changes.
-	repoRoot, err := readGit("rev-parse", "--show-toplevel")
-	if err != nil {
-		return err
-	}
 	hashes, err := effectivePolicyHashes(info, repoRoot)
 	if err != nil {
 		return err
