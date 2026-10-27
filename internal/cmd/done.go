@@ -116,14 +116,31 @@ func sourceLandedByRefinery(g *git.Git, sourceBD *beads.Beads, cwd, issueID, def
 	if bd == nil {
 		return "", false
 	}
-	issue, err := bd.Show(issueID)
-	if err != nil || issue == nil || !strings.EqualFold(strings.TrimSpace(issue.Status), "closed") {
-		return "", false
-	}
-	return refineryLandingProof(issue.CloseReason, defaultBranch, func(target, sha string) bool {
+	// The Refinery deletes the branch when it merges but records the source
+	// closure a few seconds later (post-merge steps), so a push rejected in that
+	// window sees the bead still open. Poll briefly before calling it a failure.
+	reachable := func(target, sha string) bool {
 		return g.VerifyPushedCommitReachableFromPushTarget("origin", target, sha) == nil
-	})
+	}
+	for attempt := 1; attempt <= doneLandingPollAttempts; attempt++ {
+		issue, err := bd.Show(issueID)
+		if err == nil && issue != nil && strings.EqualFold(strings.TrimSpace(issue.Status), "closed") {
+			return refineryLandingProof(issue.CloseReason, defaultBranch, reachable)
+		}
+		if attempt < doneLandingPollAttempts {
+			doneLandingSleep(doneLandingPollInterval)
+		}
+	}
+	return "", false
 }
+
+// doneLandingPollAttempts x doneLandingPollInterval bounds how long gt done waits
+// for the Refinery's source closure after a rejected push (about one minute).
+var (
+	doneLandingPollAttempts = 12
+	doneLandingPollInterval = 5 * time.Second
+	doneLandingSleep        = time.Sleep
+)
 
 // refineryLandingProof parses a Refinery close reason and confirms its merge
 // commit is on the target branch.
