@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -88,6 +89,60 @@ func doneContaminationBaseRef(defaultBranch, explicitTarget string) string {
 	}
 
 	return "origin/" + targetBranch
+}
+
+// refineryMergedRe matches the close reason the Refinery records on a source
+// bead it landed: "Merged in <mr>\nmerged <sha> via <mr>\ntarget_branch: <b>".
+var refineryMergedRe = regexp.MustCompile(`(?m)^merged ([0-9a-f]{7,40}) via \S+`)
+var refineryTargetRe = regexp.MustCompile(`(?m)^target_branch: (\S+)`)
+
+// sourceLandedByRefinery reports whether the source issue was already landed
+// by the Refinery. The Refinery can land an MR and delete its branch before
+// gt done finishes its own post-submit rebase and push; that push is then
+// rejected although the work is on the target branch. Treating that as a push
+// failure left the polecat NEEDS_RECOVERY forever and filled the pool with
+// landed work (kasb, 27 Oct 2026: 30 of 30 directories). Proof required: the
+// source bead is closed with the Refinery's "Merged in" reason AND its recorded
+// merge commit is reachable from origin/<target>. (Merged MR beads are burned,
+// so the source bead's close reason is the durable record.)
+func sourceLandedByRefinery(g *git.Git, sourceBD *beads.Beads, cwd, issueID, defaultBranch string) (string, bool) {
+	if issueID == "" || g == nil {
+		return "", false
+	}
+	bd := sourceBD
+	if bd == nil {
+		bd, _, _ = routedIssueBeads(cwd, issueID)
+	}
+	if bd == nil {
+		return "", false
+	}
+	issue, err := bd.Show(issueID)
+	if err != nil || issue == nil || !strings.EqualFold(strings.TrimSpace(issue.Status), "closed") {
+		return "", false
+	}
+	return refineryLandingProof(issue.CloseReason, defaultBranch, func(target, sha string) bool {
+		return g.VerifyPushedCommitReachableFromPushTarget("origin", target, sha) == nil
+	})
+}
+
+// refineryLandingProof parses a Refinery close reason and confirms its merge
+// commit is on the target branch.
+func refineryLandingProof(closeReason, defaultBranch string, reachable func(target, sha string) bool) (string, bool) {
+	if !strings.HasPrefix(strings.TrimSpace(closeReason), "Merged in ") {
+		return "", false
+	}
+	m := refineryMergedRe.FindStringSubmatch(closeReason)
+	if m == nil {
+		return "", false
+	}
+	target := defaultBranch
+	if t := refineryTargetRe.FindStringSubmatch(closeReason); t != nil {
+		target = t[1]
+	}
+	if target == "" || !reachable(target, m[1]) {
+		return "", false
+	}
+	return fmt.Sprintf("merged %s on %s", m[1][:min(12, len(m[1]))], target), true
 }
 
 func shouldUpdateAgentStateOnDone(pushFailed, mrFailed bool) bool {
@@ -1436,6 +1491,11 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 
 		if pushErr != nil {
+			if reason, landed := sourceLandedByRefinery(g, sourceBD, cwd, issueID, defaultBranch); landed {
+				fmt.Printf("%s Push rejected, but %s was already landed by the Refinery (%s); completing\n",
+					style.Bold.Render("✓"), issueID, reason)
+				goto notifyWitness
+			}
 			// All push attempts failed
 			pushFailed = true
 			errMsg := fmt.Sprintf("push failed for branch '%s': %v", branch, pushErr)
@@ -1453,6 +1513,11 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		if doneSkipVerify {
 			noteVerifiedPushSkipped(sourceBD, cwd, issueID, branch, pushedCommitSHA, "--skip-verify on branch push")
 		} else if verifyErr := verifyPushedCommitWithBareFallback(g, townRoot, rigName, branch, pushedCommitSHA); verifyErr != nil {
+			if reason, landed := sourceLandedByRefinery(g, sourceBD, cwd, issueID, defaultBranch); landed {
+				fmt.Printf("%s Branch verification failed, but %s was already landed by the Refinery (%s); completing\n",
+					style.Bold.Render("✓"), issueID, reason)
+				goto notifyWitness
+			}
 			pushFailed = true
 			errMsg := verifyErr.Error()
 			doneErrors = append(doneErrors, errMsg)

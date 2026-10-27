@@ -186,6 +186,7 @@ type Issue struct {
 	CreatedBy   string   `json:"created_by,omitempty"`
 	UpdatedAt   string   `json:"updated_at"`
 	ClosedAt    string   `json:"closed_at,omitempty"`
+	CloseReason string   `json:"close_reason,omitempty"`
 	Parent      string   `json:"parent,omitempty"`
 	ExternalRef string   `json:"external_ref,omitempty"`
 	Assignee    string   `json:"assignee,omitempty"`
