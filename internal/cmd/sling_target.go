@@ -147,6 +147,13 @@ type ResolvedTarget struct {
 // existing agents (with dead polecat fallback).
 func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, error) {
 	result := &ResolvedTarget{}
+	townRoot := opts.TownRoot
+	if townRoot == "" {
+		townRoot, _ = workspace.FindFromCwd()
+	}
+	if err := checkAndonTarget(townRoot, target, opts.BeadID); err != nil {
+		return nil, err
+	}
 
 	// Empty target or "." = self-sling
 	if target == "" || target == "." {
@@ -161,6 +168,9 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 		result.Pane = pane
 		result.WorkDir = workDir
 		result.IsSelfSling = true
+		if err := checkAndonTarget(townRoot, agentID, opts.BeadID); err != nil {
+			return nil, err
+		}
 		return result, nil
 	}
 
@@ -262,6 +272,9 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 	agentID, pane, workDir, err := resolveTargetAgentFn(target)
 	if err != nil {
 		if rigName, ok := missingPolecatTargetRig(target, opts.Create, opts.TownRoot); ok {
+			if err := checkAndonDispatch(townRoot, rigName, opts.BeadID); err != nil {
+				return nil, err
+			}
 			if opts.BeadID != "" && !opts.Force {
 				if err := checkCrossRigGuard(opts.BeadID, rigName+"/polecats/_", opts.TownRoot); err != nil {
 					return nil, err
@@ -298,6 +311,9 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 			return result, nil
 		}
 		return nil, fmt.Errorf("resolving target: %w", err)
+	}
+	if err := checkAndonTarget(townRoot, agentID, opts.BeadID); err != nil {
+		return nil, err
 	}
 	if opts.BeadID != "" && isPolecatTarget(agentID) {
 		parts := strings.Split(agentID, "/")

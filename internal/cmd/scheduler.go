@@ -478,6 +478,7 @@ func listScheduledBeadsWithWIP(townRoot string, wip *capacity.WIPCap) ([]schedul
 		return nil, err
 	}
 	annotateRespawnLimit(assessments, schedulerRespawnHold(townRoot))
+	annotateAndon(assessments, townRoot)
 	if wip != nil {
 		annotateWIPCap(assessments, *wip)
 	}
@@ -492,7 +493,7 @@ func scheduledBeadInfosFromAssessments(assessments []scheduledContextAssessment)
 			continue
 		}
 		bead.Reason = assessment.pauseReason()
-		if assessment.wipDeferred != "" || assessment.respawnLimited != "" {
+		if assessment.wipDeferred != "" || assessment.respawnLimited != "" || assessment.andonHold != "" {
 			bead.Blocked = true
 		}
 		result = append(result, bead)

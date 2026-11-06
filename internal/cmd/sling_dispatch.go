@@ -93,6 +93,9 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			return nil, err
 		}
 	}
+	if err := checkAndonDispatch(townRoot, params.RigName, params.BeadID); err != nil {
+		return &SlingResult{BeadID: params.BeadID, ErrMsg: err.Error()}, err
+	}
 
 	// Acquire per-bead flock to prevent concurrent dispatch races (TOCTOU).
 	// The CLI path (runSling) has its own flock; this closes the gap where

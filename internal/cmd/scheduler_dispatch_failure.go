@@ -28,6 +28,8 @@ const (
 	// dispatchFailureTransport is a bd/Dolt transport failure: connection
 	// refused, timeout, database not found. Infrastructure, not the bead.
 	dispatchFailureTransport
+	// An incident hold defers work without consuming a retry or capacity slot.
+	dispatchFailureAndon
 )
 
 func (c dispatchFailureClass) String() string {
@@ -38,6 +40,8 @@ func (c dispatchFailureClass) String() string {
 		return "capacity"
 	case dispatchFailureTransport:
 		return "bd-transport"
+	case dispatchFailureAndon:
+		return "andon"
 	default:
 		return "work"
 	}
@@ -83,6 +87,10 @@ var capacityFailureMarkers = []string{
 func classifyDispatchFailure(err error) dispatchFailureClass {
 	if err == nil {
 		return dispatchFailureWork
+	}
+	var andonErr *andonHoldError
+	if errors.As(err, &andonErr) {
+		return dispatchFailureAndon
 	}
 
 	var admissionErr *polecatCapacityAdmissionError

@@ -115,7 +115,8 @@ func schedulerRespawnHold(townRoot string) func(capacity.PendingBead) string {
 // isDispatchDeferral reports whether a dispatch error only defers this bead:
 // its slot goes to the next ready bead in the same cycle.
 func isDispatchDeferral(err error) bool {
-	return classifyDispatchFailure(err) == dispatchFailureRespawnLimit
+	class := classifyDispatchFailure(err)
+	return class == dispatchFailureRespawnLimit || class == dispatchFailureAndon
 }
 
 // loadSchedulerConfig returns the town scheduler config, or the defaults when
@@ -258,8 +259,9 @@ func buildSchedulerDispatchPlan(townRoot string, batchOverride int, cleanup bool
 	respawnHold := schedulerRespawnHold(townRoot)
 	annotateRespawnLimit(assessments, respawnHold)
 	annotateWIPCap(assessments, wipCap)
+	annotateAndon(assessments, townRoot)
 	ready := readySlingContextsFromAssessments(assessments)
-	dispatchPlan, wipDeferred := capacity.PlanDispatchWithHolds(snapshot.Free, batchSize, ready, wipCap, respawnHold)
+	dispatchPlan, wipDeferred := planDispatchWithAndon(townRoot, snapshot.Free, batchSize, ready, wipCap, respawnHold)
 	if len(ready) > 0 {
 		switch {
 		case state.Paused:
@@ -713,6 +715,8 @@ type scheduledContextAssessment struct {
 	// respawnLimited is the hold reason when the row is ready but its
 	// per-bead respawn limit is exhausted; "" otherwise.
 	respawnLimited string
+	// andonHold is the incident-controller hold; only explicit recovery sources bypass it.
+	andonHold string
 	// rigHold is "rig parked"/"rig docked" when the target rig takes no
 	// work; its work bead is not read at all.
 	rigHold string
@@ -723,6 +727,9 @@ type scheduledContextAssessment struct {
 // every silent stall; every non-ready row must be able to say why.
 func (a scheduledContextAssessment) pauseReason() string {
 	if a.ready {
+		if a.andonHold != "" {
+			return a.andonHold
+		}
 		if a.respawnLimited != "" {
 			return a.respawnLimited
 		}
@@ -1233,6 +1240,9 @@ func pendingBeadFromAssessment(assessment scheduledContextAssessment) capacity.P
 // Context fields are already parsed (from PendingBead.Context).
 // Returns the SlingResult (including PolecatName) on success.
 func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResult, error) {
+	if err := checkAndonDispatch(townRoot, b.TargetRig, b.WorkBeadID); err != nil {
+		return nil, err
+	}
 	if b.Context == nil {
 		return nil, fmt.Errorf("missing sling context for %s", b.ID)
 	}
@@ -1317,6 +1327,9 @@ func validateDryRunDispatchPlan(townRoot string, plan capacity.DispatchPlan) cap
 }
 
 func validatePendingBeadForDispatch(townRoot string, b capacity.PendingBead, escalate bool) error {
+	if err := checkAndonDispatch(townRoot, b.TargetRig, b.WorkBeadID); err != nil {
+		return err
+	}
 	// Cross-rig prefix guard (gt-el4). A bead whose ID prefix does not match the
 	// target rig's registered prefix must not be dispatched — the polecat would
 	// land in a rig DB that cannot resolve the bead and hang in prime.
