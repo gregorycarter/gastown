@@ -47,6 +47,7 @@ type fakeMQPostMergeGit struct {
 	deletedBranches []string
 	deletedHeads    []string
 	localDeleted    []string
+	seriesBases     []string
 }
 
 func (g *fakeMQPostMergeGit) VerifyPushedCommitReachableFromPushTarget(_, _, commit string) error {
@@ -81,6 +82,41 @@ func (g *fakeMQPostMergeGit) SubmittedWorkLandingReceipt(_, _, commit string) (s
 		return g.targetTip, nil
 	}
 	return commit, nil
+}
+
+func (g *fakeMQPostMergeGit) SubmittedSeriesLandingReceipt(remote, branch, commit, base string) (string, error) {
+	g.seriesBases = append(g.seriesBases, base)
+	return g.SubmittedWorkLandingReceipt(remote, branch, commit)
+}
+
+func TestRunVerifiedMQPostMergeExplicitSeriesProof(t *testing.T) {
+	for _, fails := range []bool{false, true} {
+		t.Run(map[bool]string{false: "proved", true: "unproved"}[fails], func(t *testing.T) {
+			original := strings.Repeat("a", 40)
+			base := strings.Repeat("b", 40)
+			landed := strings.Repeat("c", 40)
+			mr := &refinery.MergeRequest{ID: "kasb-mr", Branch: "operator/work", TargetBranch: "main", CommitSHA: original}
+			manager := &fakeMQPostMergeManager{mr: mr}
+			proof := &fakeMQPostMergeGit{targetTip: landed}
+			if fails {
+				proof.receiptErr = errors.New("final submitted content missing")
+			}
+			_, _, err := runVerifiedMQPostMergeWithBase(manager, t.TempDir(), proof, mr.ID, true, base)
+			if len(proof.seriesBases) != 1 || proof.seriesBases[0] != base || len(proof.verifiedCommits) != 1 || proof.verifiedCommits[0] != original {
+				t.Fatalf("source/base identity changed: %+v", proof)
+			}
+			if mr.CommitSHA != original {
+				t.Fatal("submitted source HEAD must never be rewritten")
+			}
+			if fails {
+				if err == nil || manager.postMergeCalled || len(proof.deletedBranches) != 0 {
+					t.Fatalf("failed series proof must not close or delete: err=%v proof=%+v", err, proof)
+				}
+			} else if err != nil || !manager.postMergeCalled || manager.postMergeMR.MergeCommit != landed {
+				t.Fatalf("proved snapshot must become native receipt: err=%v mr=%+v", err, manager.postMergeMR)
+			}
+		})
+	}
 }
 
 func (g *fakeMQPostMergeGit) DeleteRemoteBranchIfAt(_, branch, expectedHash string) error {

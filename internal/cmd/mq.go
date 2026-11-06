@@ -169,6 +169,7 @@ Examples:
 
 // Post-merge flags
 var mqPostMergeSkipBranchDelete bool
+var mqPostMergePreLandingBase string
 
 var mqPostMergeCmd = &cobra.Command{
 	Use:   "post-merge <rig> <mr-id>",
@@ -183,6 +184,14 @@ This command consolidates post-merge steps into a single atomic operation:
 
 Designed for use by the refinery formula after a successful merge to main.
 The branch name is read from the MR bead, so no manual branch argument is needed.
+
+For a consolidated linear series, --pre-landing-base accepts the exact target
+revision recorded immediately before that landing. It selects a strict proof of
+the final nonempty source delta against a freshly fetched target tree. The source
+base is derived from that boundary; missing changes, conflicts, ambiguous or merge
+histories and custom merge semantics reject. Do not substitute an intermediate
+source commit or a post-landing revision. Normal closure and dependency guards
+still apply; this option neither rewrites the submitted head nor forces closure.
 
 Examples:
   gt mq post-merge gastown gt-mr-abc123
@@ -199,6 +208,7 @@ type mqPostMergeManager interface {
 type mqPostMergeGit interface {
 	VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error
 	SubmittedWorkLandingReceipt(remote, branch, commit string) (string, error)
+	SubmittedSeriesLandingReceipt(remote, branch, commit, preLandingBase string) (string, error)
 	PushRemoteBranchTip(remote, branch string) (string, error)
 	HasOpenPullRequest(ref git.PullRequestRef) bool
 	Rev(ref string) (string, error)
@@ -364,6 +374,7 @@ func init() {
 
 	// Post-merge flags
 	mqPostMergeCmd.Flags().BoolVar(&mqPostMergeSkipBranchDelete, "skip-branch-delete", false, "Skip remote branch deletion")
+	mqPostMergeCmd.Flags().StringVar(&mqPostMergePreLandingBase, "pre-landing-base", "", "Prove the final submitted series against this exact pre-landing target SHA (strict content proof; no guard bypass)")
 
 	// Add subcommands
 	mqCmd.AddCommand(mqSubmitCmd)
@@ -558,7 +569,7 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("post-merge proof: %w", err)
 	}
 
-	result, branchCleanup, err := runVerifiedMQPostMerge(mgr, r.Path, rigGit, mrID, mqPostMergeSkipBranchDelete)
+	result, branchCleanup, err := runVerifiedMQPostMergeWithBase(mgr, r.Path, rigGit, mrID, mqPostMergeSkipBranchDelete, mqPostMergePreLandingBase)
 	if err != nil {
 		return fmt.Errorf("post-merge cleanup: %w", err)
 	}
@@ -599,11 +610,15 @@ func runMQPostMerge(_ *cobra.Command, args []string) error {
 }
 
 func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPostMergeGit, mrID string, skipBranchDelete bool) (*refinery.PostMergeResult, mqPostMergeBranchCleanup, error) {
+	return runVerifiedMQPostMergeWithBase(mgr, rigPath, rigGit, mrID, skipBranchDelete, "")
+}
+
+func runVerifiedMQPostMergeWithBase(mgr mqPostMergeManager, rigPath string, rigGit mqPostMergeGit, mrID string, skipBranchDelete bool, preLandingBase string) (*refinery.PostMergeResult, mqPostMergeBranchCleanup, error) {
 	mr, err := mgr.FindMRForPostMerge(mrID)
 	if err != nil {
 		return nil, mqPostMergeBranchCleanup{}, err
 	}
-	if err := verifyMQPostMergeProof(rigGit, mr); err != nil {
+	if err := verifyMQPostMergeProofWithBase(rigGit, mr, preLandingBase); err != nil {
 		return nil, mqPostMergeBranchCleanup{}, err
 	}
 
@@ -617,6 +632,10 @@ func runVerifiedMQPostMerge(mgr mqPostMergeManager, rigPath string, rigGit mqPos
 }
 
 func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest) error {
+	return verifyMQPostMergeProofWithBase(rigGit, mr, "")
+}
+
+func verifyMQPostMergeProofWithBase(rigGit mqPostMergeGit, mr *refinery.MergeRequest, preLandingBase string) error {
 	if mr == nil {
 		return fmt.Errorf("merge proof failed: merge request is missing")
 	}
@@ -635,7 +654,15 @@ func verifyMQPostMergeProof(rigGit mqPostMergeGit, mr *refinery.MergeRequest) er
 	// sequential rebase the landed commit IDs differ, so the proof also accepts a
 	// complete patch-equivalent series on the fetched target (bt-9or5). Anything
 	// less fails closed.
-	landedSHA, err := rigGit.SubmittedWorkLandingReceipt("origin", target, commit)
+	var landedSHA string
+	var err error
+	if preLandingBase != "" {
+		// Explicit final-net proof is an alternative to historical ancestry/cherry
+		// evidence, never a fallback that ignores a failed content check.
+		landedSHA, err = rigGit.SubmittedSeriesLandingReceipt("origin", target, commit, preLandingBase)
+	} else {
+		landedSHA, err = rigGit.SubmittedWorkLandingReceipt("origin", target, commit)
+	}
 	if err != nil {
 		return fmt.Errorf("merge proof failed for MR %s: target %s does not contain submitted head %s with a durable landing receipt: %w", mr.ID, target, commit, err)
 	}
