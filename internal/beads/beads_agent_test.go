@@ -664,3 +664,75 @@ esac
 		t.Fatalf("CreateOrReopenAgentBead did not use town BEADS_DIR for existing bead path; log:\n%s", logOutput)
 	}
 }
+
+func TestClearAgentPushFailedIfMatches(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell mock")
+	}
+	base := AgentFields{RoleType: "polecat", Rig: "gastown", AgentState: "done", CleanupStatus: "clean", PushFailed: true, LastSourceIssue: "gt-landed", Branch: "polecat/nux/gt-landed", MRID: "gt-mr", ExitType: "COMPLETED", CompletionTime: "2026-11-07T10:00:00Z"}
+	cases := []struct {
+		name      string
+		mutate    func(*AgentFields)
+		wantClear bool
+	}{
+		{"landed completion preserved", func(*AgentFields) {}, true},
+		{"new hook refuses", func(f *AgentFields) { f.HookBead = "gt-new" }, false},
+		{"new completion refuses", func(f *AgentFields) { f.CompletionTime = "2026-11-07T11:00:00Z" }, false},
+		{"new source refuses", func(f *AgentFields) { f.LastSourceIssue = "gt-new" }, false},
+		{"new branch refuses", func(f *AgentFields) { f.Branch = "polecat/nux/new" }, false},
+		{"new MR refuses", func(f *AgentFields) { f.ActiveMR = "gt-new-mr" }, false},
+		{"working state refuses", func(f *AgentFields) { f.AgentState = "working" }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			current := base
+			tc.mutate(&current)
+			issue := Issue{ID: "gt-gastown-polecat-nux", Title: "Polecat nux", Type: "agent", Labels: []string{"gt:agent"}, Description: FormatAgentDescription("Polecat nux", &current)}
+			payload, err := json.Marshal([]Issue{issue})
+			if err != nil {
+				t.Fatal(err)
+			}
+			log := installMockBDShowRecorder(t, string(payload))
+			scriptPath := filepath.Join(filepath.Dir(log), "bd")
+			script, err := os.ReadFile(scriptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			script = []byte(strings.Replace(string(script), "  update)\n    exit 0", "  update)\n    cat > \"$LOG_FILE.body\"\n    exit 0", 1))
+			if err := os.WriteFile(scriptPath, script, 0755); err != nil {
+				t.Fatal(err)
+			}
+			bd := NewIsolated(dir)
+			cleared, err := bd.ClearAgentPushFailedIfMatches(issue.ID, base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cleared != tc.wantClear {
+				t.Fatalf("clear=%v want%v", cleared, tc.wantClear)
+			}
+			data, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.wantClear {
+				if strings.Contains(string(data), "update") {
+					t.Fatal("replacement custody was written")
+				}
+				return
+			}
+			body, err := os.ReadFile(log + ".body")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := base
+			want.PushFailed = false
+			if got := ParseAgentFields(string(body)); *got != want {
+				t.Fatalf("completion/custody changed beyond stale flag: got%+v want%+v", *got, want)
+			}
+		})
+	}
+}

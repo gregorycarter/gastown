@@ -611,6 +611,42 @@ func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool,
 	return true, nil
 }
 
+// ClearAgentPushFailedIfMatches clears only a proven stale push failure. The
+// caller must first prove terminal work, no live session/MR and preserved Git
+// changes. Comparing the complete observed agent fields under the agent lock
+// refuses a concurrent assignment or replacement completion without erasing its
+// recovery signal. Historical completion/source/branch fields are retained.
+func (b *Beads) ClearAgentPushFailedIfMatches(id string, expected AgentFields) (bool, error) {
+	if target := b.agentBeadTarget(); target != b {
+		return target.ClearAgentPushFailedIfMatches(id, expected)
+	}
+	if strings.TrimSpace(id) == "" || !expected.PushFailed {
+		return false, nil
+	}
+	fl, err := b.lockAgentBead(id)
+	if err != nil {
+		return false, fmt.Errorf("locking agent bead %s: %w", id, err)
+	}
+	defer func() { _ = fl.Unlock() }()
+	issue, err := b.Show(id)
+	if err != nil {
+		return false, err
+	}
+	if !IsAgentBead(issue) {
+		return false, fmt.Errorf("%s is not an agent bead", id)
+	}
+	fields := ParseAgentFields(issue.Description)
+	if *fields != expected {
+		return false, nil
+	}
+	fields.PushFailed = false
+	description := FormatAgentDescription(issue.Title, fields)
+	if err := b.Update(id, UpdateOptions{Description: &description}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // UpdateAgentNotificationLevel updates the notification_level field in an agent bead.
 // Valid levels: verbose, normal, muted (DND mode).
 // Pass empty string to reset to default (normal).

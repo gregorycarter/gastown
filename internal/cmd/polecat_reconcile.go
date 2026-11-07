@@ -36,8 +36,9 @@ const selfCleanStepTitle = "Submit work and self-clean"
 const reconcileMinSessionAge = 10 * time.Minute
 
 var (
-	polecatReconcileDryRun bool
-	polecatReconcileJSON   bool
+	polecatReconcileDryRun          bool
+	polecatReconcileJSON            bool
+	polecatReconcileClearPushFailed bool
 )
 
 // polecatReconcileReport is the auditable record of one reconciliation attempt.
@@ -92,13 +93,18 @@ Any lookup that cannot be resolved refuses with the exact error rather than
 guessing. It never deletes: the self-clean step is CLOSED, and no worktree,
 branch, wisp or MR is removed. Running it twice is a no-op success.
 
+With --clear-push-failed, these same preservation checks may clear a stale push
+failure. All observed agent fields must still match under the agent lock. The
+branch and historical completion evidence are retained; default behavior is unchanged.
+
 This is deliberately not a nuke. After reconciling, run
 'gt polecat check-recovery' for an independent verdict before any nuke.
 
 Examples:
   gt polecat reconcile bridge_town_core/dag --dry-run
   gt polecat reconcile bridge_town_core/dag
-  gt polecat reconcile bridge_town_core/dag --json`,
+  gt polecat reconcile bridge_town_core/dag --json
+  gt polecat reconcile kasb_core/crater --clear-push-failed`,
 	Args:         cobra.ExactArgs(1),
 	RunE:         runPolecatReconcile,
 	SilenceUsage: true,
@@ -109,6 +115,8 @@ func init() {
 		"Report what would change without mutating anything")
 	polecatReconcileCmd.Flags().BoolVar(&polecatReconcileJSON, "json", false,
 		"Output the report as JSON")
+	polecatReconcileCmd.Flags().BoolVar(&polecatReconcileClearPushFailed, "clear-push-failed", false,
+		"Clear a stale push failure only after all terminal-work and Git-preservation checks pass")
 	polecatCmd.AddCommand(polecatReconcileCmd)
 }
 
@@ -249,6 +257,9 @@ func runPolecatReconcile(cmd *cobra.Command, args []string) error {
 	}
 
 	// --- plan ----------------------------------------------------------------
+	if polecatReconcileClearPushFailed && fields.PushFailed {
+		report.Planned = append(report.Planned, "clear push_failed if the observed completion and custody still match")
+	}
 	if report.ActiveMR != "" {
 		report.Planned = append(report.Planned,
 			fmt.Sprintf("clear active_mr if it still equals %s", report.ActiveMR))
@@ -277,6 +288,21 @@ func runPolecatReconcile(cmd *cobra.Command, args []string) error {
 
 	// --- apply ---------------------------------------------------------------
 	// Ordered so that a failure part-way leaves the remaining steps retryable.
+	// Clear before changing any observed fields, so the atomic comparison also
+	// fences replacement hooks/completions and active-MR changes.
+	if polecatReconcileClearPushFailed && fields.PushFailed {
+		cleared, clearErr := bd.ClearAgentPushFailedIfMatches(agentBeadID, *fields)
+		if clearErr != nil || !cleared {
+			report.Verdict = reconcileVerdictRefused
+			if clearErr != nil {
+				report.Refusals = append(report.Refusals, fmt.Sprintf("clearing stale push_failed failed: %v", clearErr))
+			} else {
+				report.Refusals = append(report.Refusals, "agent completion or custody changed since proof; push_failed retained")
+			}
+			return emitReconcileReport(report)
+		}
+		report.Applied = append(report.Applied, "cleared proven stale push_failed; completion evidence retained")
+	}
 	if report.ActiveMR != "" {
 		cleared, clearErr := bd.ClearAgentActiveMRIfMatches(agentBeadID, report.ActiveMR)
 		switch {
