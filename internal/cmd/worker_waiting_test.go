@@ -42,7 +42,10 @@ func TestWaitingWorkerProtectsLiveSubprocesses(t *testing.T) {
 		name, extra string
 		ok          bool
 	}{
-		{"idle", "", true}, {"shell", "12 11 /bin/zsh\n", false}, {"test", "12 11 node\n", false},
+		{"idle", "", true},
+		{"persistent native code-mode host", "12 11 /opt/vendor/codex-code-mode-host\n", true},
+		{"test under code-mode host", "12 11 /opt/vendor/codex-code-mode-host\n13 12 python3\n", false},
+		{"shell", "12 11 /bin/zsh\n", false}, {"test", "12 11 node\n", false},
 		{"compiler", "12 11 python3\n", false}, {"unrelated", "42 1 node\n", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

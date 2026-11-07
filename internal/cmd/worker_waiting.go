@@ -116,7 +116,9 @@ func onlyWorkerRuntime(processes []byte, root string) bool {
 		}
 		seen[p] = true
 		for _, child := range children[p] {
-			if names[child] != "codex" {
+			// The native code-mode host remains resident after a completed turn.
+			// Its descendants must still pass this same no-subprocess guard.
+			if names[child] != "codex" && names[child] != "codex-code-mode-host" {
 				return false
 			}
 			queue = append(queue, child)
