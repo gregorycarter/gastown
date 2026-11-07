@@ -42,12 +42,47 @@ type fakeMQPostMergeGit struct {
 	tipErr     error
 	targetTip  string
 	receiptErr error
+	ensureErr  error
 
 	verifiedCommits []string
 	deletedBranches []string
 	deletedHeads    []string
 	localDeleted    []string
 	seriesBases     []string
+	ensuredBranches []string
+	ensuredCommits  []string
+}
+
+func (g *fakeMQPostMergeGit) EnsureSubmittedCommit(_, branch, commit string) error {
+	g.ensuredBranches = append(g.ensuredBranches, branch)
+	g.ensuredCommits = append(g.ensuredCommits, commit)
+	return g.ensureErr
+}
+
+func TestRunVerifiedMQPostMergeObtainsOriginalObjectBeforeProof(t *testing.T) {
+	for _, fails := range []bool{false, true} {
+		t.Run(map[bool]string{false: "available", true: "unavailable"}[fails], func(t *testing.T) {
+			mr := testMQPostMergeMR()
+			manager := &fakeMQPostMergeManager{mr: mr}
+			proof := &fakeMQPostMergeGit{}
+			if fails {
+				proof.ensureErr = errors.New("recorded source branch has a different head")
+			}
+			_, _, err := runVerifiedMQPostMerge(manager, t.TempDir(), proof, mr.ID, false)
+			if len(proof.ensuredBranches) != 1 || proof.ensuredBranches[0] != mr.Branch ||
+				len(proof.ensuredCommits) != 1 || proof.ensuredCommits[0] != mr.CommitSHA {
+				t.Fatalf("source custody changed: %+v", proof)
+			}
+			if fails {
+				if err == nil || manager.postMergeCalled || len(proof.verifiedCommits) != 0 ||
+					len(proof.deletedBranches) != 0 || len(proof.localDeleted) != 0 || mr.MergeCommit != "" {
+					t.Fatalf("unavailable original must preserve records and branch: err=%v proof=%+v mr=%+v", err, proof, mr)
+				}
+			} else if err != nil || !manager.postMergeCalled || len(proof.verifiedCommits) != 1 {
+				t.Fatalf("available original must continue through native proof: err=%v proof=%+v", err, proof)
+			}
+		})
+	}
 }
 
 func (g *fakeMQPostMergeGit) VerifyPushedCommitReachableFromPushTarget(_, _, commit string) error {

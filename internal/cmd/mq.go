@@ -206,6 +206,7 @@ type mqPostMergeManager interface {
 }
 
 type mqPostMergeGit interface {
+	EnsureSubmittedCommit(remote, branch, commit string) error
 	VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error
 	SubmittedWorkLandingReceipt(remote, branch, commit string) (string, error)
 	SubmittedSeriesLandingReceipt(remote, branch, commit, preLandingBase string) (string, error)
@@ -649,6 +650,12 @@ func verifyMQPostMergeProofWithBase(rigGit mqPostMergeGit, mr *refinery.MergeReq
 	commit := strings.TrimSpace(mr.CommitSHA)
 	if commit == "" {
 		return fmt.Errorf("merge proof failed for MR %s: missing submitted commit_sha", mr.ID)
+	}
+	// An isolated operator checkout may have pushed the source into a different
+	// object store. Obtain that pinned object before native proof, without
+	// changing MR identity or replaying any product verification.
+	if err := rigGit.EnsureSubmittedCommit("origin", mr.Branch, commit); err != nil {
+		return fmt.Errorf("merge proof failed for MR %s: original submitted work unavailable: %w", mr.ID, err)
 	}
 	// Exact submitted-SHA ancestry is the fast path. After the Refinery's
 	// sequential rebase the landed commit IDs differ, so the proof also accepts a
