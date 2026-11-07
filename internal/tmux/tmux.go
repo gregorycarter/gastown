@@ -1996,7 +1996,9 @@ func (t *Tmux) CheckStartupBlocked(session string) error {
 // AcceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
 // agents. Claude shows "Quick safety check"; Codex shows
 // "Do you trust the contents of this directory?". In both cases the safe
-// continue option is pre-selected, so Enter accepts the dialog.
+// continue option is normally pre-selected. Current Claude versions can instead
+// select "No, exit" above "Yes, I trust this folder"; move to that visible
+// affirmative option before confirming.
 //
 // Uses a polling loop instead of a single check to handle the race condition where
 // the agent hasn't rendered the dialog yet when we first check. Exits early if the
@@ -2020,7 +2022,14 @@ func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 		// Codex trust screens include a leading ">" banner line, so prompt
 		// detection alone would exit too early.
 		if containsWorkspaceTrustDialog(content) {
-			// Dialog found — accept it (option 1 is pre-selected, just press Enter)
+			// Claude 2.1.319 defaults this two-row menu to exit. Enter alone
+			// terminates the agent before its first prompt or SessionStart hook.
+			if workspaceTrustExitSelected(content) {
+				if _, err := t.run("send-keys", "-t", session, "Down"); err != nil {
+					return err
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
 			if _, err := t.run("send-keys", "-t", session, "Enter"); err != nil {
 				return err
 			}
@@ -2041,6 +2050,25 @@ func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 
 	// Timeout — no dialog detected, safe to proceed
 	return nil
+}
+
+// workspaceTrustExitSelected recognizes only the observed negative selection
+// immediately above Claude's trust option. Keep legacy and Codex acceptance
+// unchanged, and never infer a Down key from unrelated "No" text.
+func workspaceTrustExitSelected(content string) bool {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		if strings.Join(strings.Fields(line), " ") != "❯ No, exit" {
+			continue
+		}
+		for _, next := range lines[i+1:] {
+			next = strings.Join(strings.Fields(next), " ")
+			if next != "" {
+				return next == "Yes, I trust this folder"
+			}
+		}
+	}
+	return false
 }
 
 func containsWorkspaceTrustDialog(content string) bool {

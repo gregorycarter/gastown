@@ -390,6 +390,36 @@ func TestStartupDialogs_CodexComposerNoKeys(t *testing.T) {
 	}
 }
 
+func TestStartupDialogs_ClaudeTrustDefaultExit(t *testing.T) {
+	for _, tc := range []struct {
+		name, pane string
+		wantDown   bool
+	}{
+		{"current Claude defaults to exit", "Quick safety check: Is this a project you trust?\n❯ No, exit\n  Yes, I trust this folder\nEnter to confirm · Esc to cancel", true},
+		{"already selected trust", "Quick safety check: Is this a project you trust?\n  No, exit\n❯ Yes, I trust this folder\nEnter to confirm · Esc to cancel", false},
+		{"legacy Claude defaults to trust", "Quick safety check\n❯ 1. Yes, I trust this folder\n  2. No, exit", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm, keys := fakeStartupPane(t, tc.pane)
+			if err := tm.AcceptWorkspaceTrustDialog("synthetic-worker"); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(keys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			wantCount := 1
+			if tc.wantDown {
+				wantCount = 2
+			}
+			if len(lines) != wantCount || !strings.HasSuffix(lines[len(lines)-1], " Enter") || (tc.wantDown && !strings.HasSuffix(lines[0], " Down")) {
+				t.Fatalf("wrong trust selection: got %q; wantDown=%v", data, tc.wantDown)
+			}
+		})
+	}
+}
+
 func TestStartupDialogs_CurrentTrustStillAcceptedAndBlocked(t *testing.T) {
 	tm, keys := fakeStartupPane(t, "› Ask Codex to do anything\nDo you trust the contents of this directory?\n› 1. Yes, continue\n2. No, exit")
 	if err := tm.AcceptWorkspaceTrustDialog("synthetic-worker"); err != nil {
