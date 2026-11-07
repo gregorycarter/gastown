@@ -252,3 +252,15 @@ func writeRepoFile(t *testing.T, dir, name, content string) {
 		t.Fatalf("write %s: %v", name, err)
 	}
 }
+
+func TestKasbRecoveryCompletionDoesNotRebaseSubmittedMR(t *testing.T) {
+	instructions := recoveryInstructions(mqResumeRecord{Rig: "kasb_core", Worker: "enclave", Source: "kasb-task", MR: "kasb-wisp-original", Branch: "polecat/enclave/kasb-task", Base: "main"})
+	// Exercise the actual completion command supplied by native recovery, rather
+	// than a hand-picked flag that the old instructions omitted.
+	preVerified := strings.Contains(instructions, "followed by gt done --pre-verified")
+	fake := &fakeRebaseGit{}
+	rebased, _, err := autoRebaseOnTarget(fake, "origin/main", 2, preVerified, false)
+	if err != nil || rebased || fake.rebaseCalls != 0 {
+		t.Fatalf("native recovery rewrites a verified/pushed existing MR: rebased=%v calls=%d err=%v", rebased, fake.rebaseCalls, err)
+	}
+}
