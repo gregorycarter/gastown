@@ -1,7 +1,7 @@
 package cmd
 
 // Reconcile durable completed-turn evidence, never quiet terminal output. This
-// opt-in Hisn path preserves source and ownership; it does not submit or reset it.
+// opt-in recovery path preserves source and ownership; it does not submit or reset it.
 import (
 	"bufio"
 	"bytes"
@@ -25,7 +25,8 @@ import (
 
 type waitingEvidence struct {
 	Worker, Source, Branch, Head, Rollout, Preflight string
-	Completed                                        time.Time
+	Completed, Launched                              time.Time
+	Continuation                                     bool
 }
 
 func completedWorkerTurn(data []byte, launched, now time.Time) (time.Time, error) {
@@ -230,7 +231,7 @@ func inspectWaitingWorker(town string, source *beads.Issue) (*waitingEvidence, e
 	}
 	var receipt string
 	var latest time.Time
-	var passed bool
+	var passed, exactReceipt, unreadableReceipt bool
 	for _, p := range files {
 		var r struct {
 			Head, Bead, Status string
@@ -244,12 +245,18 @@ func inspectWaitingWorker(town string, source *beads.Issue) (*waitingEvidence, e
 		}
 		raw, e := os.ReadFile(p)
 		if e != nil {
+			unreadableReceipt = true
 			continue
 		}
 		if json.Unmarshal(raw, &r) != nil {
+			unreadableReceipt = true
 			continue
 		}
 		if rigName == "kasb_core" {
+			// Unknown/incomplete exact-head receipts also protect existing work.
+			if r.HeadSHA == head && r.SourceBead == source.ID {
+				exactReceipt = true
+			}
 			if r.Status != "failed" && r.Status != "failed_red_probe" && r.Status != "passed" && r.Status != "passed_non_behavioral" {
 				continue
 			}
@@ -265,6 +272,9 @@ func inspectWaitingWorker(town string, source *beads.Issue) (*waitingEvidence, e
 			receipt = p
 			passed = r.Status == "passed" || r.Status == "passed_non_behavioral"
 		}
+	}
+	if rigName == "kasb_core" && !exactReceipt && !unreadableReceipt {
+		return &waitingEvidence{Worker: worker, Source: source.ID, Branch: branch, Head: head, Rollout: rollout, Completed: completed, Launched: launch.Timestamp, Continuation: true}, nil
 	}
 	if receipt == "" || passed || latest.After(completed) || latest.Before(launch.Timestamp) {
 		return nil, fmt.Errorf("no failed exact-head proof in completed turn")
@@ -292,6 +302,11 @@ func reconcileWaitingWorkers(town string, dry bool, rigs ...string) ([]waitingEv
 			if err != nil {
 				continue
 			}
+			if evidence.Continuation {
+				if err := validateWorkerContinuation(town, source, evidence, b); err != nil {
+					continue
+				}
+			}
 			if dry {
 				result = append(result, *evidence)
 				continue
@@ -308,6 +323,31 @@ func reconcileWaitingWorkers(town string, dry bool, rigs ...string) ([]waitingEv
 				}
 				again, err := inspectWaitingWorker(town, fresh)
 				if err != nil || *again != *evidence {
+					return
+				}
+				if evidence.Continuation {
+					if err := validateWorkerContinuation(town, fresh, again, b); err != nil {
+						return
+					}
+					stamp := filepath.Join(town, ".runtime", "worker-continuations", rigName, evidence.Worker+".json")
+					err := continueWorkerOnce(stamp, *again, func() error {
+						current, err := b.Show(source.ID)
+						if err != nil || validateWorkerContinuation(town, current, again, b) != nil {
+							return fmt.Errorf("custody changed before continuation")
+						}
+						last, err := inspectWaitingWorker(town, current)
+						if err != nil || *last != *again {
+							return fmt.Errorf("worker changed before continuation")
+						}
+						message := fmt.Sprintf("Continue your unfinished hooked work %s on the SAME branch %s. The last native turn completed without an exact-head preflight receipt or submitted MR. Check current custody, then continue implementation and normal delivery once. Preserve existing tests and proof; do not restart or duplicate a preflight, smoke, workflow, branch or MR. If a real prerequisite blocks progress, record its exact disposition on the source.", source.ID, evidence.Branch)
+						sid := session.PolecatSessionName("kasb", evidence.Worker)
+						return tmux.NewTmux().NudgeSessionWithOpts(sid, message, tmux.NudgeOpts{SkipEscape: true, TownRoot: town})
+					})
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Worker continuation %s: %v\n", source.ID, err)
+						return
+					}
+					result = append(result, *evidence)
 					return
 				}
 				root := filepath.Join(town, rigName, "polecats", evidence.Worker, rigName)
@@ -342,7 +382,7 @@ func reconcileWaitingWorkers(town string, dry bool, rigs ...string) ([]waitingEv
 
 func init() {
 	var dry bool
-	c := &cobra.Command{Use: "reconcile-waiting <rig>", Short: "Preserve completed worker turns waiting after failed preflight", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	c := &cobra.Command{Use: "reconcile-waiting <rig>", Short: "Recover settled unfinished Kasb turns or preserve failed-preflight workers", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if _, err := recoveryRig(args[0]); err != nil {
 			return err
 		}
