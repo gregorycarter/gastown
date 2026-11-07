@@ -36,9 +36,10 @@ const selfCleanStepTitle = "Submit work and self-clean"
 const reconcileMinSessionAge = 10 * time.Minute
 
 var (
-	polecatReconcileDryRun          bool
-	polecatReconcileJSON            bool
-	polecatReconcileClearPushFailed bool
+	polecatReconcileDryRun            bool
+	polecatReconcileJSON              bool
+	polecatReconcileClearPushFailed   bool
+	polecatReconcileClearTerminalHook bool
 )
 
 // polecatReconcileReport is the auditable record of one reconciliation attempt.
@@ -50,6 +51,7 @@ type polecatReconcileReport struct {
 
 	SourceIssue       string `json:"source_issue,omitempty"`
 	SourceIssueStatus string `json:"source_issue_status,omitempty"`
+	TerminalHook      string `json:"terminal_hook,omitempty"`
 
 	ActiveMR       string `json:"active_mr,omitempty"`
 	ActiveMRStatus string `json:"active_mr_status,omitempty"`
@@ -95,7 +97,9 @@ branch, wisp or MR is removed. Running it twice is a no-op success.
 
 With --clear-push-failed, these same preservation checks may clear a stale push
 failure. All observed agent fields must still match under the agent lock. The
-branch and historical completion evidence are retained; default behavior is unchanged.
+branch and historical completion evidence are retained. --clear-terminal-hook also
+permits clearing a legacy pointer to that exact, independently terminal source,
+without reopening the source or closing other work. Default behavior is unchanged.
 
 This is deliberately not a nuke. After reconciling, run
 'gt polecat check-recovery' for an independent verdict before any nuke.
@@ -117,6 +121,8 @@ func init() {
 		"Output the report as JSON")
 	polecatReconcileCmd.Flags().BoolVar(&polecatReconcileClearPushFailed, "clear-push-failed", false,
 		"Clear a stale push failure only after all terminal-work and Git-preservation checks pass")
+	polecatReconcileCmd.Flags().BoolVar(&polecatReconcileClearTerminalHook, "clear-terminal-hook", false,
+		"Clear only a legacy hook to this exact terminal source after all preservation checks pass")
 	polecatCmd.AddCommand(polecatReconcileCmd)
 }
 
@@ -185,10 +191,6 @@ func runPolecatReconcile(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// --- precondition 3: no active work except the self-clean step -----------
-	selfCleanID, hookRefusals := reconcileInspectAssignedWork(bd, rigName, polecatName, fields, report)
-	report.Refusals = append(report.Refusals, hookRefusals...)
-
 	// --- precondition 4: source product bead is terminal ---------------------
 	if report.SourceIssue == "" {
 		report.Refusals = append(report.Refusals,
@@ -210,6 +212,12 @@ func runPolecatReconcile(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
+
+	// Only an explicit opt-in and an independently resolved terminal source may
+	// exempt its own stale legacy pointer. Other assigned/hooked work still blocks.
+	report.TerminalHook = reconcileTerminalSourceHook(polecatReconcileClearTerminalHook, fields, report)
+	selfCleanID, hookRefusals := reconcileInspectAssignedWork(bd, rigName, polecatName, fields, report, report.TerminalHook)
+	report.Refusals = append(report.Refusals, hookRefusals...)
 
 	// --- precondition 5: active_mr missing or terminal -----------------------
 	if report.ActiveMR != "" {
@@ -257,6 +265,9 @@ func runPolecatReconcile(cmd *cobra.Command, args []string) error {
 	}
 
 	// --- plan ----------------------------------------------------------------
+	if report.TerminalHook != "" {
+		report.Planned = append(report.Planned, "clear legacy hook to exact terminal source if observed custody still matches")
+	}
 	if polecatReconcileClearPushFailed && fields.PushFailed {
 		report.Planned = append(report.Planned, "clear push_failed if the observed completion and custody still match")
 	}
@@ -290,6 +301,20 @@ func runPolecatReconcile(cmd *cobra.Command, args []string) error {
 	// Ordered so that a failure part-way leaves the remaining steps retryable.
 	// Clear before changing any observed fields, so the atomic comparison also
 	// fences replacement hooks/completions and active-MR changes.
+	if report.TerminalHook != "" {
+		cleared, clearErr := bd.ClearAgentTerminalHookIfMatches(agentBeadID, *fields)
+		if clearErr != nil || !cleared {
+			report.Verdict = reconcileVerdictRefused
+			if clearErr != nil {
+				report.Refusals = append(report.Refusals, fmt.Sprintf("clearing legacy terminal hook failed: %v", clearErr))
+			} else {
+				report.Refusals = append(report.Refusals, "agent completion or custody changed since proof; hook retained")
+			}
+			return emitReconcileReport(report)
+		}
+		fields.HookBead = ""
+		report.Applied = append(report.Applied, "cleared legacy terminal-source hook; source closure and completion retained")
+	}
 	if polecatReconcileClearPushFailed && fields.PushFailed {
 		cleared, clearErr := bd.ClearAgentPushFailedIfMatches(agentBeadID, *fields)
 		if clearErr != nil || !cleared {
@@ -359,7 +384,7 @@ func runPolecatReconcile(cmd *cobra.Command, args []string) error {
 // step, plus refusals for any OTHER active work. Arbitrary hooked product work is
 // never auto-closed.
 func reconcileInspectAssignedWork(bd *beads.Beads, rigName, polecatName string,
-	fields *beads.AgentFields, report *polecatReconcileReport) (string, []string) {
+	fields *beads.AgentFields, report *polecatReconcileReport, terminalHook string) (string, []string) {
 
 	assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 	var refusals []string
@@ -407,11 +432,23 @@ func reconcileInspectAssignedWork(bd *beads.Beads, rigName, polecatName string,
 	}
 
 	// A hook pointing at anything other than the recognised self-clean step blocks.
-	if hook := strings.TrimSpace(fields.HookBead); hook != "" && hook != selfCleanID {
+	if hook := strings.TrimSpace(fields.HookBead); hook != "" && hook != selfCleanID && hook != terminalHook {
 		refusals = append(refusals,
 			fmt.Sprintf("hook_bead=%s is attached and is not the internal self-clean step", hook))
 	}
 	return selfCleanID, refusals
+}
+
+// reconcileTerminalSourceHook never exempts live, unknown or unrelated hooks.
+func reconcileTerminalSourceHook(enabled bool, fields *beads.AgentFields, report *polecatReconcileReport) string {
+	if !enabled || fields == nil || report == nil || !beads.IssueStatus(report.SourceIssueStatus).IsTerminal() {
+		return ""
+	}
+	hook := strings.TrimSpace(fields.HookBead)
+	if hook == "" || hook != report.SourceIssue {
+		return ""
+	}
+	return hook
 }
 
 func describeReconcileGitState(g *GitState) string {

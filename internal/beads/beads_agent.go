@@ -617,10 +617,22 @@ func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool,
 // refuses a concurrent assignment or replacement completion without erasing its
 // recovery signal. Historical completion/source/branch fields are retained.
 func (b *Beads) ClearAgentPushFailedIfMatches(id string, expected AgentFields) (bool, error) {
+	return b.clearAgentTerminalFieldIfMatches(id, expected, false)
+}
+
+// ClearAgentTerminalHookIfMatches clears only the observed legacy hook pointer.
+// The caller must prove that it is the terminal source of a dormant, preserved
+// assignment; a complete-field comparison fences a replacement assignment.
+// Completion history and failure flags are retained.
+func (b *Beads) ClearAgentTerminalHookIfMatches(id string, expected AgentFields) (bool, error) {
+	return b.clearAgentTerminalFieldIfMatches(id, expected, true)
+}
+
+func (b *Beads) clearAgentTerminalFieldIfMatches(id string, expected AgentFields, clearHook bool) (bool, error) {
 	if target := b.agentBeadTarget(); target != b {
-		return target.ClearAgentPushFailedIfMatches(id, expected)
+		return target.clearAgentTerminalFieldIfMatches(id, expected, clearHook)
 	}
-	if strings.TrimSpace(id) == "" || !expected.PushFailed {
+	if strings.TrimSpace(id) == "" || (!clearHook && !expected.PushFailed) || (clearHook && expected.HookBead == "") {
 		return false, nil
 	}
 	fl, err := b.lockAgentBead(id)
@@ -639,7 +651,11 @@ func (b *Beads) ClearAgentPushFailedIfMatches(id string, expected AgentFields) (
 	if *fields != expected {
 		return false, nil
 	}
-	fields.PushFailed = false
+	if clearHook {
+		fields.HookBead = ""
+	} else {
+		fields.PushFailed = false
+	}
 	description := FormatAgentDescription(issue.Title, fields)
 	if err := b.Update(id, UpdateOptions{Description: &description}); err != nil {
 		return false, err
