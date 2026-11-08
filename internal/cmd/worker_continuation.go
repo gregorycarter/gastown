@@ -26,10 +26,39 @@ func continuationSourceAllowed(source *beads.Issue) bool {
 			return false
 		}
 	}
-	// Unknown metadata may represent a handoff, run wait or real approval hold.
-	// Leave it for operator disposition rather than interpreting an expiry.
-	meta := strings.TrimSpace(string(source.Metadata))
-	return meta == "" || meta == "null" || meta == "{}"
+	return continuationMetadataInformational(source.Metadata)
+}
+
+// Provenance describes existing work; it does not grant new authority. Keep
+// handoffs, run waits, approval holds and unknown fields for operator disposition.
+func continuationMetadataInformational(raw json.RawMessage) bool {
+	if strings.TrimSpace(string(raw)) == "" {
+		return true
+	}
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return false
+	}
+	for key, value := range metadata {
+		switch key {
+		case "audit_bead", "planning_key", "plan_key", "planning_request", "review_base",
+			"quality_review", "quality_review_base", "performance_review",
+			"source_directory", "readme_sha256", "screen_sha256",
+			"dispatch_authorization_bead", "dispatch_authorized_at", "dispatch_authorized_by":
+			var text string
+			if !strings.HasPrefix(strings.TrimSpace(string(value)), `"`) || json.Unmarshal(value, &text) != nil {
+				return false
+			}
+		case "performance_rank":
+			var rank int
+			if strings.TrimSpace(string(value)) == "null" || json.Unmarshal(value, &rank) != nil || rank < 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func continuationMRPending(source string, mrs []*beads.Issue) bool {
