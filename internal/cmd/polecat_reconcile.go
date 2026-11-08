@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -168,6 +169,18 @@ func runPolecatReconcile(cmd *cobra.Command, args []string) error {
 		return emitReconcileReport(report)
 	}
 	report.SourceIssue = firstNonEmptyReconcile(p.Issue, fields.LastSourceIssue)
+	if report.SourceIssue == "" && polecatReconcileClearTerminalHook {
+		// An infrastructure delivery can leave only its original hook. Bind it
+		// to the actual checkout before the normal terminal-source, session,
+		// assignment, MR and Git-preservation checks below. Never infer custody
+		// from a hook alone or from stale branch metadata on the agent identity.
+		branch, branchErr := git.NewGit(p.ClonePath).CurrentBranch()
+		if branchErr != nil {
+			report.Refusals = append(report.Refusals, fmt.Sprintf("terminal hook branch lookup_error: %v", branchErr))
+		} else {
+			report.SourceIssue = reconcileSourceFromTerminalHook(true, report.SourceIssue, polecatName, branch, fields.HookBead)
+		}
+	}
 	report.ActiveMR = strings.TrimSpace(fields.ActiveMR)
 
 	// --- precondition 2: no live session, and none created recently ----------
@@ -469,6 +482,17 @@ func describeReconcileGitState(g *GitState) string {
 		return "clean, branch preserved"
 	}
 	return strings.Join(parts, " ")
+}
+
+func reconcileSourceFromTerminalHook(enabled bool, source, worker, branch, hook string) string {
+	if source != "" || !enabled {
+		return source
+	}
+	meta, ok := polecat.ParseBranchName(branch)
+	if !ok || meta.Polecat != worker || meta.Issue != strings.TrimSpace(hook) || strings.TrimSpace(hook) == "" {
+		return ""
+	}
+	return meta.Issue
 }
 
 func firstNonEmptyReconcile(values ...string) string {
