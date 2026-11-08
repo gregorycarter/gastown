@@ -301,6 +301,21 @@ type autoFeedResult struct {
 	DirectMode bool
 }
 
+func autoFeedPreservedCounts(candidates []autoFeedCandidate, query func() (map[string]int, error)) map[string]int {
+	// Only Hisn candidates consume these priority counts. Other eligibility,
+	// custody and ops-slot checks still run through their existing paths.
+	for _, candidate := range candidates {
+		if candidate.Rig == "hisn" {
+			counts, err := query()
+			if err != nil {
+				return nil
+			}
+			return counts
+		}
+	}
+	return nil
+}
+
 // autoFeedScheduler tops the dispatch queue up to the configured floor from
 // `bd ready`. Returns the number of beads enqueued.
 //
@@ -372,13 +387,16 @@ func autoFeedScheduler(townRoot string, floorOverride int, dryRun bool) (*autoFe
 		return result, nil
 	}
 
-	blockers, blockedSources, _, blockerErr := listBlockedWorkBeadBlockersAndSourcesWithRunner(townRoot, candidateIDs, runBlockedWorkQuery)
-	if blockerErr == nil {
-		counts := preservedPrerequisiteCounts(blockers, blockedSources)
-		for i := range candidates {
-			if candidates[i].Rig == "hisn" {
-				candidates[i].UnblocksPreserved = counts[candidates[i].ID]
-			}
+	counts := autoFeedPreservedCounts(candidates, func() (map[string]int, error) {
+		blockers, blockedSources, _, err := listBlockedWorkBeadBlockersAndSourcesWithRunner(townRoot, candidateIDs, runBlockedWorkQuery)
+		if err != nil {
+			return nil, err
+		}
+		return preservedPrerequisiteCounts(blockers, blockedSources), nil
+	})
+	for i := range candidates {
+		if candidates[i].Rig == "hisn" {
+			candidates[i].UnblocksPreserved = counts[candidates[i].ID]
 		}
 	}
 	result.OpsWorking = countWorkingOpsBeads(townRoot)

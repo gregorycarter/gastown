@@ -2,10 +2,51 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
+
+func TestAutoFeedPreservedCountsQueriesOnlyWhenUsed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rigs  []string
+		calls int
+	}{
+		{"empty", nil, 0},
+		{"Kasb only", []string{"kasb_core", "kasb_core"}, 0},
+		{"other rig", []string{"bridge_town_core"}, 0},
+		{"Hisn", []string{"hisn"}, 1},
+		{"mixed", []string{"kasb_core", "hisn", "hisn"}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var candidates []autoFeedCandidate
+			for _, rig := range tc.rigs {
+				candidates = append(candidates, autoFeedCandidate{Rig: rig})
+			}
+			calls := 0
+			counts := autoFeedPreservedCounts(candidates, func() (map[string]int, error) {
+				calls++
+				return map[string]int{"hisn-prerequisite": 2}, nil
+			})
+			if calls != tc.calls {
+				t.Fatalf("blocked-work queries=%d, want %d", calls, tc.calls)
+			}
+			if tc.calls == 0 && len(counts) != 0 {
+				t.Fatal("unused priority counts returned")
+			}
+			if tc.calls == 1 && counts["hisn-prerequisite"] != 2 {
+				t.Fatal("Hisn priority evidence changed")
+			}
+		})
+	}
+	if counts := autoFeedPreservedCounts([]autoFeedCandidate{{Rig: "hisn"}}, func() (map[string]int, error) {
+		return nil, errors.New("fixture: unavailable blocked-work query")
+	}); len(counts) != 0 {
+		t.Fatal("failed best-effort scan returned priority evidence")
+	}
+}
 
 func autoFeedTestCandidate(id string, priority int, created string, labels ...string) autoFeedCandidate {
 	return autoFeedCandidate{
