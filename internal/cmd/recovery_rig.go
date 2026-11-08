@@ -34,6 +34,9 @@ func recoveryRigForSource(id string) (recoveryRigSpec, error) {
 	return recoveryRigSpec{}, fmt.Errorf("unsupported recovery source %q", id)
 }
 func recoveryInstructions(r mqResumeRecord) string {
+	if r.Rig == "kasb_core" && r.Kind == "same-mr-repair" {
+		return fmt.Sprintf("Original worker %s/%s: repair source %s on SAME branch %s and MR %s. Required correction: %s. Inspect current main %s and rebase only if needed. Preserve all unrelated work, approval holds and running tests. Changed product patches require focused causal checks and one normal targeted preflight; reuse valid passed-file proof, never repeat unchanged tests or smokes. Push only this branch with an explicit expected-old-head lease, then gt mq resubmit-recovery kasb_core %s followed by gt done --pre-verified. Never create a replacement source, branch or MR or close the source before native acceptance.", r.Rig, r.Worker, r.Source, r.Branch, r.MR, r.RepairReason, r.Base, r.MR)
+	}
 	if r.Rig == "hisn" {
 		return fmt.Sprintf("Original worker hisn/%s: recover source %s on %s; resolve/rebase onto %s, commit as Greg Carter <email@gregorycarter.net>, run and publish renewed exact-HEAD preflight, push only this worker branch with an explicit expected-old-head lease, run node tools/delivery/resubmit.mjs %s --apply, then gt done --pre-verified. Preserve this MR and source; do not create conflict/verifier tasks or close the source.", r.Worker, r.Source, r.Branch, r.Base, r.MR)
 	}

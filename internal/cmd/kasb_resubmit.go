@@ -138,7 +138,15 @@ func init() {
 		if err != nil {
 			return err
 		}
-		err = BdCmd("update", r.MR, "--if-status=blocked", "--status=open", "--remove-label=needs-rebase", "--unset-metadata=delivery_recovery", "--body-file=-").Stdin(strings.NewReader(description)).Dir(root).WithBeadsDir(beads.ResolveBeadsDir(filepath.Join(town, r.Rig))).WithAutoCommit().Run()
+		holdLabel := "needs-rebase"
+		if r.Kind == "same-mr-repair" {
+			holdLabel = "needs-repair"
+		}
+		update := []string{"update", r.MR, "--if-status=blocked", "--status=open", "--remove-label=" + holdLabel, "--unset-metadata=delivery_recovery", "--body-file=-"}
+		if r.Kind == "same-mr-repair" {
+			update = append(update, "--unset-metadata=correction_reason")
+		}
+		err = BdCmd(update...).Stdin(strings.NewReader(description)).Dir(root).WithBeadsDir(beads.ResolveBeadsDir(filepath.Join(town, r.Rig))).WithAutoCommit().Run()
 		if err != nil {
 			return err
 		}

@@ -28,7 +28,19 @@ func kasbRecoveryCandidate(mr *beads.Issue, base string, show func(string) (*bea
 	if f == nil || f.Rig != "kasb_core" || !mqResumeSHA.MatchString(base) {
 		return nil, fmt.Errorf("invalid Kasb MR/base")
 	}
-	record := mqResumeRecord{SchemaVersion: 1, Kind: "same-mr-rebase", Rig: f.Rig,
+	kind := mqRecoveryKind("kasb_core", mr)
+	if kind == "" {
+		return nil, fmt.Errorf("MR has no unambiguous supported recovery kind")
+	}
+	var reason string
+	if kind == "same-mr-repair" {
+		var err error
+		reason, err = mqCorrectionReason(metadata)
+		if err != nil {
+			return nil, err
+		}
+	}
+	record := mqResumeRecord{SchemaVersion: 1, Kind: kind, Rig: f.Rig, RepairReason: reason,
 		MR: mr.ID, Source: f.SourceIssue, Worker: f.Worker, Branch: f.Branch, Submitted: f.CommitSHA,
 		Base: base, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), DescriptionSHA256: mqResumeHash(mr.Description)}
 	record.Instructions = recoveryInstructions(record)

@@ -47,6 +47,7 @@ type mqResumeRecord struct {
 	CreatedAt         string `json:"createdAt"`
 	DescriptionSHA256 string `json:"descriptionSha256"`
 	Instructions      string `json:"instructions"`
+	RepairReason      string `json:"repairReason,omitempty"`
 }
 
 type mqResumeState struct {
@@ -81,6 +82,36 @@ func mqResumeHeld(issue *beads.Issue) bool {
 	return beads.HasLabel(issue, "needs-operator") || beads.HasLabel(issue, "needs-operator-rollout")
 }
 
+func mqRepairHeld(issue *beads.Issue) bool {
+	return mqResumeHeld(issue) || beads.HasLabel(issue, "needs-review") || beads.HasLabel(issue, "dispatch:hold") || beads.HasLabel(issue, "live-validation")
+}
+
+// A Kasb repair is an explicit correction, not a fabricated rebase or approval.
+// Existing Hisn/rebase receipts keep their original contract.
+func mqRecoveryKind(rig string, mr *beads.Issue) string {
+	if mr == nil {
+		return ""
+	}
+	if beads.HasLabel(mr, "needs-rebase") {
+		if rig == "kasb_core" && beads.HasLabel(mr, "needs-repair") {
+			return ""
+		}
+		return "same-mr-rebase"
+	}
+	if rig == "kasb_core" && beads.HasLabel(mr, "needs-repair") && !mqRepairHeld(mr) {
+		return "same-mr-repair"
+	}
+	return ""
+}
+
+func mqCorrectionReason(metadata map[string]json.RawMessage) (string, error) {
+	var reason string
+	if json.Unmarshal(metadata["correction_reason"], &reason) != nil || strings.TrimSpace(reason) == "" || len(reason) > 4096 {
+		return "", fmt.Errorf("missing or invalid source correction reason")
+	}
+	return reason, nil
+}
+
 // This is deliberately an opt-in contract for Hisn's durable recovery receipt.
 // It does not reinterpret Bridge Town's reject-and-resling workflow.
 func validateMQResumeRecords(rigName, mrID string, show func(string) (*beads.Issue, error)) (*mqResumeState, error) {
@@ -92,8 +123,9 @@ func validateMQResumeRecords(rigName, mrID string, show func(string) (*beads.Iss
 	if err != nil {
 		return nil, err
 	}
-	if mr == nil || mr.ID != mrID || mr.Status != "blocked" || !beads.HasLabel(mr, "needs-rebase") || !beads.HasLabel(mr, "gt:merge-request") || mqResumeHeld(mr) {
-		return nil, fmt.Errorf("MR is not an unheld, blocked needs-rebase merge request")
+	kind := mqRecoveryKind(rigName, mr)
+	if mr == nil || mr.ID != mrID || mr.Status != "blocked" || kind == "" || !beads.HasLabel(mr, "gt:merge-request") || mqResumeHeld(mr) {
+		return nil, fmt.Errorf("MR is not an unheld, blocked rebase or explicit Kasb repair")
 	}
 	f := beads.ParseMRFields(mr)
 	if f == nil || f.Rig != rigName || f.Target != "main" || !mqResumeSHA.MatchString(f.CommitSHA) {
@@ -136,8 +168,16 @@ func validateMQResumeRecords(rigName, mrID string, show func(string) (*beads.Iss
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return nil, fmt.Errorf("invalid recovery receipt: %w", err)
 	}
-	if record.SchemaVersion != 1 || record.Kind != "same-mr-rebase" || record.Rig != rigName || record.MR != mr.ID || record.Source != f.SourceIssue || record.Worker != f.Worker || record.Branch != f.Branch || record.Submitted != f.CommitSHA || !mqResumeSHA.MatchString(record.Base) || record.DescriptionSHA256 != mqResumeHash(mr.Description) {
+	if record.SchemaVersion != 1 || record.Kind != kind || record.Rig != rigName || record.MR != mr.ID || record.Source != f.SourceIssue || record.Worker != f.Worker || record.Branch != f.Branch || record.Submitted != f.CommitSHA || !mqResumeSHA.MatchString(record.Base) || record.DescriptionSHA256 != mqResumeHash(mr.Description) {
 		return nil, fmt.Errorf("stale or mismatched recovery receipt")
+	}
+	if kind == "same-mr-repair" {
+		reason, err := mqCorrectionReason(meta)
+		if err != nil || record.RepairReason != reason {
+			return nil, fmt.Errorf("source correction reason changed or unavailable")
+		}
+	} else if record.RepairReason != "" {
+		return nil, fmt.Errorf("rebase receipt contains an unrelated repair")
 	}
 	if _, err := time.Parse(time.RFC3339Nano, record.CreatedAt); err != nil {
 		return nil, fmt.Errorf("invalid recovery time")
@@ -152,6 +192,9 @@ func validateMQResumeRecords(rigName, mrID string, show func(string) (*beads.Iss
 	}
 	if source == nil || source.ID != f.SourceIssue || mqResumeHeld(source) || (source.Status != "open" && source.Status != "hooked" && source.Status != "in_progress") {
 		return nil, fmt.Errorf("source closed, unavailable or held")
+	}
+	if kind == "same-mr-repair" && mqRepairHeld(source) {
+		return nil, fmt.Errorf("repair source retains a review, dispatch or live hold")
 	}
 	actor := rigName + "/polecats/" + f.Worker
 	if source.Assignee != "" && source.Assignee != actor {
