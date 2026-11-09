@@ -196,6 +196,12 @@ func StartupFallbackCommands(role string, rc *config.RuntimeConfig) []string {
 
 	role = strings.ToLower(role)
 	command := "gt prime"
+	if role == "polecat" {
+		command = "Run `gt prime --hook`, then continue the same assigned work through implementation, " +
+			"required verification and native delivery. Priming is a context refresh, not task completion. " +
+			"Respect approval, dependency and run-wait holds; if no assigned work is dispatchable, " +
+			"report the concrete blocker and preserve custody."
+	}
 	// NOTE: session-started nudge to deacon removed — it interrupted
 	// the deacon's await-signal backoff (exponential sleep). The deacon
 	// already wakes on beads activity via bd activity --follow.

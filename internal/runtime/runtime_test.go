@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -165,8 +166,12 @@ func TestStartupFallbackCommands_AutonomousRole(t *testing.T) {
 				t.Error("StartupFallbackCommands() should return commands for autonomous role")
 			}
 			for _, cmd := range commands {
-				if cmd != "gt prime" {
-					t.Fatalf("Commands for %s = %q, want gt prime", role, cmd)
+				for _, instruction := range []string{
+					"gt prime --hook", "continue the same assigned work", "approval", "dependency",
+				} {
+					if !strings.Contains(cmd, instruction) {
+						t.Fatalf("startup for %s lacks %q: %q", role, instruction, cmd)
+					}
 				}
 			}
 		})
