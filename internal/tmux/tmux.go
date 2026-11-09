@@ -3413,6 +3413,16 @@ func readyPromptPrefixForSession(t *Tmux, session string) string {
 		return promptPrefix
 	}
 	preset := config.GetAgentPresetByName(agentName)
+	if preset == nil {
+		// Custom names (for example codex-isolated) are not in the built-in
+		// registry. Startup already persists the effective runtime process names
+		// for liveness checks; use that unambiguous Codex identity rather than
+		// silently looking for Claude's prompt in a Codex session. Do not infer
+		// a provider from generic or mixed process names.
+		if processes, err := t.GetEnvironment(session, "GT_PROCESS_NAMES"); err == nil && strings.TrimSpace(processes) == "codex" {
+			preset = config.GetAgentPreset(config.AgentCodex)
+		}
+	}
 	if preset == nil || preset.ReadyPromptPrefix == "" {
 		return promptPrefix
 	}
