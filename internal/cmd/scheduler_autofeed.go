@@ -256,10 +256,19 @@ func countWorkingOpsBeads(townRoot string) int {
 		if err != nil {
 			continue
 		}
-		for _, issue := range active {
-			if issue != nil && isOpsBead(issue.Labels) {
-				count++
-			}
+		count += countOpsAssignmentsRequiringExecution(active)
+	}
+	return count
+}
+
+func countOpsAssignmentsRequiringExecution(assigned map[string]*beads.Issue) int {
+	count := 0
+	for _, issue := range assigned {
+		// A blocked approval or deferred source protects custody but does not
+		// represent operations execution. Keep the cleanup predicate separate.
+		if issue != nil && isOpsBead(issue.Labels) &&
+			assessPolecatAssignedIssueWork(issue).CountsTowardCapacity {
+			count++
 		}
 	}
 	return count

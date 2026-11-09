@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
@@ -280,6 +281,44 @@ func TestSelectAutoFeedCandidates_OpsSlotCapCountsWorkingPolecats(t *testing.T) 
 	}
 	if got := rejectionReason(rejected, "bt-ops"); got != "ops-slot-cap=1" {
 		t.Fatalf("bt-ops rejection = %q, want ops-slot-cap=1", got)
+	}
+}
+
+func TestOpsSlotAdmissionUsesExecutableAssignments(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status string
+		labels []string
+		admit  bool
+	}{
+		{"approval custody", "blocked", []string{"needs-operator"}, true},
+		{"deferred custody", "deferred", []string{"ci"}, true},
+		{"hooked operations", "hooked", []string{"ci"}, false},
+		{"executing operations", "in_progress", []string{"ci"}, false},
+		{"recoverable operations", "open", []string{"ci"}, false},
+		{"executing product", "hooked", []string{"product"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issue := &beads.Issue{ID: "kasb-held", Status: tc.status, Labels: tc.labels,
+				Assignee: "kasb_core/polecats/atom"}
+			policy := defaultAutoFeedPolicy()
+			policy.OpsWorking = countOpsAssignmentsRequiringExecution(map[string]*beads.Issue{
+				"atom": issue, "absent": nil,
+			})
+			selected, rejected := selectAutoFeedCandidates([]autoFeedCandidate{
+				autoFeedTestCandidate("kasb-metrics", 2, "2026-11-09T00:00:00Z", "ci"),
+			}, policy, nil, 10)
+			if (len(selected) == 1) != tc.admit {
+				t.Fatalf("selected=%v rejected=%v; admit=%v", autoFeedIDs(selected), rejected, tc.admit)
+			}
+			if !tc.admit && rejectionReason(rejected, "kasb-metrics") != "ops-slot-cap=1" {
+				t.Fatalf("real operations must retain the configured cap: %v", rejected)
+			}
+			if issue.Status != tc.status || issue.Assignee != "kasb_core/polecats/atom" ||
+				!assessPolecatAssignedIssueWork(issue).BlocksCleanup {
+				t.Fatal("admission counting must preserve source custody and cleanup protection")
+			}
+		})
 	}
 }
 
