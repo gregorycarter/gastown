@@ -307,3 +307,32 @@ func TestPassingPreflightReceiptForHead(t *testing.T) {
 		t.Error("no receipts directory must return empty")
 	}
 }
+
+// hq-q9yvp: an auto-saved head in a receipt-using worktree is not submitted
+// without a passing receipt for that head; other cases are unaffected.
+func TestAutoSaveSubmitRefusal(t *testing.T) {
+	root := t.TempDir()
+	if got := autoSaveSubmitRefusal(root, "aaaa", "aaaa", "kasb-x.1"); got != "" {
+		t.Fatalf("worktree without receipts must keep old behaviour, got %q", got)
+	}
+	dir := filepath.Join(root, ".delivery", "preflight-receipts")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := autoSaveSubmitRefusal(root, "", "aaaa", "kasb-x.1"); got != "" {
+		t.Fatalf("no auto-save must not refuse, got %q", got)
+	}
+	if got := autoSaveSubmitRefusal(root, "aaaa", "aaaa", "kasb-x.1"); got == "" {
+		t.Fatal("auto-saved head without a receipt must be refused")
+	}
+	body := `{"head_sha":"aaaa","source_bead_id":"kasb-x.1","status":"passed"}`
+	if err := os.WriteFile(filepath.Join(dir, "kasb-x.1-r.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := autoSaveSubmitRefusal(root, "aaaa", "aaaa", "kasb-x.1"); got != "" {
+		t.Fatalf("auto-saved head with a passing receipt must be submitted, got %q", got)
+	}
+	if got := autoSaveSubmitRefusal(root, "aaaa", "bbbb", "kasb-x.1"); got == "" {
+		t.Fatal("receipt for a different head must not cover the pushed head")
+	}
+}

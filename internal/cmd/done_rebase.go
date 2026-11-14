@@ -92,3 +92,25 @@ func passingPreflightReceiptForHead(root, head, sourceID string) string {
 	}
 	return ""
 }
+
+// autoSaveSubmitRefusal returns a non-empty reason when gt done must not open
+// an MR for a head created by the safety-net auto-save (hq-q9yvp). It applies
+// only to worktrees that use preflight receipts (a .delivery/preflight-receipts
+// directory exists): there, the auto-saved head needs its own passing receipt.
+// Rigs without receipts keep the old behaviour.
+func autoSaveSubmitRefusal(root, autoSavedHead, pushedHead, sourceID string) string {
+	if autoSavedHead == "" || root == "" {
+		return ""
+	}
+	if info, err := os.Stat(filepath.Join(root, ".delivery", "preflight-receipts")); err != nil || !info.IsDir() {
+		return ""
+	}
+	head := pushedHead
+	if head == "" {
+		head = autoSavedHead
+	}
+	if passingPreflightReceiptForHead(root, head, sourceID) != "" {
+		return ""
+	}
+	return fmt.Sprintf("the safety net auto-saved uncommitted work as %s and no passing preflight receipt covers that head, so no MR was opened", head[:min(len(head), 8)])
+}

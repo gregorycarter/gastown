@@ -860,6 +860,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	//
 	// Auto-commit ensures work is NEVER lost regardless of exit type or agent behavior.
 	// The commit message is clearly marked as an auto-save so reviewers know.
+	autoSavedHead := ""
 	if doneCleanupStatus == "uncommitted" {
 		// Re-check to get file details (cleanup detection already confirmed uncommitted changes)
 		workStatus, err := g.CheckUncommittedWork()
@@ -909,6 +910,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					fmt.Printf("  The agent should have committed before running gt done.\n")
 					fmt.Printf("  This auto-save prevents work loss.\n\n")
 					doneCleanupStatus = "unpushed" // Update status — changes are now committed but not pushed
+					autoSavedHead, _ = g.Rev("HEAD")
 				}
 			}
 		}
@@ -1245,7 +1247,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				if receipt := passingPreflightReceiptForHead(g.WorkDir(), headSHA, issueID); receipt != "" {
 					receiptSkip = true
 					fmt.Printf("%s Preflight receipt %s covers HEAD %s; leaving the rebase onto %s to the Refinery\n",
-						style.Bold.Render("✓"), filepath.Base(receipt), headSHA[:min(len(headSHA), 8)], contaminationBase)
+						style.Bold.Render("✓"), filepath.Base(receipt), shortDoneSHA(headSHA), contaminationBase)
 				}
 			}
 			rebased, skipReason, rebaseErr := autoRebaseOnTarget(g, contaminationBase, contam.Behind, donePreVerified || receiptSkip, alreadyPushed)
@@ -1557,6 +1559,15 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			goto notifyWitness
 		}
 		fmt.Printf("%s Branch pushed to origin\n", style.Bold.Render("✓"))
+
+		// hq-q9yvp: a safety-net auto-save is pushed so the work is safe, but in a
+		// rig that proves heads with preflight receipts it never becomes an MR
+		// unless a passing receipt covers that exact head. Otherwise unverified
+		// work reached main (kasb .80.16, 1beb6a63).
+		if reason := autoSaveSubmitRefusal(g.WorkDir(), autoSavedHead, pushedCommitSHA, issueID); reason != "" {
+			noteAutoSaveSubmitRefused(sourceBD, cwd, issueID, branch, pushedCommitSHA, reason)
+			return fmt.Errorf("%s\nThe branch is pushed and the work is safe. Run the preflight on %s, then run gt done again", reason, shortDoneSHA(pushedCommitSHA))
+		}
 
 		// Fix cleanup_status after successful push (gt-wcr).
 		// Status was detected before push, so "unpushed" is now stale.
@@ -3017,4 +3028,24 @@ func closeMoleculeOfTerminalBead(bd *beads.Beads, bead *beads.Issue) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "Closed molecule %s (%d step(s)) of already-closed %s\n", moleculeID, n, bead.ID)
+}
+
+func shortDoneSHA(sha string) string {
+	return sha[:min(len(sha), 8)]
+}
+
+func noteAutoSaveSubmitRefused(sourceBD *beads.Beads, cwd, issueID, branch, commit, reason string) {
+	if issueID == "" || cwd == "" {
+		return
+	}
+	bd := sourceBD
+	if bd == nil {
+		bd, _, _ = routedIssueBeads(cwd, issueID)
+	}
+	if bd == nil {
+		return
+	}
+	inProgress := "in_progress"
+	_ = bd.Update(issueID, beads.UpdateOptions{Status: &inProgress})
+	_ = bd.AddComment(issueID, fmt.Sprintf("auto_save_not_submitted: auto-saved at %s on origin/%s; %s. Preflight required before submit (hq-q9yvp).", commit, branch, reason))
 }
