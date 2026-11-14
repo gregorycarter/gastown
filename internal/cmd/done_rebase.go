@@ -1,7 +1,12 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 )
 
 // rebaseGit is the subset of *git.Git that autoRebaseOnTarget needs. Defined as
@@ -44,4 +49,46 @@ func autoRebaseOnTarget(g rebaseGit, base string, behind int, preVerified, alrea
 			base, rebaseErr, base)
 	}
 	return true, "", nil
+}
+
+// passingPreflightReceiptForHead returns the path of a passing preflight
+// receipt that covers head for sourceID, or "" when there is none.
+//
+// hq-i2hc3: a receipted head must not be rebased by gt done. The receipt is
+// bound to the head the polecat proved; a local auto-rebase makes a new head
+// that needs another 60-90 minute preflight, while the Refinery already rebases
+// at landing (and returns real conflicts to the same polecat as needs-rebase).
+// Receipts live in <worktree>/.delivery/preflight-receipts/*.json (kasb schema:
+// head_sha, source_bead_id, status). Per-stage partial receipts
+// (*-<stage>-stage.json) never count.
+func passingPreflightReceiptForHead(root, head, sourceID string) string {
+	if root == "" || head == "" || sourceID == "" {
+		return ""
+	}
+	files, _ := filepath.Glob(filepath.Join(root, ".delivery", "preflight-receipts", "*.json"))
+	sort.Strings(files)
+	for _, p := range files {
+		if strings.HasSuffix(p, "-stage.json") {
+			continue
+		}
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var r struct {
+			HeadSHA    string `json:"head_sha"`
+			SourceBead string `json:"source_bead_id"`
+			Status     string `json:"status"`
+		}
+		if json.Unmarshal(raw, &r) != nil {
+			continue
+		}
+		if r.HeadSHA != head || r.SourceBead != sourceID {
+			continue
+		}
+		if r.Status == "passed" || r.Status == "passed_non_behavioral" {
+			return p
+		}
+	}
+	return ""
 }

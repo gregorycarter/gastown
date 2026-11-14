@@ -264,3 +264,46 @@ func TestKasbRecoveryCompletionDoesNotRebaseSubmittedMR(t *testing.T) {
 		t.Fatalf("native recovery rewrites a verified/pushed existing MR: rebased=%v calls=%d err=%v", rebased, fake.rebaseCalls, err)
 	}
 }
+
+// hq-i2hc3: a passing receipt for the exact head and source bead is found;
+// other heads, other beads, failed runs and per-stage partials are not.
+func TestPassingPreflightReceiptForHead(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".delivery", "preflight-receipts")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, head, bead, status string) {
+		body := `{"head_sha":"` + head + `","source_bead_id":"` + bead + `","status":"` + status + `"}`
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("kasb-x.1-a.json", "aaaa", "kasb-x.1", "failed")
+	write("kasb-x.1-b-api-stage.json", "bbbb", "kasb-x.1", "passed")
+	write("kasb-x.1-c.json", "cccc", "kasb-x.1", "passed")
+	write("kasb-x.2-d.json", "dddd", "kasb-x.2", "passed_non_behavioral")
+	write("broken.json", "eeee", "kasb-x.1", "passed\"")
+
+	cases := []struct {
+		head, bead string
+		want       bool
+	}{
+		{"cccc", "kasb-x.1", true},
+		{"dddd", "kasb-x.2", true},
+		{"cccc", "kasb-x.2", false},
+		{"aaaa", "kasb-x.1", false},
+		{"bbbb", "kasb-x.1", false},
+		{"eeee", "kasb-x.1", false},
+		{"", "kasb-x.1", false},
+	}
+	for _, c := range cases {
+		got := passingPreflightReceiptForHead(root, c.head, c.bead) != ""
+		if got != c.want {
+			t.Errorf("head=%q bead=%q: got %v want %v", c.head, c.bead, got, c.want)
+		}
+	}
+	if passingPreflightReceiptForHead(t.TempDir(), "cccc", "kasb-x.1") != "" {
+		t.Error("no receipts directory must return empty")
+	}
+}

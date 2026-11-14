@@ -1237,7 +1237,21 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			// gh#3400: Auto-rebase the polecat branch onto the latest target before
 			// push, so the resulting MR/PR has a current base.
 			alreadyPushed := checkpoints[CheckpointPushed] == branch
-			rebased, skipReason, rebaseErr := autoRebaseOnTarget(g, contaminationBase, contam.Behind, donePreVerified, alreadyPushed)
+			// hq-i2hc3: a head with a passing preflight receipt keeps that
+			// receipt. The Refinery rebases at landing; a conflict there goes
+			// back to this polecat as needs-rebase on the same MR.
+			receiptSkip := false
+			if headSHA, headErr := g.Rev("HEAD"); headErr == nil {
+				if receipt := passingPreflightReceiptForHead(g.WorkDir(), headSHA, issueID); receipt != "" {
+					receiptSkip = true
+					fmt.Printf("%s Preflight receipt %s covers HEAD %s; leaving the rebase onto %s to the Refinery\n",
+						style.Bold.Render("✓"), filepath.Base(receipt), headSHA[:min(len(headSHA), 8)], contaminationBase)
+				}
+			}
+			rebased, skipReason, rebaseErr := autoRebaseOnTarget(g, contaminationBase, contam.Behind, donePreVerified || receiptSkip, alreadyPushed)
+			if receiptSkip && skipReason != "" {
+				skipReason = "a passing preflight receipt covers HEAD"
+			}
 			if rebaseErr != nil {
 				return rebaseErr
 			}
