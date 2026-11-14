@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -170,6 +171,8 @@ Examples:
 // Post-merge flags
 var mqPostMergeSkipBranchDelete bool
 var mqPostMergePreLandingBase string
+var mqPostMergeMechanicalLanding string
+var mqPostMergeMechanicalRecord string
 
 var mqPostMergeCmd = &cobra.Command{
 	Use:   "post-merge <rig> <mr-id>",
@@ -375,6 +378,8 @@ func init() {
 
 	// Post-merge flags
 	mqPostMergeCmd.Flags().BoolVar(&mqPostMergeSkipBranchDelete, "skip-branch-delete", false, "Skip remote branch deletion")
+	mqPostMergeCmd.Flags().StringVar(&mqPostMergeMechanicalLanding, "mechanical-landing", "", "Prove this landed commit as the submission plus the declared mechanical rewrite in --mechanical-record (kasb-1dxro)")
+	mqPostMergeCmd.Flags().StringVar(&mqPostMergeMechanicalRecord, "mechanical-record", "", "JSON {paths, renames} written by the lander's mechanical resolver; required with --mechanical-landing")
 	mqPostMergeCmd.Flags().StringVar(&mqPostMergePreLandingBase, "pre-landing-base", "", "Prove the final submitted series against this exact pre-landing target SHA (strict content proof; no guard bypass)")
 
 	// Add subcommands
@@ -663,7 +668,11 @@ func verifyMQPostMergeProofWithBase(rigGit mqPostMergeGit, mr *refinery.MergeReq
 	// less fails closed.
 	var landedSHA string
 	var err error
-	if preLandingBase != "" {
+	if mqPostMergeMechanicalLanding != "" {
+		// kasb-1dxro: a landing the lander rewrote mechanically (renumbered
+		// migrations, regenerated pins) is proved against its declared rewrite.
+		landedSHA, err = verifyMechanicalLanding(rigGit, target, commit, mqPostMergeMechanicalLanding, mqPostMergeMechanicalRecord)
+	} else if preLandingBase != "" {
 		// Explicit final-net proof is an alternative to historical ancestry/cherry
 		// evidence, never a fallback that ignores a failed content check.
 		landedSHA, err = rigGit.SubmittedSeriesLandingReceipt("origin", target, commit, preLandingBase)
@@ -746,4 +755,27 @@ func mqDeleteMergedBranchesEnabled(rigPath string) bool {
 		return true
 	}
 	return settings.MergeQueue.IsDeleteMergedBranchesEnabled()
+}
+
+type mqMechanicalLandingGit interface {
+	MechanicalLandingReceipt(remote, branch, submitted, landed string, rw git.MechanicalRewrite) (string, error)
+}
+
+func verifyMechanicalLanding(rigGit mqPostMergeGit, target, submitted, landed, recordPath string) (string, error) {
+	mg, ok := rigGit.(mqMechanicalLandingGit)
+	if !ok {
+		return "", fmt.Errorf("mechanical landing proof unsupported by this git backend")
+	}
+	if strings.TrimSpace(recordPath) == "" {
+		return "", fmt.Errorf("--mechanical-landing requires --mechanical-record")
+	}
+	raw, err := os.ReadFile(recordPath)
+	if err != nil {
+		return "", fmt.Errorf("mechanical record unavailable: %w", err)
+	}
+	var rw git.MechanicalRewrite
+	if err := json.Unmarshal(raw, &rw); err != nil {
+		return "", fmt.Errorf("mechanical record invalid: %w", err)
+	}
+	return mg.MechanicalLandingReceipt("origin", target, submitted, strings.TrimSpace(landed), rw)
 }
