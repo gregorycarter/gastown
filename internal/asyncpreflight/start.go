@@ -16,8 +16,9 @@ type StartRequest struct {
 	Branch   string
 	Head     string
 	Worktree string
-	Prefix   []string // preflight argv prefix from rig settings
-	Args     []string // the polecat's preflight arguments
+	Prefix   []string      // preflight argv prefix from rig settings
+	Args     []string      // the polecat's preflight arguments
+	Timeout  time.Duration // hard timeout of the run (0: DefaultTimeout)
 	Now      time.Time
 }
 
@@ -98,6 +99,7 @@ func Prepare(req StartRequest) (m *Marker, path string, reused bool, err error) 
 		Log:           LogPath(path),
 		Status:        StatusStarting,
 		CreatedAt:     req.Now.UTC().Format(time.RFC3339Nano),
+		TimeoutSecs:   int(req.Timeout / time.Second),
 	}
 	if err := Create(path, m); err != nil {
 		return nil, "", false, err

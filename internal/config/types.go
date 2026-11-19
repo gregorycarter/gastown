@@ -793,6 +793,24 @@ type DeliveryConfig struct {
 	// worktree; the polecat's arguments plus --head/--source-bead-id/--receipt
 	// are appended. Default: uv run python scripts/delivery/preflight.py.
 	AsyncPreflightCommand []string `json:"async_preflight_command,omitempty"`
+
+	// AsyncPreflightTimeout is the hard timeout of one async preflight run as
+	// a Go duration ("2h", "90m"). On expiry the runner kills the preflight and
+	// records a failed (failed_timeout) result. Default 2h.
+	AsyncPreflightTimeout string `json:"async_preflight_timeout,omitempty"`
+}
+
+// DefaultAsyncPreflightTimeout is used when AsyncPreflightTimeout is empty or invalid.
+const DefaultAsyncPreflightTimeout = 2 * time.Hour
+
+// AsyncPreflightTimeoutOrDefault returns the configured hard timeout.
+func (s *RigSettings) AsyncPreflightTimeoutOrDefault() time.Duration {
+	if s != nil && s.Delivery != nil && s.Delivery.AsyncPreflightTimeout != "" {
+		if d, err := time.ParseDuration(s.Delivery.AsyncPreflightTimeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	return DefaultAsyncPreflightTimeout
 }
 
 // DefaultAsyncPreflightCommand is used when DeliveryConfig.AsyncPreflightCommand is empty.

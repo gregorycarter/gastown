@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,11 +19,21 @@ const (
 	src   = "kasb-abc.1"
 )
 
-func withDeadPIDs(t *testing.T) {
+// withProcesses fakes the process table: pid -> kernel start time.
+func withProcesses(t *testing.T, procs map[int]string) {
 	t.Helper()
-	old := PIDAlive
-	PIDAlive = func(int) bool { return false }
-	t.Cleanup(func() { PIDAlive = old })
+	old := ProcessStartTime
+	ProcessStartTime = func(pid int) string { return procs[pid] }
+	t.Cleanup(func() { ProcessStartTime = old })
+}
+
+func withDeadPIDs(t *testing.T) { withProcesses(t, nil) }
+
+func running(now time.Time) func(*Marker) {
+	return func(m *Marker) {
+		m.Status, m.PID, m.PIDStart = StatusRunning, 4242, "start-1"
+		m.StartedAt, m.HeartbeatAt = now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)
+	}
 }
 
 func request(rigPath, worktree string, now time.Time) StartRequest {
@@ -97,7 +108,7 @@ func TestPrepareCreatesReusesAndRefuses(t *testing.T) {
 	}
 	// A lost run (stale heartbeat, dead pid) is replaced as well.
 	cur, _ := Load(path)
-	cur.Status, cur.PID, cur.HeartbeatAt = StatusRunning, 999999, now.Add(-time.Hour).Format(time.RFC3339Nano)
+	cur.Status, cur.PID, cur.PIDStart, cur.HeartbeatAt = StatusRunning, 999999, "x", now.Add(-time.Hour).Format(time.RFC3339Nano)
 	_ = Save(path, cur)
 	if _, _, reused, err := Prepare(request(rig, "/w", now)); err != nil || reused {
 		t.Fatalf("lost run not replaced: %v reused=%v", err, reused)
@@ -157,28 +168,67 @@ func TestEvaluate(t *testing.T) {
 			t.Fatalf("%+v", g)
 		}
 	})
-	t.Run("pending while heartbeat fresh", func(t *testing.T) {
+	t.Run("pending: fresh heartbeat and the recorded runner process", func(t *testing.T) {
 		fx := newGateFixture(t)
-		fx.set(t, func(m *Marker) { m.Status, m.HeartbeatAt = StatusRunning, fx.now.Format(time.RFC3339Nano) })
+		withProcesses(t, map[int]string{4242: "start-1"})
+		fx.set(t, running(fx.now))
 		g := Evaluate(fx.rig, fx.f, headA, fx.now.Add(2*time.Minute))
 		if g.State != GatePending || g.Landable() || g.NeedsFix() {
 			t.Fatalf("%+v", g)
 		}
 	})
-	t.Run("pending while pid alive despite stale heartbeat", func(t *testing.T) {
+	t.Run("starting within grace is pending, after grace lost", func(t *testing.T) {
 		fx := newGateFixture(t)
-		PIDAlive = func(pid int) bool { return pid == 4242 }
-		fx.set(t, func(m *Marker) { m.Status, m.PID, m.HeartbeatAt = StatusRunning, 4242, fx.now.Format(time.RFC3339Nano) })
-		if g := Evaluate(fx.rig, fx.f, "", fx.now.Add(time.Hour)); g.State != GatePending {
+		if g := Evaluate(fx.rig, fx.f, "", fx.now.Add(time.Minute)); g.State != GatePending {
+			t.Fatalf("%+v", g)
+		}
+		if g := Evaluate(fx.rig, fx.f, "", fx.now.Add(StartGrace+time.Second)); g.State != GateLost {
 			t.Fatalf("%+v", g)
 		}
 	})
-	t.Run("lost", func(t *testing.T) {
+	lost := map[string]struct {
+		procs map[int]string
+		at    time.Duration
+		edit  func(*Marker)
+	}{
+		"pid gone despite fresh heartbeat":    {nil, time.Minute, nil},
+		"pid reused after reboot":             {map[int]string{4242: "start-2"}, time.Minute, nil},
+		"hung runner: stale heartbeat":        {map[int]string{4242: "start-1"}, HeartbeatFresh + time.Second, nil},
+		"no recorded start time":              {map[int]string{4242: ""}, time.Minute, func(m *Marker) { m.PIDStart = "" }},
+		"past hard timeout despite heartbeat": {map[int]string{4242: "start-1"}, 0, func(m *Marker) { m.TimeoutSecs = 60 }},
+	}
+	for name, tc := range lost {
+		t.Run("lost: "+name, func(t *testing.T) {
+			fx := newGateFixture(t)
+			withProcesses(t, tc.procs)
+			at := fx.now.Add(tc.at)
+			start := fx.now
+			if name == "past hard timeout despite heartbeat" {
+				at = fx.now.Add(time.Minute + StartGrace + time.Second)
+			}
+			fx.set(t, running(start))
+			if tc.edit != nil {
+				fx.set(t, tc.edit)
+			}
+			if name == "past hard timeout despite heartbeat" {
+				fx.set(t, func(m *Marker) { m.HeartbeatAt = at.Add(-time.Second).Format(time.RFC3339Nano) })
+			}
+			g := Evaluate(fx.rig, fx.f, "", at)
+			if g.State != GateLost || !g.NeedsFix() {
+				t.Fatalf("%+v", g)
+			}
+		})
+	}
+	t.Run("MR without binding is still gated by its marker", func(t *testing.T) {
 		fx := newGateFixture(t)
-		fx.set(t, func(m *Marker) { m.Status, m.PID, m.HeartbeatAt = StatusRunning, 4242, fx.now.Format(time.RFC3339Nano) })
-		g := Evaluate(fx.rig, fx.f, "", fx.now.Add(LostAfter+time.Second))
-		if g.State != GateLost || !g.NeedsFix() {
+		f := fx.f
+		f.RunPath = ""
+		if g := Evaluate(fx.rig, f, "", fx.now.Add(time.Minute)); g.State != GatePending || g.Run == nil {
 			t.Fatalf("%+v", g)
+		}
+		f.CommitSHA = headB
+		if g := Evaluate(fx.rig, f, "", fx.now); g.State != GateNone {
+			t.Fatalf("other head gated: %+v", g)
 		}
 	})
 	t.Run("passed needs a matching receipt copy", func(t *testing.T) {
@@ -250,7 +300,8 @@ func TestEvaluate(t *testing.T) {
 
 func TestRunningForWorktree(t *testing.T) {
 	fx := newGateFixture(t)
-	fx.set(t, func(m *Marker) { m.Status, m.HeartbeatAt = StatusRunning, fx.now.Format(time.RFC3339Nano) })
+	withProcesses(t, map[int]string{4242: "start-1"})
+	fx.set(t, running(fx.now))
 	if r := RunningForWorktree(fx.rig, "/w", fx.now.Add(time.Minute)); !strings.Contains(r, src) {
 		t.Fatalf("running marker not reported: %q", r)
 	}
@@ -418,4 +469,146 @@ func TestExecInGroup(t *testing.T) {
 	if time.Since(start) > 10*time.Second || code == 0 {
 		t.Fatalf("cancel did not stop the group: code=%d after %s", code, time.Since(start))
 	}
+}
+
+func TestRunTimeoutRecordsFailedReceipt(t *testing.T) {
+	r := newRunFixture(t)
+	deps := r.deps()
+	deps.Timeout = 50 * time.Millisecond
+	deps.Exec = func(ctx context.Context, dir string, argv []string, log io.Writer) (int, error) {
+		<-ctx.Done() // a hung preflight
+		return -1, nil
+	}
+	if err := Run(context.Background(), r.path, deps); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := Load(r.path)
+	if m.Status != StatusFailed || m.ReceiptStatus != ReceiptTimedOut || !strings.Contains(m.Reason, "timeout") {
+		t.Fatalf("%+v", m)
+	}
+	rc, err := ReadReceipt(m.ReceiptCopy)
+	if err != nil || rc.Status != ReceiptTimedOut || rc.Head != headA {
+		t.Fatalf("receipt %+v %v", rc, err)
+	}
+	rig := filepath.Dir(filepath.Dir(filepath.Dir(r.path)))
+	if g := Evaluate(rig, MRFields{Source: src, CommitSHA: headA, RunPath: r.path}, "", time.Now()); g.State != GateFailed {
+		t.Fatalf("gate %+v", g)
+	}
+}
+
+func TestRunRecordsRunnerIdentity(t *testing.T) {
+	r := newRunFixture(t)
+	r.receipt = map[string]any{"head_sha": headA, "source_bead_id": src, "status": "passed"}
+	if err := Run(context.Background(), r.path, r.deps()); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := Load(r.path)
+	if m.PIDStart == "" || m.PIDStart != processStartTime(os.Getpid()) || m.Timeout() != DefaultTimeout {
+		t.Fatalf("identity/timeout not recorded: %+v", m)
+	}
+}
+
+func TestProcessStartTimeAndStop(t *testing.T) {
+	if processStartTime(os.Getpid()) == "" || processStartTime(os.Getpid()) != processStartTime(os.Getpid()) {
+		t.Fatal("own start time unavailable or unstable")
+	}
+	c := exec.Command("sleep", "30")
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	m := &Marker{Status: StatusRunning, PID: c.Process.Pid, PIDStart: "not-this-process"}
+	if Stop(m) {
+		t.Fatal("stopped a process whose start time does not match (reused PID)")
+	}
+	m.PIDStart = processStartTime(c.Process.Pid)
+	if !Stop(m) {
+		t.Fatal("did not stop the recorded runner")
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		_ = c.Process.Kill()
+		t.Fatal("SIGTERM not delivered")
+	}
+	if processStartTime(c.Process.Pid) != "" && processStartTime(c.Process.Pid) == m.PIDStart {
+		t.Fatal("exited process still reported")
+	}
+}
+
+func TestPrune(t *testing.T) {
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	mk := func(t *testing.T, rig, head string, created time.Time, edit func(*Marker), mr string) string {
+		t.Helper()
+		req := request(rig, "/w", created)
+		req.Head = head
+		m, p, _, err := Prepare(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if edit != nil {
+			edit(m)
+			_ = Save(p, m)
+		}
+		_ = os.WriteFile(m.Log, []byte("log"), 0o644)
+		if mr != "" {
+			_ = RecordMR(p, mr)
+		}
+		return p
+	}
+	finished := func(m *Marker) { m.Status = StatusPassed }
+	t.Run("old finished marker removed with its files", func(t *testing.T) {
+		withDeadPIDs(t)
+		rig := t.TempDir()
+		p := mk(t, rig, headA, now.Add(-8*24*time.Hour), finished, "")
+		fresh := mk(t, rig, headB, now.Add(-time.Hour), finished, "")
+		res := Prune(rig, now, nil)
+		if len(res.Removed) != 1 || res.Removed[0] != p {
+			t.Fatalf("%+v", res)
+		}
+		for _, f := range []string{p, LogPath(p)} {
+			if _, err := os.Stat(f); err == nil {
+				t.Fatalf("%s kept", f)
+			}
+		}
+		if _, err := os.Stat(fresh); err != nil {
+			t.Fatal("fresh marker removed")
+		}
+	})
+	t.Run("closed MR marker removed; unknown MR kept", func(t *testing.T) {
+		withDeadPIDs(t)
+		rig := t.TempDir()
+		closed := mk(t, rig, headA, now.Add(-time.Hour), finished, "kasb-wisp-c")
+		unknown := mk(t, rig, headB, now.Add(-time.Hour), finished, "kasb-wisp-u")
+		res := Prune(rig, now, func(id string) MRState {
+			if id == "kasb-wisp-c" {
+				return MRState{Known: true, Closed: true}
+			}
+			return MRState{}
+		})
+		if len(res.Removed) != 1 || res.Removed[0] != closed {
+			t.Fatalf("%+v", res)
+		}
+		if _, err := os.Stat(MRSidecarPath(closed)); err == nil {
+			t.Fatal("sidecar kept")
+		}
+		if _, err := os.Stat(unknown); err != nil {
+			t.Fatal("unknown-MR marker removed")
+		}
+	})
+	t.Run("live runner superseded by a moved MR head is stopped, not removed", func(t *testing.T) {
+		withProcesses(t, map[int]string{4242: "start-1"})
+		rig := t.TempDir()
+		live := mk(t, rig, headA, now.Add(-time.Minute), running(now.Add(-time.Minute)), "kasb-wisp-m")
+		res := Prune(rig, now, func(string) MRState { return MRState{Known: true, Head: headB} })
+		// Stop signals the fake PID 4242, which is not ours: Kill fails, so
+		// nothing is reported stopped and the live marker is kept.
+		if len(res.Removed) != 0 {
+			t.Fatalf("live marker removed: %+v", res)
+		}
+		if _, err := os.Stat(live); err != nil {
+			t.Fatal(err)
+		}
+	})
 }

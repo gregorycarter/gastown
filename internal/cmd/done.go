@@ -2141,10 +2141,15 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			if ensureErr := ensureAsyncPreflightMRFields(bd.Show, func(id, desc string) error {
 				return bd.Update(id, beads.UpdateOptions{Description: &desc})
 			}, mrID, asyncPF.MarkerPath); ensureErr != nil {
-				mrFailed = true
-				errMsg := fmt.Sprintf("MR %s lacks its pending preflight binding: %v", mrID, ensureErr)
-				doneErrors = append(doneErrors, errMsg)
-				style.PrintWarning("%s\nWitness will be notified.", errMsg)
+				// Never continue with an open, unbound MR: hold it, then fail.
+				blocked := "blocked"
+				holdErr := holdUnboundAsyncMR(func(id, reason string) error {
+					return bd.Update(id, beads.UpdateOptions{Status: &blocked, AddLabels: []string{"hold:async-preflight-binding"}})
+				}, bd.AddComment, mrID, asyncPF.MarkerPath, ensureErr)
+				return fmt.Errorf("%v\nThe branch is pushed and the preflight keeps running; do not resubmit", holdErr)
+			}
+			if recErr := asyncpreflight.RecordMR(asyncPF.MarkerPath, mrID); recErr != nil {
+				style.PrintWarning("could not record MR %s next to %s: %v (pruning falls back to age)", mrID, asyncPF.MarkerPath, recErr)
 			}
 		}
 		fmt.Printf("  Source: %s\n", branch)

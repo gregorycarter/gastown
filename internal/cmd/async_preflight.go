@@ -129,6 +129,41 @@ func init() {
 	mqPreflightGateCmd.Flags().StringVar(&preflightGateBranchHead, "branch-head", "", "remote branch head the lander would land")
 	mqPreflightGateCmd.Flags().BoolVar(&preflightGateJSON, "json", false, "JSON output")
 	mqCmd.AddCommand(mqPreflightGateCmd)
+	mqCmd.AddCommand(mqPreflightPruneCmd)
+}
+
+var mqPreflightPruneCmd = &cobra.Command{
+	Use:   "preflight-prune <rig>",
+	Short: "Prune async-preflight markers older than 7 days or whose MR closed; stop superseded runners",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		town, err := workspace.FindFromCwdOrError()
+		if err != nil {
+			return err
+		}
+		b := mqResumeBeads(town, args[0])
+		res := asyncpreflight.Prune(filepath.Join(town, args[0]), time.Now(), mrStateFromBeads(b.Show))
+		for _, p := range res.Stopped {
+			fmt.Fprintf(cmd.OutOrStdout(), "stopped\t%s\n", p)
+		}
+		for _, p := range res.Removed {
+			fmt.Fprintf(cmd.OutOrStdout(), "removed\t%s\n", p)
+		}
+		return nil
+	},
+}
+
+// mrStateFromBeads adapts an MR lookup for asyncpreflight.Prune. A lookup
+// error is "unknown": nothing is pruned or stopped on a guess.
+func mrStateFromBeads(show func(string) (*beads.Issue, error)) func(string) asyncpreflight.MRState {
+	return func(id string) asyncpreflight.MRState {
+		mr, err := show(id)
+		if err != nil || mr == nil || mr.ID != id {
+			return asyncpreflight.MRState{}
+		}
+		return asyncpreflight.MRState{Known: true, Closed: mr.Status == "closed",
+			Head: asyncpreflight.ParseMRFields(mr.Description).CommitSHA}
+	}
 }
 
 type preflightGateDeps struct {
@@ -136,6 +171,7 @@ type preflightGateDeps struct {
 	block   func(id, reason string) error
 	comment func(id, text string) error
 	now     func() time.Time
+	stop    func(*asyncpreflight.Marker) bool // default asyncpreflight.Stop
 }
 
 // runPreflightGate evaluates an MR and, with apply, returns a not-landable
@@ -150,6 +186,16 @@ func runPreflightGate(rigPath, mrID, branchHead string, apply bool, d preflightG
 	}
 	f := asyncpreflight.ParseMRFields(mr.Description)
 	res := asyncpreflight.Evaluate(rigPath, f, branchHead, d.now())
+	if apply && res.NeedsFix() && res.Run != nil && asyncpreflight.Live(res.Run, d.now()) {
+		// Superseded (head moved, binding changed): its result can never land.
+		stop := d.stop
+		if stop == nil {
+			stop = asyncpreflight.Stop
+		}
+		if stop(res.Run) {
+			res.Reason += "; superseded runner stopped"
+		}
+	}
 	if !apply || !res.NeedsFix() || mr.Status != "open" {
 		return res, false, nil
 	}
@@ -276,7 +322,8 @@ func startAsyncPreflightForDone(settings *config.RigSettings, rigPath, rigName, 
 	}
 	m, path, reused, err := asyncpreflight.Prepare(asyncpreflight.StartRequest{
 		RigPath: rigPath, Rig: rigName, Source: issueID, Branch: branch, Head: head,
-		Worktree: worktree, Prefix: settings.AsyncPreflightCommandOrDefault(), Args: preflightArgs, Now: now,
+		Worktree: worktree, Prefix: settings.AsyncPreflightCommandOrDefault(), Args: preflightArgs,
+		Timeout: settings.AsyncPreflightTimeoutOrDefault(), Now: now,
 	})
 	if err != nil {
 		return nil, err
@@ -291,6 +338,18 @@ func startAsyncPreflightForDone(settings *config.RigSettings, rigPath, rigName, 
 		fmt.Printf("%s Reusing async preflight %s (%s)\n", style.Bold.Render("✓"), path, m.Status)
 	}
 	return &asyncPreflightSubmission{MarkerPath: path, Reused: reused}, nil
+}
+
+// holdUnboundAsyncMR blocks an MR whose pending preflight binding could not
+// be written, so it can never land unproven. The gate also finds the marker
+// by source and head, so this is the second of two locks.
+func holdUnboundAsyncMR(block func(id, reason string) error, comment func(id, text string) error, mrID, markerPath string, cause error) error {
+	reason := truncateGateReason(fmt.Sprintf("async preflight binding missing: %v. The preflight runs from %s; release only after `gt mq preflight-gate` reports passed.", cause, markerPath), 3500)
+	if err := block(mrID, reason); err != nil {
+		return fmt.Errorf("MR %s has no preflight binding (%v) and could not be held: %w", mrID, cause, err)
+	}
+	_ = comment(mrID, "gt done (kasb-eel8t.6): "+reason)
+	return fmt.Errorf("MR %s held (blocked): %s", mrID, reason)
 }
 
 // ensureAsyncPreflightMRFields makes an existing MR (idempotent retry,

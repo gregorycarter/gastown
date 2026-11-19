@@ -22,7 +22,6 @@ package asyncpreflight
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,9 +57,24 @@ const (
 // HeartbeatInterval is how often the runner refreshes heartbeat_at.
 const HeartbeatInterval = 30 * time.Second
 
-// LostAfter is how stale a running marker's heartbeat must be (with its PID
-// gone) before the gate reports it lost. Starting markers get the same grace.
-const LostAfter = 10 * time.Minute
+// HeartbeatFresh is the maximum heartbeat age of a live run. A run is live
+// only with a fresh heartbeat AND its runner process (PID plus kernel start
+// time, so a reused PID never counts) still present.
+const HeartbeatFresh = 3 * time.Minute
+
+// StartGrace is how long a "starting" marker may wait for its runner.
+const StartGrace = 3 * time.Minute
+
+// LostAfter is kept for callers: a run older than this without proof of life
+// is lost. It equals HeartbeatFresh.
+const LostAfter = HeartbeatFresh
+
+// DefaultTimeout bounds one preflight run; on expiry the runner kills the
+// preflight and records a failed (timed_out) result.
+const DefaultTimeout = 2 * time.Hour
+
+// StaleAfter is the age after which finished or dead markers are pruned.
+const StaleAfter = 7 * 24 * time.Hour
 
 // Marker is the durable record of one async preflight run.
 type Marker struct {
@@ -76,6 +90,8 @@ type Marker struct {
 	Log           string   `json:"log"`
 	Status        string   `json:"status"`
 	PID           int      `json:"pid,omitempty"`
+	PIDStart      string   `json:"pid_start,omitempty"` // kernel start time of PID
+	TimeoutSecs   int      `json:"timeout_seconds,omitempty"`
 	CreatedAt     string   `json:"created_at"`
 	StartedAt     string   `json:"started_at,omitempty"`
 	HeartbeatAt   string   `json:"heartbeat_at,omitempty"`
@@ -195,32 +211,69 @@ func ReadReceipt(path string) (*Receipt, error) {
 	return &r, nil
 }
 
-// PIDAlive reports whether pid is a live process (signal 0).
-var PIDAlive = func(pid int) bool {
-	if pid <= 0 {
-		return false
+// ProcessStartTime returns the kernel start time of pid ("" if absent).
+// Replaced in tests.
+var ProcessStartTime = processStartTime
+
+// Timeout returns the run's hard timeout.
+func (m *Marker) Timeout() time.Duration {
+	if m == nil || m.TimeoutSecs <= 0 {
+		return DefaultTimeout
 	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
+	return time.Duration(m.TimeoutSecs) * time.Second
 }
 
-// Live reports whether a marker still represents a run in progress.
-func Live(m *Marker, now time.Time) bool {
-	if m == nil || (m.Status != StatusStarting && m.Status != StatusRunning) {
-		return false
-	}
-	if m.PID > 0 && PIDAlive(m.PID) {
-		return true
-	}
-	stamp := m.HeartbeatAt
-	if stamp == "" {
-		stamp = m.CreatedAt
-	}
+func age(stamp string, now time.Time) (time.Duration, bool) {
 	t, err := time.Parse(time.RFC3339Nano, stamp)
 	if err != nil {
+		return 0, false
+	}
+	return now.Sub(t), true
+}
+
+// runnerPresent reports whether the marker's runner process still exists:
+// same PID and same kernel start time (a reused PID has another).
+func runnerPresent(m *Marker) bool {
+	if m == nil || m.PID <= 0 || m.PIDStart == "" {
 		return false
 	}
-	return now.Sub(t) < LostAfter
+	return ProcessStartTime(m.PID) == m.PIDStart
+}
+
+// Live reports whether a marker still represents a run in progress:
+//   - starting: created less than StartGrace ago (runner not yet claimed it);
+//   - running: heartbeat younger than HeartbeatFresh, the runner process
+//     present with its recorded start time, and not past its hard timeout
+//     (plus StartGrace for the runner to record the expiry).
+func Live(m *Marker, now time.Time) bool {
+	if m == nil {
+		return false
+	}
+	switch m.Status {
+	case StatusStarting:
+		a, ok := age(m.CreatedAt, now)
+		return ok && a < StartGrace
+	case StatusRunning:
+		hb, ok := age(m.HeartbeatAt, now)
+		if !ok || hb >= HeartbeatFresh || !runnerPresent(m) {
+			return false
+		}
+		if started, ok := age(m.StartedAt, now); ok && started > m.Timeout()+StartGrace {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// Stop sends SIGTERM to a run's runner when it is still the recorded process
+// (PID and start time match). The runner then kills the preflight's process
+// group and records an error. Returns whether a signal was sent.
+func Stop(m *Marker) bool {
+	if m == nil || (m.Status != StatusRunning && m.Status != StatusStarting) || !runnerPresent(m) {
+		return false
+	}
+	return syscall.Kill(m.PID, syscall.SIGTERM) == nil
 }
 
 // GateResult is the lander-facing verdict.
@@ -229,6 +282,8 @@ type GateResult struct {
 	Reason string `json:"reason"`
 	Marker string `json:"marker,omitempty"`
 	Log    string `json:"log,omitempty"`
+	// Run is the loaded marker, when there is one (not serialized).
+	Run *Marker `json:"-"`
 }
 
 // Landable reports whether the lander may land the MR now.
@@ -318,7 +373,17 @@ func within(dir, path string) bool {
 
 // Evaluate decides the gate state of an MR. branchHead, when non-empty, is the
 // current remote branch head the lander would land.
+//
+// An MR without a preflight_run line is still gated when a marker exists for
+// its exact source and head (the binding may have failed to reach the MR).
 func Evaluate(rigPath string, f MRFields, branchHead string, now time.Time) GateResult {
+	if f.RunPath == "" {
+		if p, err := MarkerPath(rigPath, f.Source, f.CommitSHA); err == nil {
+			if _, statErr := os.Stat(p); statErr == nil {
+				f.RunPath = p
+			}
+		}
+	}
 	if f.RunPath == "" {
 		return GateResult{State: GateNone, Reason: "not an async-preflight submission"}
 	}
@@ -332,7 +397,7 @@ func Evaluate(rigPath string, f MRFields, branchHead string, now time.Time) Gate
 		res.State, res.Reason = GateInvalid, fmt.Sprintf("async preflight marker unreadable: %v", err)
 		return res
 	}
-	res.Log = m.Log
+	res.Log, res.Run = m.Log, m
 	if m.Source != f.Source || m.Head != f.CommitSHA || !shaRe.MatchString(m.Head) {
 		res.State, res.Reason = GateInvalid, fmt.Sprintf("marker binds %s@%s but the MR is %s@%s", m.Source, short(m.Head), f.Source, short(f.CommitSHA))
 		return res
@@ -347,7 +412,7 @@ func Evaluate(rigPath string, f MRFields, branchHead string, now time.Time) Gate
 			res.State, res.Reason = GatePending, fmt.Sprintf("preflight running for %s since %s (pid %d)", short(m.Head), firstNonEmpty(m.StartedAt, m.CreatedAt), m.PID)
 			return res
 		}
-		res.State, res.Reason = GateLost, fmt.Sprintf("async preflight for %s stopped without a result (pid %d, last heartbeat %s); log %s", short(m.Head), m.PID, firstNonEmpty(m.HeartbeatAt, m.CreatedAt), m.Log)
+		res.State, res.Reason = GateLost, fmt.Sprintf("async preflight for %s has no live runner (pid %d gone, reused or hung; last heartbeat %s; timeout %s); log %s", short(m.Head), m.PID, firstNonEmpty(m.HeartbeatAt, m.CreatedAt), m.Timeout(), m.Log)
 		return res
 	case StatusPassed:
 		r, err := ReadReceipt(m.ReceiptCopy)

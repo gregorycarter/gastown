@@ -15,6 +15,9 @@ import (
 	"time"
 )
 
+// ReceiptTimedOut is the receipt status recorded when the hard timeout fires.
+const ReceiptTimedOut = "failed_timeout"
+
 // RunDeps are the runner's side effects, injectable for tests.
 type RunDeps struct {
 	// Git runs git in dir and returns trimmed stdout.
@@ -25,6 +28,8 @@ type RunDeps struct {
 	Now  func() time.Time
 	// Heartbeat overrides HeartbeatInterval (tests).
 	Heartbeat time.Duration
+	// Timeout overrides the marker's hard timeout (tests).
+	Timeout time.Duration
 }
 
 // DefaultRunDeps uses the real git and process execution.
@@ -113,7 +118,7 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 		return nil
 	}
 	save(func(m *Marker) {
-		m.Status, m.PID, m.StartedAt, m.HeartbeatAt = StatusRunning, os.Getpid(), stamp(), stamp()
+		m.Status, m.PID, m.PIDStart, m.StartedAt, m.HeartbeatAt = StatusRunning, os.Getpid(), ProcessStartTime(os.Getpid()), stamp(), stamp()
 	})
 
 	if head, err := deps.Git(m.Worktree, "rev-parse", "HEAD"); err != nil || head != m.Head {
@@ -149,7 +154,14 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 			}
 		}
 	}()
-	code, execErr := deps.Exec(ctx, m.Worktree, m.Command, logFile)
+	timeout := deps.Timeout
+	if timeout <= 0 {
+		timeout = m.Timeout()
+	}
+	runCtx, cancelRun := context.WithTimeout(ctx, timeout)
+	code, execErr := deps.Exec(runCtx, m.Worktree, m.Command, logFile)
+	timedOut := ctx.Err() == nil && errors.Is(runCtx.Err(), context.DeadlineExceeded)
+	cancelRun()
 	close(stop)
 	wg.Wait()
 	fmt.Fprintf(logFile, "%s preflight exited %d (%v)\n", stamp(), code, execErr)
@@ -157,6 +169,12 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 
 	if ctx.Err() != nil {
 		return finish(StatusError, "async preflight runner was stopped before the preflight finished", &exit, "")
+	}
+	if timedOut {
+		reason := fmt.Sprintf("preflight exceeded its %s timeout and was killed", timeout)
+		raw, _ := json.Marshal(map[string]string{"head_sha": m.Head, "source_bead_id": m.Source, "status": ReceiptTimedOut, "reason": reason})
+		_ = writeFileAtomic(m.ReceiptCopy, raw)
+		return finish(StatusFailed, reason, &exit, ReceiptTimedOut)
 	}
 	if execErr != nil {
 		return finish(StatusError, fmt.Sprintf("preflight could not run: %v", execErr), &exit, "")

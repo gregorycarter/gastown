@@ -132,6 +132,19 @@ func TestEnsureAsyncPreflightMRFields(t *testing.T) {
 }
 
 // gateFixture builds a kasb MR bound to an async preflight marker.
+// fakeRunnerProcess makes PID 4242 a live runner started at "start-1".
+func fakeRunnerProcess(t *testing.T) {
+	t.Helper()
+	old := asyncpreflight.ProcessStartTime
+	asyncpreflight.ProcessStartTime = func(pid int) string {
+		if pid == 4242 {
+			return "start-1"
+		}
+		return ""
+	}
+	t.Cleanup(func() { asyncpreflight.ProcessStartTime = old })
+}
+
 func asyncGateFixture(t *testing.T, status string) (rig string, mr *beads.Issue, source *beads.Issue, show func(string) (*beads.Issue, error), marker *asyncpreflight.Marker) {
 	t.Helper()
 	mr, source, show = kasbRecoveryFixture()
@@ -144,6 +157,10 @@ func asyncGateFixture(t *testing.T, status string) (rig string, mr *beads.Issue,
 		t.Fatal(err)
 	}
 	m.Status, m.Reason, m.ReceiptStatus, m.HeartbeatAt = status, "api-tests: test_x failed", "failed", time.Now().UTC().Format(time.RFC3339Nano)
+	if status == asyncpreflight.StatusRunning {
+		fakeRunnerProcess(t)
+		m.PID, m.PIDStart, m.StartedAt = 4242, "start-1", m.HeartbeatAt
+	}
 	if err := asyncpreflight.Save(path, m); err != nil {
 		t.Fatal(err)
 	}
@@ -232,5 +249,87 @@ func TestKasbResubmissionDropsAsyncPreflightBinding(t *testing.T) {
 	}
 	if strings.Contains(updated, "preflight_run") || strings.Contains(updated, "preflight_receipt") || !strings.Contains(updated, "commit_sha: "+strings.Repeat("c", 40)) {
 		t.Fatal(updated)
+	}
+}
+
+func TestPreflightGateStopsSupersededRunner(t *testing.T) {
+	rig, mr, _, show, m := asyncGateFixture(t, asyncpreflight.StatusRunning)
+	var stopped *asyncpreflight.Marker
+	var blocked bool
+	deps := preflightGateDeps{show: show, now: time.Now,
+		block:   func(string, string) error { blocked = true; return nil },
+		comment: func(string, string) error { return nil },
+		stop:    func(x *asyncpreflight.Marker) bool { stopped = x; return true }}
+	res, applied, err := runPreflightGate(rig, mr.ID, strings.Repeat("d", 40), true, deps)
+	if err != nil || !applied || !blocked || res.State != asyncpreflight.GateMoved {
+		t.Fatalf("res=%+v applied=%v err=%v", res, applied, err)
+	}
+	if stopped == nil || stopped.Head != m.Head || !strings.Contains(res.Reason, "superseded runner stopped") {
+		t.Fatalf("runner not stopped: %+v %q", stopped, res.Reason)
+	}
+	// Without --apply nothing is stopped.
+	stopped = nil
+	if _, _, err := runPreflightGate(rig, mr.ID, strings.Repeat("d", 40), false, deps); err != nil || stopped != nil {
+		t.Fatalf("stopped without --apply: %v", err)
+	}
+}
+
+func TestPreflightGateFindsMarkerWhenBindingMissing(t *testing.T) {
+	rig, mr, _, show, _ := asyncGateFixture(t, asyncpreflight.StatusRunning)
+	var kept []string
+	for _, line := range strings.Split(mr.Description, "\n") {
+		if !strings.HasPrefix(line, "preflight_") {
+			kept = append(kept, line)
+		}
+	}
+	mr.Description = strings.Join(kept, "\n")
+	res, _, err := runPreflightGate(rig, mr.ID, "", false, preflightGateDeps{show: show, now: time.Now})
+	if err != nil || res.State != asyncpreflight.GatePending || res.Landable() {
+		t.Fatalf("unbound async MR would land: %+v %v", res, err)
+	}
+}
+
+func TestHoldUnboundAsyncMR(t *testing.T) {
+	var blockedID, comment string
+	err := holdUnboundAsyncMR(func(id, reason string) error { blockedID = id; return nil },
+		func(id, text string) error { comment = text; return nil }, "kasb-wisp-1", "/m.json", errors.New("dolt timeout"))
+	if err == nil || blockedID != "kasb-wisp-1" || !strings.Contains(comment, "dolt timeout") {
+		t.Fatalf("err=%v blocked=%q comment=%q", err, blockedID, comment)
+	}
+	err = holdUnboundAsyncMR(func(string, string) error { return errors.New("bd down") },
+		func(string, string) error { return nil }, "kasb-wisp-1", "/m.json", errors.New("dolt timeout"))
+	if err == nil || !strings.Contains(err.Error(), "could not be held") {
+		t.Fatalf("hold failure not surfaced: %v", err)
+	}
+}
+
+func TestAsyncPreflightTimeoutFromSettings(t *testing.T) {
+	stubLaunch(t, nil)
+	s := asyncSettings(true)
+	s.Delivery.AsyncPreflightTimeout = "45m"
+	head := strings.Repeat("a", 40)
+	sub, err := startAsyncPreflightForDone(s, t.TempDir(), "kasb_core", "kasb-x.1", "b", "/w", "", fakeRev(head),
+		func() (string, error) { return head, nil }, func() (string, error) { return "", nil },
+		[]string{"--requirement", "R"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := asyncpreflight.Load(sub.MarkerPath)
+	if m.Timeout() != 45*time.Minute {
+		t.Fatalf("timeout %s", m.Timeout())
+	}
+	if (&config.RigSettings{}).AsyncPreflightTimeoutOrDefault() != 2*time.Hour {
+		t.Fatal("default timeout is not 2h")
+	}
+}
+
+func TestMRStateFromBeads(t *testing.T) {
+	mr := &beads.Issue{ID: "kasb-wisp-1", Status: "closed", Description: "commit_sha: " + strings.Repeat("a", 40)}
+	st := mrStateFromBeads(func(string) (*beads.Issue, error) { return mr, nil })("kasb-wisp-1")
+	if !st.Known || !st.Closed || st.Head != strings.Repeat("a", 40) {
+		t.Fatalf("%+v", st)
+	}
+	if st := mrStateFromBeads(func(string) (*beads.Issue, error) { return nil, errors.New("x") })("kasb-wisp-1"); st.Known {
+		t.Fatal("lookup error treated as known")
 	}
 }
