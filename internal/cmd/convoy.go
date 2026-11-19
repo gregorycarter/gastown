@@ -1108,8 +1108,8 @@ func checkSingleConvoy(townBeads, convoyID string, dryRun bool) error {
 		return persistAndNotifyConvoyCompletion(townBeads, convoyID, convoy.Title)
 	}
 
-	// Get tracked issues
-	tracked, err := getTrackedIssues(townBeads, convoyID)
+	// Get tracked issues (statuses only: completion never reads workers)
+	tracked, err := getTrackedIssueStatuses(townBeads, convoyID)
 	if err != nil {
 		return fmt.Errorf("checking convoy %s: %w", convoyID, err)
 	}
@@ -1509,6 +1509,25 @@ type strandedConvoyInfo struct {
 	ReadyIssues  []string `json:"ready_issues"`
 	CreatedAt    string   `json:"created_at,omitempty"`
 	BaseBranch   string   `json:"base_branch,omitempty"`
+	// OpenIssues lists tracked issues that are not closed or tombstoned,
+	// including ones whose status could not be resolved. It is always
+	// emitted (never null) so the daemon can tell "all closed" ([]) from
+	// output produced by an older gt that lacks the field.
+	OpenIssues []string `json:"open_issues"`
+}
+
+// openTrackedIssueIDs returns the tracked issues that are not complete.
+// Unknown status counts as open, matching closeConvoyIfComplete.
+func openTrackedIssueIDs(tracked []trackedIssueInfo) []string {
+	open := []string{}
+	for _, t := range tracked {
+		switch strings.TrimSpace(t.Status) {
+		case "closed", "tombstone":
+			continue
+		}
+		open = append(open, t.ID)
+	}
+	return open
 }
 
 // readyIssueInfo holds info about a ready (stranded) issue.
@@ -1618,27 +1637,27 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 	}
 	var pending []convoyTracked
 	var allTrackedIDs []string
-	withOpenAgentBeadsMemo(func() {
-		for _, convoy := range convoys {
-			// Extract base_branch from convoy description fields
-			var baseBranch string
-			if cf := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); cf != nil {
-				baseBranch = cf.BaseBranch
-			}
-
-			tracked, err := getTrackedIssues(townBeads, convoy.ID)
-			if err != nil {
-				// Write to stderr explicitly — stdout may be consumed as JSON
-				// by the daemon's JSON parser (fixes #2142).
-				fmt.Fprintf(os.Stderr, "⚠ Warning: skipping convoy %s: %v\n", convoy.ID, err)
-				continue
-			}
-			pending = append(pending, convoyTracked{convoy: convoy, baseBranch: baseBranch, tracked: tracked})
-			for _, t := range tracked {
-				allTrackedIDs = append(allTrackedIDs, t.ID)
-			}
+	// Stranded detection never reads worker identity (isReadyIssue checks the
+	// assignee's session directly), so the agent-bead listing is skipped.
+	for _, convoy := range convoys {
+		// Extract base_branch from convoy description fields
+		var baseBranch string
+		if cf := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); cf != nil {
+			baseBranch = cf.BaseBranch
 		}
-	})
+
+		tracked, err := getTrackedIssueStatuses(townBeads, convoy.ID)
+		if err != nil {
+			// Write to stderr explicitly — stdout may be consumed as JSON
+			// by the daemon's JSON parser (fixes #2142).
+			fmt.Fprintf(os.Stderr, "⚠ Warning: skipping convoy %s: %v\n", convoy.ID, err)
+			continue
+		}
+		pending = append(pending, convoyTracked{convoy: convoy, baseBranch: baseBranch, tracked: tracked})
+		for _, t := range tracked {
+			allTrackedIDs = append(allTrackedIDs, t.ID)
+		}
+	}
 	scheduledSet := areScheduled(allTrackedIDs)
 
 	// Check each convoy for stranded state
@@ -1655,6 +1674,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				ReadyIssues:  []string{},
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
+				OpenIssues:   []string{},
 			})
 			continue
 		}
@@ -1686,6 +1706,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				ReadyIssues:  readyIssues,
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
+				OpenIssues:   openTrackedIssueIDs(tracked),
 			})
 		} else {
 			// Has tracked issues but none are ready — include in stranded
@@ -1698,6 +1719,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				ReadyIssues:  []string{},
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
+				OpenIssues:   openTrackedIssueIDs(tracked),
 			})
 		}
 	}
@@ -1802,7 +1824,7 @@ func checkAndCloseCompletedConvoys(townBeads string, dryRun bool) ([]struct{ ID,
 			style.PrintWarning("skipping convoy %s: invalid lifecycle state: %v", convoy.ID, err)
 			continue
 		}
-		tracked, err := getTrackedIssues(townBeads, convoy.ID)
+		tracked, err := getTrackedIssueStatuses(townBeads, convoy.ID)
 		if err != nil {
 			style.PrintWarning("skipping convoy %s: %v", convoy.ID, err)
 			continue
@@ -2173,31 +2195,34 @@ func runConvoyList(cmd *cobra.Command, args []string) error {
 			Total     int                `json:"total"`
 		}
 		enriched := make([]convoyListEntry, 0, len(convoys))
-		for _, c := range convoys {
-			tracked, err := getTrackedIssues(townBeads, c.ID)
-			if err != nil {
-				style.PrintWarning("skipping convoy %s: %v", c.ID, err)
-				continue
-			}
-			if tracked == nil {
-				tracked = []trackedIssueInfo{} // Ensure JSON [] not null
-			}
-			completed := 0
-			for _, t := range tracked {
-				if t.Status == "closed" {
-					completed++
+		// One agent-bead listing for the whole list instead of one per convoy.
+		withOpenAgentBeadsMemo(func() {
+			for _, c := range convoys {
+				tracked, err := getTrackedIssues(townBeads, c.ID)
+				if err != nil {
+					style.PrintWarning("skipping convoy %s: %v", c.ID, err)
+					continue
 				}
+				if tracked == nil {
+					tracked = []trackedIssueInfo{} // Ensure JSON [] not null
+				}
+				completed := 0
+				for _, t := range tracked {
+					if t.Status == "closed" {
+						completed++
+					}
+				}
+				enriched = append(enriched, convoyListEntry{
+					ID:        c.ID,
+					Title:     c.Title,
+					Status:    c.Status,
+					CreatedAt: c.CreatedAt,
+					Tracked:   tracked,
+					Completed: completed,
+					Total:     len(tracked),
+				})
 			}
-			enriched = append(enriched, convoyListEntry{
-				ID:        c.ID,
-				Title:     c.Title,
-				Status:    c.Status,
-				CreatedAt: c.CreatedAt,
-				Tracked:   tracked,
-				Completed: completed,
-				Total:     len(tracked),
-			})
-		}
+		})
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(enriched)
@@ -2471,6 +2496,19 @@ func applyFreshIssueDetails(dep *trackedDependency, details *issueDetails) {
 // for older bd versions that don't support bd sql.
 // Then fetches fresh issue details via bd show with prefix routing.
 func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
+	return getTrackedIssuesWithOptions(townBeads, convoyID, true)
+}
+
+// getTrackedIssueStatuses is getTrackedIssues without the worker lookup.
+// Completion checks and stranded detection read only status, blocked state
+// and assignee; the worker lookup lists every open gt:agent bead in every rig
+// database, and the daemon used to pay for it on every per-convoy
+// `gt convoy check` (thousands of times an hour).
+func getTrackedIssueStatuses(townBeads, convoyID string) ([]trackedIssueInfo, error) {
+	return getTrackedIssuesWithOptions(townBeads, convoyID, false)
+}
+
+func getTrackedIssuesWithOptions(townBeads, convoyID string, withWorkers bool) ([]trackedIssueInfo, error) {
 	// Prefer raw SQL — works for cross-database deps where tracked beads
 	// live in different Dolt databases. Falls back to bd dep list if bd sql
 	// is not available (older bd versions).
@@ -2524,7 +2562,10 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 			openIssueIDs = append(openIssueIDs, dep.ID)
 		}
 	}
-	workersMap := getWorkersForIssues(openIssueIDs)
+	workersMap := map[string]*workerInfo{}
+	if withWorkers {
+		workersMap = getWorkersForIssues(openIssueIDs)
+	}
 
 	// Build result
 	var tracked []trackedIssueInfo

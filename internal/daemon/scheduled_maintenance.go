@@ -46,6 +46,23 @@ type ScheduledMaintenanceConfig struct {
 	// Threshold is the minimum commit count before maintenance triggers.
 	// Default: 1000.
 	Threshold *int `json:"threshold,omitempty"`
+
+	// OrphanStepReap configures the `gt maintain` step that closes open
+	// formula step wisps whose molecule no longer exists and whose source
+	// bead is closed. Default: dry-run (report only).
+	OrphanStepReap *OrphanStepReapConfig `json:"orphan_step_reap,omitempty"`
+}
+
+// OrphanStepReapConfig tunes the orphan step-wisp reap in `gt maintain`.
+type OrphanStepReapConfig struct {
+	// Mode is "off", "dry-run" (default: select and report, change nothing)
+	// or "close" (close the selected wisps with bd close).
+	Mode string `json:"mode,omitempty"`
+	// Cap is the most wisps closed per database per run (default 2000).
+	Cap int `json:"cap,omitempty"`
+	// MinAge is how long a step must have been idle (updated_at) before it
+	// is eligible, as a Go duration (default "48h").
+	MinAge string `json:"min_age,omitempty"`
 }
 
 // maintenanceCheckInterval returns the configured check interval, or the default (5m).

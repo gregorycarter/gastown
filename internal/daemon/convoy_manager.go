@@ -5,22 +5,42 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
 const (
-	defaultStrandedScanInterval = 30 * time.Second
-	eventPollInterval           = 5 * time.Second
-	eventPollMaxBackoff         = 60 * time.Second
+	// defaultStrandedScanInterval is the pause between the end of one
+	// stranded scan and the start of the next. It was 30s on a ticker; a scan
+	// takes ~14s plus one `gt convoy check` per waiting convoy, so scans ran
+	// back to back and produced ~60% of all bd/gt spawns against Dolt.
+	// Completion is event-driven (5s close poll) and feeding is reactive on
+	// close events, so the stranded scan is only a backstop.
+	defaultStrandedScanInterval = 5 * time.Minute
+
+	// defaultCompletionSweepInterval is how often a stranded convoy whose
+	// tracked issues are still open gets a fallback completion check.
+	defaultCompletionSweepInterval = 10 * time.Minute
+
+	// convoyMetricsInterval is how often the manager logs its counters.
+	convoyMetricsInterval = time.Hour
+
+	// recoveryScanInterval is the scan pause while Dolt is recovering.
+	recoveryScanInterval = 5 * time.Second
+	eventPollInterval    = 5 * time.Second
+	eventPollMaxBackoff  = 60 * time.Second
 	// Beads lifecycle events use CURRENT_TIMESTAMP in Dolt, which is second
 	// precision. Poll with a 1s overlap so transitions that happen in the same
 	// second as the previous high-water mark are still visible next cycle.
@@ -48,6 +68,10 @@ type strandedConvoyInfo struct {
 	ReadyIssues  []string  `json:"ready_issues"`
 	CreatedAt    time.Time `json:"created_at"`
 	BaseBranch   string    `json:"base_branch,omitempty"`
+	// OpenIssues lists tracked issues not yet closed (unknown status counts
+	// as open). nil means the producing gt predates the field; an empty,
+	// non-nil slice means every tracked issue is closed.
+	OpenIssues []string `json:"open_issues"`
 }
 
 // ConvoyManager monitors beads events for issue closes and periodically scans for stranded convoys.
@@ -124,6 +148,43 @@ type ConvoyManager struct {
 	// A convoy whose feed fails is retried on an exponential schedule
 	// instead of every scan, and logs only when its state changes.
 	feedBackoff sync.Map // map[string]*convoyFeedBackoff
+
+	// completionSweep is the fallback completion-check interval for stranded
+	// convoys with open tracked issues. <= 0 checks on every scan (legacy).
+	completionSweep time.Duration
+	// skipInactiveRigs skips completion checks for convoys with an open
+	// tracked issue on a parked, docked or removed rig.
+	skipInactiveRigs bool
+
+	// completionMu guards lastCompletionCheck and inactiveSkip.
+	completionMu sync.Mutex
+	// lastCompletionCheck records when each convoy was last checked, by the
+	// scan or by the event poll.
+	lastCompletionCheck map[string]time.Time
+	// inactiveSkip holds the reason a convoy is being skipped, so the skip is
+	// logged once per state change instead of every scan.
+	inactiveSkip map[string]string
+
+	// now is the clock (overridable in tests).
+	now func() time.Time
+
+	metrics convoyMetrics
+}
+
+// convoyMetrics counts manager work between hourly metric log lines.
+type convoyMetrics struct {
+	checksEvent     atomic.Int64
+	checksAllClosed atomic.Int64
+	checksSweep     atomic.Int64
+	checksLegacy    atomic.Int64
+	checksEmpty     atomic.Int64
+	skipNotDue      atomic.Int64
+	skipInactive    atomic.Int64
+	scans           atomic.Int64
+	scanNanos       atomic.Int64
+
+	mu    sync.Mutex
+	since time.Time
 }
 
 // convoyFeedBackoff is the retry state for one convoy's feed attempts.
@@ -204,16 +265,49 @@ func NewConvoyManager(townRoot string, logger func(format string, args ...interf
 		isRigParked = func(string) bool { return false }
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &ConvoyManager{
-		townRoot:     townRoot,
-		scanInterval: scanInterval,
-		ctx:          ctx,
-		cancel:       cancel,
-		logger:       logger,
-		stores:       stores,
-		openStores:   openStores,
-		isRigParked:  isRigParked,
-		gtPath:       gtPath,
+	m := &ConvoyManager{
+		townRoot:            townRoot,
+		scanInterval:        scanInterval,
+		ctx:                 ctx,
+		cancel:              cancel,
+		logger:              logger,
+		stores:              stores,
+		openStores:          openStores,
+		isRigParked:         isRigParked,
+		gtPath:              gtPath,
+		completionSweep:     defaultCompletionSweepInterval,
+		skipInactiveRigs:    true,
+		lastCompletionCheck: make(map[string]time.Time),
+		inactiveSkip:        make(map[string]string),
+		now:                 time.Now,
+	}
+	m.metrics.since = time.Now()
+	return m
+}
+
+// Configure applies daemon.json patrols.convoy_manager settings. Call it
+// before Start. A nil config keeps the defaults; invalid durations are logged
+// and ignored.
+func (m *ConvoyManager) Configure(cfg *ConvoyManagerConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.StrandedInterval != "" {
+		if d, err := time.ParseDuration(cfg.StrandedInterval); err == nil && d > 0 {
+			m.scanInterval = d
+		} else {
+			m.logger("Convoy: ignoring invalid convoy_manager.stranded_interval %q", cfg.StrandedInterval)
+		}
+	}
+	if cfg.CompletionSweepInterval != "" {
+		if d, err := time.ParseDuration(cfg.CompletionSweepInterval); err == nil && d >= 0 {
+			m.completionSweep = d
+		} else {
+			m.logger("Convoy: ignoring invalid convoy_manager.completion_sweep_interval %q", cfg.CompletionSweepInterval)
+		}
+	}
+	if cfg.SkipInactiveRigs != nil {
+		m.skipInactiveRigs = *cfg.SkipInactiveRigs
 	}
 }
 
@@ -456,7 +550,8 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 
 		m.logger("Convoy: close detected: %s (from %s)", issueID, name)
 		resolver := convoy.NewStoreResolver(m.townRoot, stores)
-		convoy.CheckConvoysForIssue(m.ctx, hqStore, m.townRoot, issueID, "Convoy", m.logger, m.gtPath, m.isRigParked, resolver)
+		checked := convoy.CheckConvoysForIssue(m.ctx, hqStore, m.townRoot, issueID, "Convoy", m.logger, m.gtPath, m.isRigParked, resolver)
+		m.recordEventChecks(checked)
 		convoy.FireCrossRigDepNotifications(m.ctx, issueID, m.townRoot, stores, m.logger)
 	}
 	return nil
@@ -512,30 +607,38 @@ func isReopenEvent(e *beadsdk.Event) bool {
 // During recovery mode (after Dolt poll errors) the interval shrinks to 5s
 // so a successful scan fires promptly once Dolt comes back. Recovery mode is
 // cleared after the first successful scan.
+//
+// The pause is measured from the end of a scan, so a slow scan can never make
+// the next one start immediately (a 30s ticker with a 14s+ scan ran them back
+// to back).
 func (m *ConvoyManager) runStrandedScan() {
 	defer m.wg.Done()
 
-	ticker := time.NewTicker(m.scanInterval)
-	defer ticker.Stop()
-
-	// Run once immediately, then on interval
+	// Run once immediately, then after each pause
 	m.scan()
+
+	timer := time.NewTimer(m.nextScanDelay())
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-m.ctx.Done():
 			return
-		case <-ticker.C:
-			// While in recovery mode, shorten the next tick so we retry quickly
-			// after a Dolt outage without waiting the full scan interval.
-			if m.recoveryMode.Load() {
-				ticker.Reset(5 * time.Second)
-			} else {
-				ticker.Reset(m.scanInterval)
-			}
+		case <-timer.C:
 			m.scan()
+			m.maybeLogMetrics()
+			timer.Reset(m.nextScanDelay())
 		}
 	}
+}
+
+// nextScanDelay is the pause before the next stranded scan. While in
+// recovery mode it is short so we retry quickly after a Dolt outage.
+func (m *ConvoyManager) nextScanDelay() time.Duration {
+	if m.recoveryMode.Load() && m.scanInterval > recoveryScanInterval {
+		return recoveryScanInterval
+	}
+	return m.scanInterval
 }
 
 // scan runs one stranded scan cycle: find stranded convoys, feed or close each.
@@ -544,6 +647,12 @@ func (m *ConvoyManager) scan() {
 	m.scanMu.Lock()
 	defer m.scanMu.Unlock()
 
+	scanStart := time.Now()
+	defer func() {
+		m.metrics.scans.Add(1)
+		m.metrics.scanNanos.Add(int64(time.Since(scanStart)))
+	}()
+
 	stranded, err := m.findStranded()
 	if err != nil {
 		m.logger("Convoy: stranded scan failed: %s", util.FirstLine(err.Error()))
@@ -551,6 +660,12 @@ func (m *ConvoyManager) scan() {
 	}
 	// Successful scan: clear recovery mode so the ticker returns to normal interval.
 	m.recoveryMode.Store(false)
+
+	m.pruneCompletionState(stranded)
+	var rigs *rigActivity
+	if m.skipInactiveRigs {
+		rigs = newRigActivity(m.townRoot, m.isRigParked)
+	}
 
 	for _, c := range stranded {
 		select {
@@ -568,16 +683,298 @@ func (m *ConvoyManager) scan() {
 				m.logger("Convoy %s: empty but within grace period (created %s ago) — skipping", c.ID, time.Since(c.CreatedAt).Round(time.Second))
 				continue
 			}
+			m.metrics.checksEmpty.Add(1)
 			m.closeEmptyConvoy(c.ID)
 		} else {
 			// Tracked issues exist but none are ready. This could mean:
 			// (a) all tracked issues are closed → convoy should auto-close
 			// (b) issues are blocked/in-progress → needs agent review
 			// Run convoy check to handle case (a); it's a no-op for (b).
-			m.logger("Convoy %s: %d tracked issues, 0 ready — checking completion", c.ID, c.TrackedCount)
+			// The close-event poll already checks a convoy when one of its
+			// tracked issues closes, so here we check only when the scan
+			// sees everything closed, or as a slow sweep.
+			check, reason := m.completionAction(c, m.now(), rigs)
+			if !check {
+				continue
+			}
+			m.logger("Convoy %s: %d tracked issues, 0 ready — checking completion (%s)", c.ID, c.TrackedCount, reason)
 			m.checkConvoyCompletion(c.ID)
+			m.markCompletionChecked(c.ID, m.now())
 		}
 	}
+}
+
+// Completion-check reasons returned by completionAction.
+const (
+	completionReasonLegacy    = "every-scan"
+	completionReasonAllClosed = "all tracked closed"
+	completionReasonSweep     = "sweep"
+	completionReasonNotDue    = "not due"
+	completionReasonInactive  = "inactive rig"
+)
+
+// completionAction decides whether the scan runs `gt convoy check` for a
+// convoy that has tracked issues but none ready, and why.
+func (m *ConvoyManager) completionAction(c strandedConvoyInfo, now time.Time, rigs *rigActivity) (bool, string) {
+	if m.completionSweep <= 0 {
+		m.metrics.checksLegacy.Add(1)
+		return true, completionReasonLegacy
+	}
+
+	// The scan itself saw every tracked issue closed: a close event was
+	// missed (restart, Dolt outage). Check now.
+	if c.OpenIssues != nil && len(c.OpenIssues) == 0 {
+		m.clearInactiveSkip(c.ID)
+		m.metrics.checksAllClosed.Add(1)
+		return true, completionReasonAllClosed
+	}
+
+	// An open tracked issue on a parked, docked or removed rig cannot
+	// progress, so the convoy cannot complete until that rig is back.
+	if rigs != nil {
+		for _, id := range c.OpenIssues {
+			if why := rigs.inactiveReason(id); why != "" {
+				m.noteInactiveSkip(c.ID, fmt.Sprintf("tracked issue %s: %s", id, why))
+				m.metrics.skipInactive.Add(1)
+				return false, completionReasonInactive
+			}
+		}
+	}
+	m.clearInactiveSkip(c.ID)
+
+	m.completionMu.Lock()
+	last, seen := m.lastCompletionCheck[c.ID]
+	if !seen && c.OpenIssues != nil {
+		// First sighting with known-open issues: the check would be a
+		// no-op, so spread first sweeps across the interval instead of
+		// checking every convoy in the same scan.
+		last = now.Add(-completionStagger(c.ID, m.completionSweep))
+		m.lastCompletionCheck[c.ID] = last
+		seen = true
+	}
+	m.completionMu.Unlock()
+
+	if !seen || now.Sub(last) >= m.completionSweep {
+		m.metrics.checksSweep.Add(1)
+		return true, completionReasonSweep
+	}
+	m.metrics.skipNotDue.Add(1)
+	return false, completionReasonNotDue
+}
+
+// completionStagger maps a convoy ID to a stable offset in [0, interval).
+func completionStagger(convoyID string, interval time.Duration) time.Duration {
+	secs := int64(interval / time.Second)
+	if secs <= 0 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(convoyID))
+	return time.Duration(int64(h.Sum32())%secs) * time.Second
+}
+
+// markCompletionChecked records that a convoy's completion was just checked.
+func (m *ConvoyManager) markCompletionChecked(convoyID string, at time.Time) {
+	m.completionMu.Lock()
+	m.lastCompletionCheck[convoyID] = at
+	m.completionMu.Unlock()
+}
+
+// recordEventChecks notes convoys the close-event poll just checked, so the
+// sweep does not repeat the work.
+func (m *ConvoyManager) recordEventChecks(convoyIDs []string) {
+	if len(convoyIDs) == 0 {
+		return
+	}
+	now := m.now()
+	m.completionMu.Lock()
+	for _, id := range convoyIDs {
+		m.lastCompletionCheck[id] = now
+	}
+	m.completionMu.Unlock()
+	m.metrics.checksEvent.Add(int64(len(convoyIDs)))
+}
+
+// pruneCompletionState drops state for convoys no longer open.
+func (m *ConvoyManager) pruneCompletionState(stranded []strandedConvoyInfo) {
+	open := make(map[string]bool, len(stranded))
+	for _, c := range stranded {
+		open[c.ID] = true
+	}
+	m.completionMu.Lock()
+	defer m.completionMu.Unlock()
+	for id := range m.lastCompletionCheck {
+		if !open[id] {
+			delete(m.lastCompletionCheck, id)
+		}
+	}
+	for id := range m.inactiveSkip {
+		if !open[id] {
+			delete(m.inactiveSkip, id)
+		}
+	}
+}
+
+// noteInactiveSkip logs a skip once per reason change.
+func (m *ConvoyManager) noteInactiveSkip(convoyID, reason string) {
+	m.completionMu.Lock()
+	prev := m.inactiveSkip[convoyID]
+	m.inactiveSkip[convoyID] = reason
+	m.completionMu.Unlock()
+	if prev != reason {
+		m.logger("Convoy %s: skipping completion checks — %s", convoyID, reason)
+	}
+}
+
+func (m *ConvoyManager) clearInactiveSkip(convoyID string) {
+	m.completionMu.Lock()
+	_, had := m.inactiveSkip[convoyID]
+	delete(m.inactiveSkip, convoyID)
+	m.completionMu.Unlock()
+	if had {
+		m.logger("Convoy %s: resuming completion checks", convoyID)
+	}
+}
+
+// maybeLogMetrics logs and resets the counters once per convoyMetricsInterval.
+func (m *ConvoyManager) maybeLogMetrics() {
+	m.metrics.mu.Lock()
+	defer m.metrics.mu.Unlock()
+	elapsed := time.Since(m.metrics.since)
+	if elapsed < convoyMetricsInterval {
+		return
+	}
+	m.logger("%s", m.metrics.snapshotLine(elapsed))
+	snap := m.metrics.snapshot(elapsed)
+	if err := atomicfile.EnsureDirAndWriteJSON(ConvoyMetricsFile(m.townRoot), snap); err != nil {
+		m.logger("Convoy: writing metrics snapshot: %v", err)
+	}
+	m.metrics.reset()
+}
+
+// ConvoyMetricsSnapshot is the last hourly convoy-manager metrics window,
+// written to ConvoyMetricsFile so `gt maintain` can report it.
+type ConvoyMetricsSnapshot struct {
+	WrittenAt        time.Time `json:"written_at"`
+	WindowSeconds    int64     `json:"window_seconds"`
+	ConvoyChecks     int64     `json:"convoy_checks"`
+	EventChecks      int64     `json:"event_checks"`
+	AllClosedChecks  int64     `json:"all_closed_checks"`
+	SweepChecks      int64     `json:"sweep_checks"`
+	EveryScanChecks  int64     `json:"every_scan_checks"`
+	EmptyChecks      int64     `json:"empty_checks"`
+	SkippedNotDue    int64     `json:"skipped_not_due"`
+	SkippedInactive  int64     `json:"skipped_inactive_rig"`
+	StrandedScans    int64     `json:"stranded_scans"`
+	StrandedScanAvgS float64   `json:"stranded_scan_avg_seconds"`
+}
+
+// ConvoyMetricsFile is where the convoy manager writes its hourly snapshot.
+func ConvoyMetricsFile(townRoot string) string {
+	return filepath.Join(townRoot, "daemon", "convoy_metrics.json")
+}
+
+func (cm *convoyMetrics) snapshot(elapsed time.Duration) ConvoyMetricsSnapshot {
+	s := ConvoyMetricsSnapshot{
+		WrittenAt:       time.Now().UTC(),
+		WindowSeconds:   int64(elapsed / time.Second),
+		EventChecks:     cm.checksEvent.Load(),
+		AllClosedChecks: cm.checksAllClosed.Load(),
+		SweepChecks:     cm.checksSweep.Load(),
+		EveryScanChecks: cm.checksLegacy.Load(),
+		EmptyChecks:     cm.checksEmpty.Load(),
+		SkippedNotDue:   cm.skipNotDue.Load(),
+		SkippedInactive: cm.skipInactive.Load(),
+		StrandedScans:   cm.scans.Load(),
+	}
+	s.ConvoyChecks = s.EventChecks + s.AllClosedChecks + s.SweepChecks + s.EveryScanChecks + s.EmptyChecks
+	if s.StrandedScans > 0 {
+		s.StrandedScanAvgS = time.Duration(cm.scanNanos.Load() / s.StrandedScans).Seconds()
+	}
+	return s
+}
+
+// snapshotLine formats the counters as one log line.
+func (cm *convoyMetrics) snapshotLine(elapsed time.Duration) string {
+	event, allClosed := cm.checksEvent.Load(), cm.checksAllClosed.Load()
+	sweep, legacy, empty := cm.checksSweep.Load(), cm.checksLegacy.Load(), cm.checksEmpty.Load()
+	scans := cm.scans.Load()
+	avg := time.Duration(0)
+	if scans > 0 {
+		avg = time.Duration(cm.scanNanos.Load() / scans)
+	}
+	return fmt.Sprintf("Convoy metrics (last %s): convoy checks=%d (event=%d all-closed=%d sweep=%d every-scan=%d empty=%d); skipped not-due=%d inactive-rig=%d; stranded scans=%d avg=%s",
+		elapsed.Round(time.Minute), event+allClosed+sweep+legacy+empty, event, allClosed, sweep, legacy, empty,
+		cm.skipNotDue.Load(), cm.skipInactive.Load(), scans, avg.Round(100*time.Millisecond))
+}
+
+func (cm *convoyMetrics) reset() {
+	for _, c := range []*atomic.Int64{&cm.checksEvent, &cm.checksAllClosed, &cm.checksSweep, &cm.checksLegacy,
+		&cm.checksEmpty, &cm.skipNotDue, &cm.skipInactive, &cm.scans, &cm.scanNanos} {
+		c.Store(0)
+	}
+	cm.since = time.Now()
+}
+
+// rigActivity answers, for one scan, whether a tracked issue routes to a rig
+// that cannot make progress: no route for its prefix (rig removed), a route
+// to a rig directory that no longer exists, or a parked/docked rig.
+type rigActivity struct {
+	townRoot string
+	routes   map[string]string // prefix -> route path; nil = unknown, judge nothing
+	parked   func(string) bool
+	rigCache map[string]string
+}
+
+func newRigActivity(townRoot string, parked func(string) bool) *rigActivity {
+	ra := &rigActivity{townRoot: townRoot, parked: parked, rigCache: make(map[string]string)}
+	routes, err := beads.LoadRoutes(filepath.Join(townRoot, ".beads"))
+	if err != nil || len(routes) == 0 {
+		return ra
+	}
+	ra.routes = make(map[string]string, len(routes))
+	for _, r := range routes {
+		ra.routes[r.Prefix] = r.Path
+	}
+	return ra
+}
+
+// inactiveReason returns why issueID's rig is inactive, or "" if it is active
+// or cannot be judged.
+func (r *rigActivity) inactiveReason(issueID string) string {
+	if r == nil || r.routes == nil {
+		return ""
+	}
+	id := issueID
+	if strings.HasPrefix(id, "external:") {
+		// external:<rig>:<id>
+		if parts := strings.SplitN(id, ":", 3); len(parts) == 3 {
+			id = parts[2]
+		}
+	}
+	prefix := beads.ExtractPrefix(id)
+	if prefix == "" {
+		return ""
+	}
+	path, ok := r.routes[prefix]
+	if !ok {
+		return fmt.Sprintf("no route for prefix %s (rig removed)", prefix)
+	}
+	if path == "" || path == "." {
+		return "" // town-level bead
+	}
+	rig := strings.SplitN(path, "/", 2)[0]
+	if why, ok := r.rigCache[rig]; ok {
+		return why
+	}
+	why := ""
+	if _, err := os.Stat(filepath.Join(r.townRoot, rig)); os.IsNotExist(err) {
+		why = fmt.Sprintf("rig %s removed", rig)
+	} else if r.parked != nil && r.parked(rig) {
+		why = fmt.Sprintf("rig %s parked or docked", rig)
+	}
+	r.rigCache[rig] = why
+	return why
 }
 
 // findStranded runs `gt convoy stranded --json` and parses the output.

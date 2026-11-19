@@ -13,6 +13,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -30,9 +31,11 @@ const (
 )
 
 var (
-	maintainForce     bool
-	maintainDryRun    bool
-	maintainThreshold int
+	maintainForce          bool
+	maintainDryRun         bool
+	maintainThreshold      int
+	maintainOrphanSteps    string
+	maintainOrphanStepsCap int
 )
 
 var maintainCmd = &cobra.Command{
@@ -46,8 +49,12 @@ All operations run via SQL on the running server — no downtime needed.
 This encapsulates the maintenance procedure:
   1. Backup all databases (dolt backup sync)
   2. Reap closed wisps (closed 7+ days ago) from each database
-  3. Flatten databases over commit threshold
-  4. Run dolt_gc() on each database
+  3. Close orphan formula step wisps (molecule gone, source bead closed,
+     idle 48h+; capped per run). Default mode is dry-run: report only.
+     Configure with patrols.scheduled_maintenance.orphan_step_reap in
+     mayor/daemon.json ({"mode": "close"}) or --orphan-steps.
+  4. Flatten databases over commit threshold
+  5. Run dolt_gc() on each database
 
 Use --force for non-interactive mode (daemon/cron), or run interactively
 to review the plan before proceeding.
@@ -64,6 +71,8 @@ func init() {
 	maintainCmd.Flags().BoolVar(&maintainForce, "force", false, "Non-interactive mode (skip confirmation)")
 	maintainCmd.Flags().BoolVar(&maintainDryRun, "dry-run", false, "Preview without making changes")
 	maintainCmd.Flags().IntVar(&maintainThreshold, "threshold", defaultMaintainThreshold, "Commit count threshold for flatten")
+	maintainCmd.Flags().StringVar(&maintainOrphanSteps, "orphan-steps", "", "Orphan step-wisp reap: off, dry-run or close (default from daemon.json, else dry-run)")
+	maintainCmd.Flags().IntVar(&maintainOrphanStepsCap, "orphan-steps-cap", 0, "Max orphan step wisps closed per database (default from daemon.json, else 2000)")
 	rootCmd.AddCommand(maintainCmd)
 }
 
@@ -134,8 +143,20 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Will flatten: %d (threshold: %d commits)\n", flattenCount, maintainThreshold)
 	fmt.Printf("  Will gc: %d\n", len(dbInfos))
 
+	orphanSettings, err := resolveOrphanStepSettings(daemon.LoadPatrolConfig(townRoot), maintainOrphanSteps, maintainOrphanStepsCap)
+	if err != nil {
+		return err
+	}
+
 	if maintainDryRun {
+		// Selection is read-only, so preview it.
+		orphanSettings.Mode = maintainDryRunOrphanMode(orphanSettings.Mode)
+		orphanLines := runOrphanStepReap(config, townRoot, dbInfos, orphanSettings)
 		fmt.Printf("\n%s Dry run complete — no changes made\n", style.Dim.Render("ℹ"))
+		for _, l := range orphanLines {
+			fmt.Printf("  %s\n", l)
+		}
+		fmt.Printf("  %s\n", maintainMetricsLine(townRoot, maintainOpenWisps(config, dbInfos), maintainDBNames(dbInfos)))
 		return nil
 	}
 
@@ -187,6 +208,11 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Phase 3b: Close orphan formula step wisps (server up). Runs before
+	// flatten/gc so the closes are part of tonight's flattened history; the
+	// closed-wisp purge above removes them in a week.
+	orphanLines := runOrphanStepReap(config, townRoot, dbInfos, orphanSettings)
+
 	// Phase 4: Flatten (server up).
 	totalFlattened := 0
 	if flattenCount > 0 {
@@ -225,8 +251,67 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Wisps reaped: %d\n", totalReaped)
 	fmt.Printf("  Databases flattened: %d\n", totalFlattened)
 	fmt.Printf("  Databases gc'd: %d\n", gcCount)
+	for _, l := range orphanLines {
+		fmt.Printf("  %s\n", l)
+	}
+	fmt.Printf("  %s\n", maintainMetricsLine(townRoot, maintainOpenWisps(config, dbInfos), maintainDBNames(dbInfos)))
 
 	return nil
+}
+
+// maintainDryRunOrphanMode downgrades close to dry-run under --dry-run.
+func maintainDryRunOrphanMode(mode string) string {
+	if mode == orphanStepModeClose {
+		return orphanStepModeDryRun
+	}
+	return mode
+}
+
+// runOrphanStepReap runs the orphan step reap on every database and returns
+// one summary line per database with candidates (or errors).
+func runOrphanStepReap(config *doltserver.Config, townRoot string, dbInfos []maintainDBInfo, s orphanStepSettings) []string {
+	if s.Mode == orphanStepModeOff {
+		return []string{"orphan-steps: off"}
+	}
+	fmt.Printf("\n%s Orphan step wisps (%s)...\n", style.Bold.Render("●"), s.Mode)
+	titles := orphanStepTitles(townRoot)
+	var lines []string
+	for _, db := range dbInfos {
+		rep, err := reapOrphanSteps(config, townRoot, db.name, s, titles)
+		if err != nil {
+			line := fmt.Sprintf("orphan-steps %s [%s]: failed: %s", db.name, s.Mode, firstLineOf(err.Error()))
+			fmt.Printf("  %s %s\n", style.Warning.Render("!"), line)
+			lines = append(lines, line)
+			continue
+		}
+		if rep.Plan.Candidates == 0 {
+			fmt.Printf("  %s %s: no orphan steps\n", style.Dim.Render("○"), db.name)
+			continue
+		}
+		line := formatOrphanStepReport(rep, s)
+		fmt.Printf("  %s %s\n", style.Bold.Render("✓"), line)
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		lines = append(lines, fmt.Sprintf("orphan-steps [%s]: none in %d database(s)", s.Mode, len(dbInfos)))
+	}
+	return lines
+}
+
+func maintainOpenWisps(config *doltserver.Config, dbInfos []maintainDBInfo) map[string]int {
+	out := make(map[string]int, len(dbInfos))
+	for _, db := range dbInfos {
+		out[db.name] = countOpenWisps(config, db.name)
+	}
+	return out
+}
+
+func maintainDBNames(dbInfos []maintainDBInfo) []string {
+	names := make([]string, len(dbInfos))
+	for i, db := range dbInfos {
+		names[i] = db.name
+	}
+	return names
 }
 
 // maintainCountCommits returns the number of Dolt commits in a database.

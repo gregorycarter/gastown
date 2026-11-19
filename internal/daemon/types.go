@@ -164,6 +164,26 @@ type PatrolsConfig struct {
 	MainBranchTest       *MainBranchTestConfig       `json:"main_branch_test,omitempty"`
 	QuotaDog             *QuotaDogConfig             `json:"quota_dog,omitempty"`
 	RestartTracker       *RestartTrackerConfig       `json:"restart_tracker,omitempty"`
+	ConvoyManager        *ConvoyManagerConfig        `json:"convoy_manager,omitempty"`
+}
+
+// ConvoyManagerConfig tunes the daemon convoy manager's polling. Every field
+// is optional; omitted fields use the defaults in convoy_manager.go.
+type ConvoyManagerConfig struct {
+	// StrandedInterval is the pause between the end of one
+	// `gt convoy stranded` scan and the start of the next (default "5m").
+	StrandedInterval string `json:"stranded_interval,omitempty"`
+
+	// CompletionSweepInterval is how often a stranded convoy whose tracked
+	// issues are still open gets a fallback `gt convoy check` (default
+	// "10m"). Completion is otherwise driven by close events. "0" restores
+	// the old behaviour of checking every such convoy on every scan.
+	CompletionSweepInterval string `json:"completion_sweep_interval,omitempty"`
+
+	// SkipInactiveRigs skips completion checks for convoys with an open
+	// tracked issue on a parked, docked or removed rig, which cannot
+	// complete until that rig is active again (default true).
+	SkipInactiveRigs *bool `json:"skip_inactive_rigs,omitempty"`
 }
 
 // DoltRemotesConfig holds configuration for the dolt_remotes patrol.
