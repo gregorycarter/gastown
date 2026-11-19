@@ -18,6 +18,7 @@ import (
 
 	"github.com/gofrs/flock"
 
+	"github.com/steveyegge/gastown/internal/asyncpreflight"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
@@ -2428,6 +2429,14 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 		activeMRSafe = !assessment.Pending
 		if assessment.SourceTerminal {
 			sourceTerminal = true
+		}
+	}
+	// kasb-eel8t.6: a detached preflight running in this sandbox owns its
+	// worktree even if the MR was closed or edited meanwhile.
+	if input.ActiveMRBlocker == "" {
+		if reason := asyncpreflight.RunningForWorktree(m.rig.Path, clonePath, time.Now()); reason != "" {
+			input.ActiveMRBlocker = reason
+			activeMRSafe = false
 		}
 	}
 	workIssue := issue

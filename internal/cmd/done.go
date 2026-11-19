@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/asyncpreflight"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/events"
@@ -70,6 +71,8 @@ var (
 	donePreVerified   bool
 	doneTarget        string
 	doneSkipVerify    bool
+	// kasb-eel8t.6: submit while the preflight runs (rig opt-in).
+	doneAsyncPreflight bool
 )
 
 // Valid exit types for gt done
@@ -734,6 +737,7 @@ func init() {
 	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Mark MR as pre-verified (polecat ran gates after rebasing onto target)")
 	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit MR target branch (overrides formula_vars and auto-detection)")
 	doneCmd.Flags().BoolVar(&doneSkipVerify, "skip-verify", false, "Skip verified-push checks for audit/test-only completion (recorded on bead)")
+	doneCmd.Flags().BoolVar(&doneAsyncPreflight, "async-preflight", false, "Open the MR now and run the preflight detached on the pushed head; the Refinery lands only on its passing receipt. Preflight arguments follow --. Requires rig delivery.submit_while_preflight")
 
 	rootCmd.AddCommand(doneCmd)
 }
@@ -774,6 +778,26 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	branch, err := g.CurrentBranch()
 	if err != nil {
 		return fmt.Errorf("getting current branch: %w", err)
+	}
+
+	// kasb-eel8t.6: validate --async-preflight before any side effect.
+	var asyncPF *asyncPreflightSubmission
+	var asyncPFSettings *config.RigSettings
+	var asyncPFArgs []string
+	if doneAsyncPreflight {
+		if dash := cmd.ArgsLenAtDash(); dash >= 0 {
+			asyncPFArgs = args[dash:]
+		}
+		if exitType != ExitCompleted {
+			return fmt.Errorf("--async-preflight applies only to --status COMPLETED")
+		}
+		asyncPFSettings, _ = config.LoadRigSettings(filepath.Join(townRoot, rigName, "settings", "config.json"))
+		if !asyncPFSettings.SubmitWhilePreflightEnabled() {
+			return fmt.Errorf("--async-preflight is disabled for rig %s (settings delivery.submit_while_preflight); run the preflight, then gt done", rigName)
+		}
+		if err := asyncpreflight.ValidateArgs(asyncPFArgs); err != nil {
+			return err
+		}
 	}
 
 	// Auto-detect cleanup status if not explicitly provided
@@ -1794,6 +1818,28 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			goto notifyWitness
 		}
 
+		// kasb-eel8t.6: start the detached preflight before any MR exists, so a
+		// failure to start leaves no MR and the polecat runs it synchronously.
+		if doneAsyncPreflight && asyncPF == nil {
+			if conflictTask != nil {
+				return fmt.Errorf("--async-preflight does not apply to a conflict-remediation resubmission; run the preflight, then gt done")
+			}
+			worktreeRoot, rootErr := gitOutput(cwd, "rev-parse", "--show-toplevel")
+			if rootErr != nil {
+				return fmt.Errorf("--async-preflight: resolving worktree root: %w", rootErr)
+			}
+			pf, pfErr := startAsyncPreflightForDone(asyncPFSettings, filepath.Join(townRoot, rigName), rigName, issueID, branch, worktreeRoot, autoSavedHead, g,
+				func() (string, error) { return remoteBranchHead(worktreeRoot, branch) },
+				func() (string, error) {
+					return gitOutput(worktreeRoot, "status", "--porcelain", "--untracked-files=no")
+				},
+				asyncPFArgs, time.Now())
+			if pfErr != nil {
+				return fmt.Errorf("%v\nThe branch is pushed and the work is safe; no MR was opened", pfErr)
+			}
+			asyncPF = pf
+		}
+
 		if conflictTask != nil {
 			failConflictSubmission := func(err error) {
 				mrFailed = true
@@ -1979,6 +2025,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					style.PrintWarning("could not resolve %s for pre-verified base: %v (pre-verification data incomplete)", verifiedBaseRef, baseErr)
 				}
 			}
+			if asyncPF != nil {
+				description += asyncpreflight.DescriptionFields(asyncPF.MarkerPath)
+			}
 
 			mrIssue, err := bd.Create(beads.CreateOptions{
 				Title:       title,
@@ -2086,6 +2135,18 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		}
 
 	afterMR:
+		// kasb-eel8t.6: an MR found by checkpoint/idempotency must carry the
+		// pending preflight binding too, or the lander would not wait for it.
+		if asyncPF != nil && mrID != "" {
+			if ensureErr := ensureAsyncPreflightMRFields(bd.Show, func(id, desc string) error {
+				return bd.Update(id, beads.UpdateOptions{Description: &desc})
+			}, mrID, asyncPF.MarkerPath); ensureErr != nil {
+				mrFailed = true
+				errMsg := fmt.Sprintf("MR %s lacks its pending preflight binding: %v", mrID, ensureErr)
+				doneErrors = append(doneErrors, errMsg)
+				style.PrintWarning("%s\nWitness will be notified.", errMsg)
+			}
+		}
 		fmt.Printf("  Source: %s\n", branch)
 		fmt.Printf("  Target: %s\n", target)
 		fmt.Printf("  Issue: %s\n", issueID)

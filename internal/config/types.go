@@ -746,6 +746,7 @@ type RigSettings struct {
 	Crew       *CrewConfig       `json:"crew,omitempty"`        // crew startup settings
 	Workflow   *WorkflowConfig   `json:"workflow,omitempty"`    // workflow settings
 	Runtime    *RuntimeConfig    `json:"runtime,omitempty"`     // LLM runtime settings (deprecated: use Agent)
+	Delivery   *DeliveryConfig   `json:"delivery,omitempty"`    // delivery pipeline switches (kasb-eel8t.6)
 
 	// Agent selects which agent preset to use for this rig.
 	// Can be a built-in preset ("claude", "gemini", "codex", "cursor", "auggie", "amp", "opencode", "copilot")
@@ -777,6 +778,37 @@ type RigSettings struct {
 	// Values are effort levels: "low", "medium", "high", "max".
 	// Example: {"crew": "max", "witness": "low"}
 	RoleEffort map[string]string `json:"role_effort,omitempty"`
+}
+
+// DeliveryConfig holds per-rig delivery pipeline switches.
+type DeliveryConfig struct {
+	// SubmitWhilePreflight lets a polecat run `gt done --async-preflight -- <preflight args>`:
+	// gt done opens the MR with a pending preflight bound to the pushed head and
+	// returns, while the preflight keeps running detached in the polecat's own
+	// worktree. The lander lands that MR only once a passing receipt for the exact
+	// head exists (`gt mq preflight-gate`). Default false (kasb-eel8t.6).
+	SubmitWhilePreflight bool `json:"submit_while_preflight,omitempty"`
+
+	// AsyncPreflightCommand is the argv prefix of the preflight run in the
+	// worktree; the polecat's arguments plus --head/--source-bead-id/--receipt
+	// are appended. Default: uv run python scripts/delivery/preflight.py.
+	AsyncPreflightCommand []string `json:"async_preflight_command,omitempty"`
+}
+
+// DefaultAsyncPreflightCommand is used when DeliveryConfig.AsyncPreflightCommand is empty.
+var DefaultAsyncPreflightCommand = []string{"uv", "run", "python", "scripts/delivery/preflight.py"}
+
+// SubmitWhilePreflightEnabled reports whether the rig opted in to async preflight submission.
+func (s *RigSettings) SubmitWhilePreflightEnabled() bool {
+	return s != nil && s.Delivery != nil && s.Delivery.SubmitWhilePreflight
+}
+
+// AsyncPreflightCommandOrDefault returns the configured preflight argv prefix.
+func (s *RigSettings) AsyncPreflightCommandOrDefault() []string {
+	if s != nil && s.Delivery != nil && len(s.Delivery.AsyncPreflightCommand) > 0 {
+		return append([]string(nil), s.Delivery.AsyncPreflightCommand...)
+	}
+	return append([]string(nil), DefaultAsyncPreflightCommand...)
 }
 
 // CrewConfig represents crew workspace settings for a rig.

@@ -18,15 +18,21 @@ func kasbResubmittedDescription(mr *beads.Issue, head string) (string, error) {
 	if !mqResumeSHA.MatchString(head) {
 		return "", fmt.Errorf("invalid submitted head")
 	}
-	lines := strings.Split(mr.Description, "\n")
+	var lines []string
 	count := 0
-	for i, line := range lines {
+	for _, line := range strings.Split(mr.Description, "\n") {
 		key, _, ok := strings.Cut(line, ":")
 		key = strings.ReplaceAll(strings.ToLower(strings.TrimSpace(key)), "-", "_")
 		if ok && (key == "commit_sha" || key == "commitsha") {
-			lines[i] = "commit_sha: " + head
+			line = "commit_sha: " + head
 			count++
 		}
+		// kasb-eel8t.6: resubmission verifies a receipt for the new head
+		// synchronously; an earlier async preflight binding no longer applies.
+		if ok && (key == "preflight_run" || key == "preflight_receipt") {
+			continue
+		}
+		lines = append(lines, line)
 	}
 	if count != 1 {
 		return "", fmt.Errorf("ambiguous submitted head")

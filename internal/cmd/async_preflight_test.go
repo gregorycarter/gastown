@@ -1,0 +1,236 @@
+package cmd
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/asyncpreflight"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
+)
+
+type fakeRev string
+
+func (f fakeRev) Rev(string) (string, error) { return string(f), nil }
+
+func asyncSettings(on bool) *config.RigSettings {
+	return &config.RigSettings{Delivery: &config.DeliveryConfig{SubmitWhilePreflight: on}}
+}
+
+func stubLaunch(t *testing.T, err error) *[]string {
+	t.Helper()
+	var calls []string
+	old := launchAsyncPreflight
+	launchAsyncPreflight = func(p string) error { calls = append(calls, p); return err }
+	t.Cleanup(func() { launchAsyncPreflight = old })
+	return &calls
+}
+
+func TestStartAsyncPreflightForDone(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	args := []string{"--requirement", "R1", "--acceptance-test", "A1"}
+	clean := func() (string, error) { return "", nil }
+	pushed := func() (string, error) { return head, nil }
+	now := time.Now()
+
+	t.Run("disabled by default", func(t *testing.T) {
+		calls := stubLaunch(t, nil)
+		_, err := startAsyncPreflightForDone(&config.RigSettings{}, t.TempDir(), "kasb_core", "kasb-x.1", "polecat/nux/kasb-x.1", "/w", "", fakeRev(head), pushed, clean, args, now)
+		if err == nil || !strings.Contains(err.Error(), "disabled") || len(*calls) != 0 {
+			t.Fatalf("err=%v calls=%v", err, *calls)
+		}
+	})
+	refusals := map[string]func() (string, error){
+		"auto-saved": nil,
+		"unpushed":   nil,
+		"dirty":      nil,
+	}
+	for name := range refusals {
+		t.Run(name, func(t *testing.T) {
+			calls := stubLaunch(t, nil)
+			autoSaved, remote, dirty := "", pushed, clean
+			switch name {
+			case "auto-saved":
+				autoSaved = head
+			case "unpushed":
+				remote = func() (string, error) { return strings.Repeat("b", 40), nil }
+			case "dirty":
+				dirty = func() (string, error) { return " M x.py", nil }
+			}
+			rig := t.TempDir()
+			_, err := startAsyncPreflightForDone(asyncSettings(true), rig, "kasb_core", "kasb-x.1", "b", "/w", autoSaved, fakeRev(head), remote, dirty, args, now)
+			if err == nil || len(*calls) != 0 {
+				t.Fatalf("err=%v calls=%v", err, *calls)
+			}
+			if files, _ := filepath.Glob(filepath.Join(asyncpreflight.Dir(rig), "*.json")); len(files) != 0 {
+				t.Fatalf("marker left behind: %v", files)
+			}
+		})
+	}
+	t.Run("starts once and reuses on retry", func(t *testing.T) {
+		calls := stubLaunch(t, nil)
+		rig := t.TempDir()
+		sub, err := startAsyncPreflightForDone(asyncSettings(true), rig, "kasb_core", "kasb-x.1", "b", "/w", "", fakeRev(head), pushed, clean, args, now)
+		if err != nil || sub.Reused || len(*calls) != 1 || (*calls)[0] != sub.MarkerPath {
+			t.Fatalf("sub=%+v err=%v calls=%v", sub, err, *calls)
+		}
+		m, err := asyncpreflight.Load(sub.MarkerPath)
+		if err != nil || m.Status != asyncpreflight.StatusStarting || m.Worktree != "/w" || m.Command[0] != "uv" {
+			t.Fatalf("marker=%+v err=%v", m, err)
+		}
+		again, err := startAsyncPreflightForDone(asyncSettings(true), rig, "kasb_core", "kasb-x.1", "b", "/w", "", fakeRev(head), pushed, clean, args, now)
+		if err != nil || !again.Reused || len(*calls) != 1 {
+			t.Fatalf("retry=%+v err=%v calls=%v", again, err, *calls)
+		}
+	})
+	t.Run("launch failure leaves no marker", func(t *testing.T) {
+		stubLaunch(t, errors.New("fork failed"))
+		rig := t.TempDir()
+		_, err := startAsyncPreflightForDone(asyncSettings(true), rig, "kasb_core", "kasb-x.1", "b", "/w", "", fakeRev(head), pushed, clean, args, now)
+		if err == nil || !strings.Contains(err.Error(), "fork failed") {
+			t.Fatalf("err=%v", err)
+		}
+		if files, _ := filepath.Glob(filepath.Join(asyncpreflight.Dir(rig), "*.json")); len(files) != 0 {
+			t.Fatalf("marker left behind: %v", files)
+		}
+	})
+	t.Run("custom command prefix", func(t *testing.T) {
+		stubLaunch(t, nil)
+		s := asyncSettings(true)
+		s.Delivery.AsyncPreflightCommand = []string{"python3", "tools/remote_preflight.py", "--"}
+		sub, err := startAsyncPreflightForDone(s, t.TempDir(), "kasb_core", "kasb-x.1", "b", "/w", "", fakeRev(head), pushed, clean, args, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, _ := asyncpreflight.Load(sub.MarkerPath)
+		if strings.Join(m.Command[:3], " ") != "python3 tools/remote_preflight.py --" {
+			t.Fatalf("command=%v", m.Command)
+		}
+	})
+}
+
+func TestEnsureAsyncPreflightMRFields(t *testing.T) {
+	mr := &beads.Issue{ID: "kasb-wisp-1", Description: "branch: b\ncommit_sha: " + strings.Repeat("a", 40)}
+	var updated string
+	show := func(string) (*beads.Issue, error) { return mr, nil }
+	update := func(id, desc string) error { updated = desc; mr.Description = desc; return nil }
+	if err := ensureAsyncPreflightMRFields(show, update, mr.ID, "/m.json"); err != nil {
+		t.Fatal(err)
+	}
+	if asyncpreflight.ParseMRFields(updated).RunPath != "/m.json" {
+		t.Fatalf("not bound: %q", updated)
+	}
+	updated = ""
+	if err := ensureAsyncPreflightMRFields(show, update, mr.ID, "/m.json"); err != nil || updated != "" {
+		t.Fatalf("rewrote an already-bound MR: %v %q", err, updated)
+	}
+}
+
+// gateFixture builds a kasb MR bound to an async preflight marker.
+func asyncGateFixture(t *testing.T, status string) (rig string, mr *beads.Issue, source *beads.Issue, show func(string) (*beads.Issue, error), marker *asyncpreflight.Marker) {
+	t.Helper()
+	mr, source, show = kasbRecoveryFixture()
+	mr.Status, mr.Labels = "open", []string{"gt:merge-request"}
+	rig = t.TempDir()
+	m, path, _, err := asyncpreflight.Prepare(asyncpreflight.StartRequest{RigPath: rig, Rig: "kasb_core", Source: source.ID,
+		Branch: "polecat/chrome/kasb-test.1+abc", Head: strings.Repeat("a", 40), Worktree: "/w",
+		Prefix: []string{"preflight"}, Args: []string{"--requirement", "R"}, Now: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Status, m.Reason, m.ReceiptStatus, m.HeartbeatAt = status, "api-tests: test_x failed", "failed", time.Now().UTC().Format(time.RFC3339Nano)
+	if err := asyncpreflight.Save(path, m); err != nil {
+		t.Fatal(err)
+	}
+	mr.Description = asyncpreflight.WithDescriptionFields(mr.Description, path)
+	return rig, mr, source, show, m
+}
+
+func TestPreflightGateFailedReturnsSameMRToOriginalWorker(t *testing.T) {
+	rig, mr, source, show, _ := asyncGateFixture(t, asyncpreflight.StatusFailed)
+	var blockedReason string
+	var comments []string
+	deps := preflightGateDeps{
+		show: show,
+		block: func(id, reason string) error {
+			// Mirror bd update --status=blocked --add-label=needs-repair --set-metadata=correction_reason=...
+			blockedReason = reason
+			mr.Status = "blocked"
+			mr.Labels = append(mr.Labels, "needs-repair")
+			mr.Metadata, _ = json.Marshal(map[string]any{"correction_reason": reason})
+			return nil
+		},
+		comment: func(id, text string) error { comments = append(comments, id); return nil },
+		now:     time.Now,
+	}
+	res, applied, err := runPreflightGate(rig, mr.ID, "", true, deps)
+	if err != nil || !applied || res.State != asyncpreflight.GateFailed {
+		t.Fatalf("res=%+v applied=%v err=%v", res, applied, err)
+	}
+	if !strings.Contains(blockedReason, "test_x failed") || len(comments) != 2 || comments[1] != source.ID {
+		t.Fatalf("reason=%q comments=%v", blockedReason, comments)
+	}
+	// The existing Kasb same-MR repair path accepts the disposition and
+	// addresses the original worker on the original branch and MR.
+	state, err := kasbRecoveryCandidate(mr, strings.Repeat("b", 40), show)
+	if err != nil {
+		t.Fatalf("repair sweep refused the disposition: %v", err)
+	}
+	if state.Record.Kind != "same-mr-repair" || state.Record.Worker != "chrome" || state.Record.MR != mr.ID || state.Record.RepairReason != blockedReason {
+		t.Fatalf("record=%+v", state.Record)
+	}
+	// A second pass does not re-apply to a blocked MR.
+	if _, applied, _ := runPreflightGate(rig, mr.ID, "", true, deps); applied {
+		t.Fatal("re-applied to a blocked MR")
+	}
+}
+
+func TestPreflightGatePendingAndPassedDoNotApply(t *testing.T) {
+	for _, status := range []string{asyncpreflight.StatusRunning, asyncpreflight.StatusPassed} {
+		t.Run(status, func(t *testing.T) {
+			rig, mr, source, show, m := asyncGateFixture(t, status)
+			if status == asyncpreflight.StatusPassed {
+				raw, _ := json.Marshal(map[string]string{"head_sha": m.Head, "source_bead_id": source.ID, "status": "passed"})
+				if err := os.WriteFile(m.ReceiptCopy, raw, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			deps := preflightGateDeps{show: show, now: time.Now,
+				block:   func(string, string) error { t.Fatal("blocked"); return nil },
+				comment: func(string, string) error { t.Fatal("commented"); return nil }}
+			res, applied, err := runPreflightGate(rig, mr.ID, m.Head, true, deps)
+			if err != nil || applied {
+				t.Fatalf("res=%+v applied=%v err=%v", res, applied, err)
+			}
+			if (status == asyncpreflight.StatusPassed) != res.Landable() {
+				t.Fatalf("res=%+v", res)
+			}
+		})
+	}
+}
+
+func TestPreflightGateLegacyMRLandsAsBefore(t *testing.T) {
+	mr, _, show := kasbRecoveryFixture()
+	mr.Status = "open"
+	res, applied, err := runPreflightGate(t.TempDir(), mr.ID, "", true, preflightGateDeps{show: show, now: time.Now})
+	if err != nil || applied || res.State != asyncpreflight.GateNone || !res.Landable() {
+		t.Fatalf("res=%+v applied=%v err=%v", res, applied, err)
+	}
+}
+
+func TestKasbResubmissionDropsAsyncPreflightBinding(t *testing.T) {
+	mr, _, _ := kasbRecoveryFixture()
+	mr.Description = asyncpreflight.WithDescriptionFields(mr.Description, "/r/.runtime/async-preflight/x.json")
+	updated, err := kasbResubmittedDescription(mr, strings.Repeat("c", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(updated, "preflight_run") || strings.Contains(updated, "preflight_receipt") || !strings.Contains(updated, "commit_sha: "+strings.Repeat("c", 40)) {
+		t.Fatal(updated)
+	}
+}
