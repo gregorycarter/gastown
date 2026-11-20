@@ -49,6 +49,7 @@ type fakeMQPostMergeGit struct {
 	deletedHeads    []string
 	localDeleted    []string
 	seriesBases     []string
+	seriesLanded    []string
 	ensuredBranches []string
 	ensuredCommits  []string
 }
@@ -122,6 +123,43 @@ func (g *fakeMQPostMergeGit) SubmittedWorkLandingReceipt(_, _, commit string) (s
 func (g *fakeMQPostMergeGit) SubmittedSeriesLandingReceipt(remote, branch, commit, base string) (string, error) {
 	g.seriesBases = append(g.seriesBases, base)
 	return g.SubmittedWorkLandingReceipt(remote, branch, commit)
+}
+
+func (g *fakeMQPostMergeGit) SubmittedSeriesLandedReceipt(remote, branch, commit, base, landed string) (string, error) {
+	g.seriesBases = append(g.seriesBases, base)
+	g.seriesLanded = append(g.seriesLanded, landed)
+	if _, err := g.SubmittedWorkLandingReceipt(remote, branch, commit); err != nil {
+		return "", err
+	}
+	return landed, nil
+}
+
+// kasb-6fa8o: --landed routes a batch member to the landed-pinned proof and
+// records the exact landed commit, not the batch tip.
+func TestRunVerifiedMQPostMergeLandedSeriesProof(t *testing.T) {
+	original := strings.Repeat("a", 40)
+	base := strings.Repeat("b", 40)
+	member := strings.Repeat("c", 40)
+	tip := strings.Repeat("d", 40)
+	old := mqPostMergeLanded
+	t.Cleanup(func() { mqPostMergeLanded = old })
+
+	mqPostMergeLanded = member
+	mr := &refinery.MergeRequest{ID: "kasb-mr", Branch: "polecat/x/kasb-1", TargetBranch: "main", CommitSHA: original}
+	proof := &fakeMQPostMergeGit{targetTip: tip}
+	if err := verifyMQPostMergeProofWithBase(proof, mr, base); err != nil {
+		t.Fatal(err)
+	}
+	if mr.MergeCommit != member || len(proof.seriesLanded) != 1 || proof.seriesLanded[0] != member || proof.seriesBases[0] != base {
+		t.Fatalf("merge commit %s, landed %v, bases %v; want the member's landed commit", mr.MergeCommit, proof.seriesLanded, proof.seriesBases)
+	}
+
+	// --landed without --pre-landing-base is refused before any proof runs.
+	mr2 := &refinery.MergeRequest{ID: "kasb-mr2", Branch: "polecat/x/kasb-2", TargetBranch: "main", CommitSHA: original}
+	proof2 := &fakeMQPostMergeGit{targetTip: tip}
+	if err := verifyMQPostMergeProofWithBase(proof2, mr2, ""); err == nil || !strings.Contains(err.Error(), "--landed needs --pre-landing-base") {
+		t.Fatalf("err = %v", err)
+	}
 }
 
 func TestRunVerifiedMQPostMergeExplicitSeriesProof(t *testing.T) {

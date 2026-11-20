@@ -229,3 +229,51 @@ func TestSubmittedSeriesLandingReceipt_RejectsMergeAttributes(t *testing.T) {
 		})
 	}
 }
+
+// kasb-6fa8o: an atomic batch where member B edits within diff context of
+// member A's change. Re-merging either member's delta onto the final batch tip
+// fails (A duplicates/conflicts, B conflicts), although each landed exactly.
+// Pinning each member to its own landing boundary proves both.
+func TestSubmittedSeriesLandedReceipt_ProvesAdjacentBatchMembers(t *testing.T) {
+	dir, _, branch := initTestRepoWithRemote(t)
+	baseContent := "class R:\n    a = 1\n    b = 2\n\n    def run(self):\n        pass\n\n    def stop(self):\n        pass\n"
+	base := vswlCommitFile(t, dir, "r.py", baseContent, "batch base")
+	vswlGit(t, dir, "push", "-q", "origin", branch)
+	vswlGit(t, dir, "checkout", "-q", "-b", "member-a")
+	a := vswlCommitFile(t, dir, "r.py", strings.Replace(baseContent, "    def stop(self):", "    def on_err(self):\n        pass\n\n    def stop(self):", 1), "member A adds a method")
+	vswlGit(t, dir, "checkout", "-q", branch)
+	vswlGit(t, dir, "checkout", "-q", "-b", "member-b")
+	b := vswlCommitFile(t, dir, "r.py", strings.Replace(baseContent, "        pass\n\n    def stop", "        pass\n    c = 3\n    d = 4\n\n    def stop", 1), "member B adds fields above it")
+	vswlGit(t, dir, "checkout", "-q", branch)
+	vswlGit(t, dir, "cherry-pick", a)
+	landedA := vswlGit(t, dir, "rev-parse", "HEAD")
+	vswlGit(t, dir, "cherry-pick", b)
+	landedB := vswlGit(t, dir, "rev-parse", "HEAD")
+	vswlGit(t, dir, "push", "-q", "origin", branch)
+	g := NewGit(dir)
+
+	// The tip-based proof falsely fails both members (the 20 Nov epp6d/f24a8 shape).
+	requireSubmittedSeriesRejected(t, g, branch, a, base)
+	requireSubmittedSeriesRejected(t, g, branch, b, base)
+
+	if got, err := g.SubmittedSeriesLandedReceipt("origin", branch, a, base, landedA); err != nil || got != landedA {
+		t.Fatalf("member A: receipt=%q err=%v, want %s", got, err, landedA)
+	}
+	if got, err := g.SubmittedSeriesLandedReceipt("origin", branch, b, landedA, landedB); err != nil || got != landedB {
+		t.Fatalf("member B: receipt=%q err=%v, want %s", got, err, landedB)
+	}
+
+	// Still strict: wrong landed tree, a boundary that does not strictly precede
+	// the landed commit, a landed commit not on the target, or no landed SHA.
+	for name, args := range map[string][3]string{
+		"landed tree is not the member's delta": {a, base, landedB},
+		"pre-landing equals landed":             {b, landedB, landedB},
+		"landed not on target":                  {b, base, b},
+		"member already in pre-landing":         {a, landedA, landedB},
+		"empty landed":                          {a, base, ""},
+	} {
+		if got, err := g.SubmittedSeriesLandedReceipt("origin", branch, args[0], args[1], args[2]); err == nil || got != "" {
+			t.Fatalf("%s: receipt=%q err=%v, want rejection", name, got, err)
+		}
+	}
+}

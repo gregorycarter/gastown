@@ -171,6 +171,7 @@ Examples:
 // Post-merge flags
 var mqPostMergeSkipBranchDelete bool
 var mqPostMergePreLandingBase string
+var mqPostMergeLanded string
 var mqPostMergeMechanicalLanding string
 var mqPostMergeMechanicalRecord string
 
@@ -196,6 +197,13 @@ histories and custom merge semantics reject. Do not substitute an intermediate
 source commit or a post-landing revision. Normal closure and dependency guards
 still apply; this option neither rewrites the submitted head nor forces closure.
 
+For one member of an atomic batch push, add --landed <sha>: the exact commit
+that landed this member, with --pre-landing-base the commit immediately before
+it (the batch base or the previous member's landed commit). The proof then
+requires pre-landing < landed <= fetched target and that the submitted delta
+on --pre-landing-base gives exactly landed's tree, instead of re-merging it onto
+a tip that also holds later batch members (kasb-6fa8o).
+
 Examples:
   gt mq post-merge gastown gt-mr-abc123
   gt mq post-merge gastown gt-mr-abc123 --skip-branch-delete`,
@@ -213,6 +221,7 @@ type mqPostMergeGit interface {
 	VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error
 	SubmittedWorkLandingReceipt(remote, branch, commit string) (string, error)
 	SubmittedSeriesLandingReceipt(remote, branch, commit, preLandingBase string) (string, error)
+	SubmittedSeriesLandedReceipt(remote, branch, commit, preLandingBase, landed string) (string, error)
 	PushRemoteBranchTip(remote, branch string) (string, error)
 	HasOpenPullRequest(ref git.PullRequestRef) bool
 	Rev(ref string) (string, error)
@@ -381,6 +390,7 @@ func init() {
 	mqPostMergeCmd.Flags().StringVar(&mqPostMergeMechanicalLanding, "mechanical-landing", "", "Prove this landed commit as the submission plus the declared mechanical rewrite in --mechanical-record (kasb-1dxro)")
 	mqPostMergeCmd.Flags().StringVar(&mqPostMergeMechanicalRecord, "mechanical-record", "", "JSON {paths, renames} written by the lander's mechanical resolver; required with --mechanical-landing")
 	mqPostMergeCmd.Flags().StringVar(&mqPostMergePreLandingBase, "pre-landing-base", "", "Prove the final submitted series against this exact pre-landing target SHA (strict content proof; no guard bypass)")
+	mqPostMergeCmd.Flags().StringVar(&mqPostMergeLanded, "landed", "", "With --pre-landing-base: the exact commit that landed this MR (batch member); prove its tree is the submitted delta on the pre-landing SHA (kasb-6fa8o)")
 
 	// Add subcommands
 	mqCmd.AddCommand(mqSubmitCmd)
@@ -656,6 +666,10 @@ func verifyMQPostMergeProofWithBase(rigGit mqPostMergeGit, mr *refinery.MergeReq
 	if commit == "" {
 		return fmt.Errorf("merge proof failed for MR %s: missing submitted commit_sha", mr.ID)
 	}
+	landed := strings.TrimSpace(mqPostMergeLanded)
+	if landed != "" && (preLandingBase == "" || mqPostMergeMechanicalLanding != "") {
+		return fmt.Errorf("merge proof failed for MR %s: --landed needs --pre-landing-base and cannot be combined with --mechanical-landing", mr.ID)
+	}
 	// An isolated operator checkout may have pushed the source into a different
 	// object store. Obtain that pinned object before native proof, without
 	// changing MR identity or replaying any product verification.
@@ -675,7 +689,11 @@ func verifyMQPostMergeProofWithBase(rigGit mqPostMergeGit, mr *refinery.MergeReq
 	} else if preLandingBase != "" {
 		// Explicit final-net proof is an alternative to historical ancestry/cherry
 		// evidence, never a fallback that ignores a failed content check.
-		landedSHA, err = rigGit.SubmittedSeriesLandingReceipt("origin", target, commit, preLandingBase)
+		if landed != "" {
+			landedSHA, err = rigGit.SubmittedSeriesLandedReceipt("origin", target, commit, preLandingBase, landed)
+		} else {
+			landedSHA, err = rigGit.SubmittedSeriesLandingReceipt("origin", target, commit, preLandingBase)
+		}
 	} else {
 		landedSHA, err = rigGit.SubmittedWorkLandingReceipt("origin", target, commit)
 	}

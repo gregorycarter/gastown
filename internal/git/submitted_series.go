@@ -16,10 +16,36 @@ import (
 // source-base -> submitted delta is contained in a fresh target snapshot. Earlier
 // shared history is outside that delta. No worktree, index or source ref changes.
 func (g *Git) SubmittedSeriesLandingReceipt(remote, branch, submitted, preLanding string) (string, error) {
+	return g.submittedSeriesReceipt(remote, branch, submitted, preLanding, "")
+}
+
+// SubmittedSeriesLandedReceipt is the same strict final-net proof pinned to
+// the exact landed commit (kasb-6fa8o). preLanding must strictly precede
+// landed, and landed must be on the fetched target. The submitted delta
+// (merge-base(submitted, preLanding)..submitted) must merge cleanly onto
+// preLanding and give exactly landed's tree.
+//
+// This is the proof for one member of an atomic batch push: the fetched
+// target also holds LATER members, and re-merging an earlier member's delta
+// onto a tree that already has it plus adjacent later edits is not
+// idempotent (duplicated hunks or conflicts). Proving each member against its
+// own landing boundary is exact and stronger than comparing to the tip.
+func (g *Git) SubmittedSeriesLandedReceipt(remote, branch, submitted, preLanding, landed string) (string, error) {
+	if landed == "" {
+		return "", fmt.Errorf("submitted_series_unproven: landed must be an immutable full commit SHA")
+	}
+	return g.submittedSeriesReceipt(remote, branch, submitted, preLanding, landed)
+}
+
+func (g *Git) submittedSeriesReceipt(remote, branch, submitted, preLanding, landed string) (string, error) {
 	fail := func(format string, args ...any) (string, error) {
 		return "", fmt.Errorf("submitted_series_unproven: "+format, args...)
 	}
-	for name, value := range map[string]string{"submitted": submitted, "pre-landing": preLanding} {
+	commits := map[string]string{"submitted": submitted, "pre-landing": preLanding}
+	if landed != "" {
+		commits["landed"] = landed
+	}
+	for name, value := range commits {
 		if len(value) != 40 || !isHexString(value) {
 			return fail("%s must be an immutable full commit SHA", name)
 		}
@@ -34,8 +60,21 @@ func (g *Git) SubmittedSeriesLandingReceipt(remote, branch, submitted, preLandin
 	if err != nil || len(target) != 40 || !isHexString(target) {
 		return fail("cannot resolve fetched target: %v", err)
 	}
-	before, err := g.IsAncestor(preLanding, target)
-	if err != nil || !before || preLanding == target {
+	// proved is the commit whose tree must equal the re-merged delta: the
+	// fetched tip, or the exact landed commit when one is pinned.
+	proved := target
+	if landed != "" {
+		onTarget, err := g.IsAncestor(landed, target)
+		if err != nil || !onTarget {
+			return fail("landed commit is not on the fetched target")
+		}
+		proved = landed
+	}
+	before, err := g.IsAncestor(preLanding, proved)
+	if err != nil || !before || preLanding == proved {
+		if landed != "" {
+			return fail("pre-landing revision must strictly precede the landed commit")
+		}
 		return fail("pre-landing revision must strictly precede fetched target")
 	}
 	alreadyPresent, err := g.IsAncestor(submitted, preLanding)
@@ -80,7 +119,11 @@ func (g *Git) SubmittedSeriesLandingReceipt(remote, branch, submitted, preLandin
 		return fail("non-default merge strategy is not accepted")
 	}
 	options := []string{"--literal-pathspecs", "-c", "merge.default=text", "-c", "merge.renormalize=false", "-c", "merge.renames=false", "-c", "core.attributesFile=/dev/null"}
-	for _, tree := range []string{base, submitted, target} {
+	trees := []string{base, submitted, target}
+	if landed != "" {
+		trees = []string{base, submitted, preLanding, landed}
+	}
+	for _, tree := range trees {
 		for offset := 0; offset < len(paths); offset += 100 {
 			end := min(offset+100, len(paths))
 			args := append(append([]string{}, options...), "check-attr", "--source="+tree, "-z", "merge", "--")
@@ -99,17 +142,24 @@ func (g *Git) SubmittedSeriesLandingReceipt(remote, branch, submitted, preLandin
 			}
 		}
 	}
-	args := append(append([]string{}, options...), "merge-tree", "--write-tree", "--no-messages", "--merge-base="+base, target, submitted)
+	onto := target
+	if landed != "" {
+		onto = preLanding
+	}
+	args := append(append([]string{}, options...), "merge-tree", "--write-tree", "--no-messages", "--merge-base="+base, onto, submitted)
 	mergedTree, err := g.runWithTimeout(60*time.Second, args...)
 	if err != nil || len(mergedTree) != 40 || !isHexString(mergedTree) {
 		return fail("final submitted delta does not merge cleanly: %v", err)
 	}
-	targetTree, err := g.run("rev-parse", "--verify", target+"^{tree}")
-	if err != nil || mergedTree != targetTree {
+	provedTree, err := g.run("rev-parse", "--verify", proved+"^{tree}")
+	if err != nil || mergedTree != provedTree {
+		if landed != "" {
+			return fail("landed commit is not exactly the submitted delta on the pre-landing revision")
+		}
 		return fail("fetched target is missing final submitted changes")
 	}
-	if err := g.VerifyPushedCommitReachableFromPushTarget(remote, branch, target); err != nil {
+	if err := g.VerifyPushedCommitReachableFromPushTarget(remote, branch, proved); err != nil {
 		return fail("proved snapshot is no longer on the push target: %w", err)
 	}
-	return target, nil
+	return proved, nil
 }
