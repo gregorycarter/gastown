@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -701,5 +702,39 @@ func TestPrepareRetriesAFailedHeadWithNewArguments(t *testing.T) {
 	}
 	if prev, _ := filepath.Glob(path + ".*.prev"); len(prev) != 1 {
 		t.Fatalf("failed marker not kept aside: %v", prev)
+	}
+}
+
+// Review of kasb-xeon8: a running marker with a stale heartbeat is not Live,
+// but its runner may still exist and would Save the marker back after a
+// rename. Retire must not rename it; it asks the runner to stop instead.
+func TestRetireRefusesWhileRunnerAlive(t *testing.T) {
+	withProcesses(t, map[int]string{4242: "start-1"})
+	var killed []int
+	oldKill := killProcess
+	killProcess = func(pid int, _ syscall.Signal) error { killed = append(killed, pid); return nil }
+	t.Cleanup(func() { killProcess = oldKill })
+	rig := t.TempDir()
+	now := time.Date(2026, 11, 20, 1, 0, 0, 0, time.UTC)
+	m, path, _, err := Prepare(request(rig, "/w", now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	running(now.Add(-time.Hour))(m)
+	if err := Save(path, m); err != nil {
+		t.Fatal(err)
+	}
+	if Live(m, now) {
+		t.Fatal("fixture should be a stale (not live) run")
+	}
+	retired, err := Retire(path, now)
+	if err == nil || retired || !strings.Contains(err.Error(), "still alive") {
+		t.Fatalf("Retire = %v, %v; want refusal", retired, err)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("marker moved: %v", statErr)
+	}
+	if len(killed) != 1 || killed[0] != 4242 {
+		t.Fatalf("stop signals = %v, want [4242]", killed)
 	}
 }

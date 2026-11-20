@@ -124,7 +124,8 @@ func sameCommand(a, b []string) bool {
 // unreadable marker) aside: the MR sidecar, receipt copy, log and finally the
 // marker are renamed to <file>.<unixnano>.prev, which Prune deletes after
 // StaleAfter. It reports whether anything was retired. A missing, passed or
-// live run is left alone.
+// live run is left alone; a run whose runner process still exists is asked to
+// stop and reported as an error.
 //
 // kasb-xeon8: Evaluate falls back to the marker for the MR's exact
 // source@head and Create refuses an existing marker, so an un-retired failure
@@ -136,6 +137,12 @@ func Retire(markerPath string, now time.Time) (bool, error) {
 	}
 	if err == nil && (m.Status == StatusPassed || Live(m, now)) {
 		return false, nil
+	}
+	// A runner that is still alive (for example, a stale heartbeat) would Save
+	// the marker back after a rename. Ask it to stop and retire on a later try.
+	if err == nil && runnerPresent(m) {
+		Stop(m)
+		return false, fmt.Errorf("async preflight runner pid %d for %s@%s is still alive; asked it to stop, retry once it has exited", m.PID, m.Source, short(m.Head))
 	}
 	stamp := now.UnixNano()
 	for _, p := range []string{MRSidecarPath(markerPath), ReceiptCopyPath(markerPath), LogPath(markerPath), markerPath} {

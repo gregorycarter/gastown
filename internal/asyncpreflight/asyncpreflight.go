@@ -273,8 +273,11 @@ func Stop(m *Marker) bool {
 	if m == nil || (m.Status != StatusRunning && m.Status != StatusStarting) || !runnerPresent(m) {
 		return false
 	}
-	return syscall.Kill(m.PID, syscall.SIGTERM) == nil
+	return killProcess(m.PID, syscall.SIGTERM) == nil
 }
+
+// killProcess is syscall.Kill; tests replace it.
+var killProcess = syscall.Kill
 
 // GateResult is the lander-facing verdict.
 type GateResult struct {
