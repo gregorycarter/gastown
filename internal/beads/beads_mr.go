@@ -108,6 +108,35 @@ func (b *Beads) FindOpenMRsForIssue(issueID string) ([]*Issue, error) {
 	return matches, nil
 }
 
+// FindPendingMRsForIssue returns every non-terminal merge-request bead
+// (blocked, in_progress or open) whose source_issue matches issueID. Open MRs
+// come last, so callers that take the last element prefer the newest open MR
+// and otherwise the newest held one.
+//
+// kasb-juddf: a blocked MR (needs-repair, needs-rebase or an MR hold) still
+// owns its source bead. Counting only status=open let gt done close sources
+// whose change was not on main.
+func (b *Beads) FindPendingMRsForIssue(issueID string) ([]*Issue, error) {
+	var matches []*Issue
+	seen := map[string]bool{}
+	for _, status := range []string{"blocked", "in_progress", "open"} {
+		issues, err := b.ListMergeRequests(ListOptions{
+			Status: status,
+			Label:  "gt:merge-request",
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, issue := range issues {
+			if !seen[issue.ID] && MatchesMRSourceIssue(issue.Description, issueID) {
+				seen[issue.ID] = true
+				matches = append(matches, issue)
+			}
+		}
+	}
+	return matches, nil
+}
+
 // MatchesMRSourceIssue returns true if the MR description contains a
 // source_issue field matching the given issue ID exactly. The trailing
 // newline in the needle prevents partial ID matches (e.g., "gt-abc"

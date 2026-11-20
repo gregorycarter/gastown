@@ -12,7 +12,7 @@ import (
 // awaitingMergeBeads is the beads surface needed to hold a source bead open
 // for a pending merge request. *beads.Beads satisfies it.
 type awaitingMergeBeads interface {
-	FindOpenMRsForIssue(issueID string) ([]*beads.Issue, error)
+	FindPendingMRsForIssue(issueID string) ([]*beads.Issue, error)
 	Update(id string, opts beads.UpdateOptions) error
 }
 
@@ -59,19 +59,23 @@ func decideMRHold(bd awaitingMergeBeads, closeOnMerge bool, exitType, hookedBead
 		}
 	}
 
-	openMRs, err := bd.FindOpenMRsForIssue(hookedBeadID)
+	// kasb-juddf: any non-terminal MR holds the source. A blocked MR
+	// (needs-repair, needs-rebase, MR hold) is still pending; closing the
+	// source here strands it, because the repair sweep skips closed sources.
+	pendingMRs, err := bd.FindPendingMRsForIssue(hookedBeadID)
 	if err != nil {
 		// Fail closed to the upstream behaviour: an unverifiable queue state
 		// must not silently leave work beads open forever.
 		return mrHoldDecision{Reason: fmt.Sprintf("MR lookup failed: %v", err)}
 	}
-	if len(openMRs) == 0 {
-		return mrHoldDecision{Reason: "no open MR for source"}
+	if len(pendingMRs) == 0 {
+		return mrHoldDecision{Reason: "no pending MR for source"}
 	}
 
-	// Newest MR wins when a supersede pass has not run yet.
-	mrID := openMRs[len(openMRs)-1].ID
-	return mrHoldDecision{Hold: true, MRID: mrID, Reason: "open MR " + mrID}
+	// Newest open MR wins when a supersede pass has not run yet; otherwise
+	// the newest held MR (FindPendingMRsForIssue lists open MRs last).
+	mr := pendingMRs[len(pendingMRs)-1]
+	return mrHoldDecision{Hold: true, MRID: mr.ID, Reason: mr.Status + " MR " + mr.ID}
 }
 
 // holdSourceForMerge parks the source bead in in_progress with no assignee and

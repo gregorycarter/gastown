@@ -444,3 +444,49 @@ esac
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
+
+// kasb-juddf: an MR blocked needs-repair still owns its source bead.
+// FindOpenMRsForIssue (status=open) misses it; FindPendingMRsForIssue must not.
+func TestFindPendingMRsForIssueIncludesBlockedMR(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	ResetBdAllowStaleCacheForTest()
+	t.Cleanup(ResetBdAllowStaleCacheForTest)
+	mr := `{"id":"kasb-wisp-zuwqr","title":"Merge: kasb-w7f69","description":"branch: polecat/synth/kasb-w7f69@abc\ntarget: main\nsource_issue: kasb-w7f69\nrig: kasb_core\n","status":"blocked","priority":1,"created_at":"2026-11-20T00:00:00Z","updated_at":"2026-11-20T00:00:00Z","ephemeral":true,"labels":["gt:merge-request","needs-repair"]}`
+	sqlRow := `{"id":"kasb-wisp-zuwqr","title":"Merge: kasb-w7f69","description":"branch: polecat/synth/kasb-w7f69@abc\ntarget: main\nsource_issue: kasb-w7f69\nrig: kasb_core\n","status":"blocked","priority":1,"assignee":"","created_at":"2026-11-20T00:00:00Z","updated_at":"2026-11-20T00:00:00Z","created_by":"tester","labels_csv":"gt:merge-request,needs-repair"}`
+	script := `#!/bin/sh
+if [ "${1:-}" = "--allow-stale" ]; then
+  if [ "${2:-}" = "version" ]; then echo "Error: unknown flag: --allow-stale" >&2; exit 0; fi
+  shift
+fi
+case "${1:-}" in
+  sql)
+    case "$*" in *"w.status = 'blocked'"*) printf '%s\n' '[` + sqlRow + `]' ;; *) printf '%s\n' '[]' ;; esac
+    exit 0 ;;
+  show) printf '%s\n' '[` + mr + `]'; exit 0 ;;
+  *) printf '%s\n' '[]'; exit 0 ;;
+esac
+`
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	b := New(t.TempDir())
+	open, err := b.FindOpenMRsForIssue("kasb-w7f69")
+	if err != nil || len(open) != 0 {
+		t.Fatalf("FindOpenMRsForIssue = %v, %v; want none (status=open only)", open, err)
+	}
+	pending, err := b.FindPendingMRsForIssue("kasb-w7f69")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].ID != "kasb-wisp-zuwqr" {
+		t.Fatalf("FindPendingMRsForIssue = %+v, want the blocked MR kasb-wisp-zuwqr", pending)
+	}
+	if other, _ := b.FindPendingMRsForIssue("kasb-w7f6"); len(other) != 0 {
+		t.Fatalf("prefix id matched %+v", other)
+	}
+}

@@ -15,7 +15,7 @@ type fakeAwaitingMergeBeads struct {
 	updateCalls int
 }
 
-func (f *fakeAwaitingMergeBeads) FindOpenMRsForIssue(string) ([]*beads.Issue, error) {
+func (f *fakeAwaitingMergeBeads) FindPendingMRsForIssue(string) ([]*beads.Issue, error) {
 	return f.openMRs, f.findErr
 }
 
@@ -157,6 +157,17 @@ func TestDecideMRHoldPicksNewestOpenMR(t *testing.T) {
 	got := decideMRHold(bd, true, ExitCompleted, "bt-j6uu.12", hq19pxcSource())
 	if !got.Hold || got.MRID != "bt-wisp-xq1yy" {
 		t.Fatalf("got %+v, want hold on the newest MR bt-wisp-xq1yy", got)
+	}
+}
+
+// kasb-juddf: kasb-w7f69 was closed at 02:02:24Z one second after gt done,
+// while its MR kasb-wisp-zuwqr was blocked needs-repair and not on main.
+func TestDecideMRHoldKeepsSourceWhileMRBlocked(t *testing.T) {
+	blocked := &beads.Issue{ID: "kasb-wisp-zuwqr", Labels: []string{"gt:merge-request", "needs-repair"}, Status: "blocked"}
+	bd := &fakeAwaitingMergeBeads{openMRs: []*beads.Issue{blocked}}
+	got := decideMRHold(bd, true, ExitCompleted, "kasb-w7f69", &beads.Issue{ID: "kasb-w7f69"})
+	if !got.Hold || got.MRID != "kasb-wisp-zuwqr" {
+		t.Fatalf("got %+v, want hold on blocked MR kasb-wisp-zuwqr", got)
 	}
 }
 
