@@ -112,6 +112,40 @@ func TestAutoRebaseOnTarget_GatingDecisions(t *testing.T) {
 	}
 }
 
+// TestDoneRebaseSkip_AsyncPreflightKeepsPushedHead covers kasb-wko88: an
+// --async-preflight submit must not rebase a head that is behind main, because
+// the detached preflight proves the exact pushed head and the Refinery rebases
+// at landing.
+func TestDoneRebaseSkip_AsyncPreflightKeepsPushedHead(t *testing.T) {
+	tests := []struct {
+		name                        string
+		preVerified, receipt, async bool
+		wantSkip                    bool
+		wantReason                  string
+	}{
+		{name: "plain gt done rebases", wantSkip: false},
+		{name: "pre-verified keeps its own reason", preVerified: true, async: true, wantSkip: true},
+		{name: "receipt covers HEAD", receipt: true, wantSkip: true, wantReason: "a passing preflight receipt covers HEAD"},
+		{name: "async preflight", async: true, wantSkip: true, wantReason: "the async preflight proves the pushed head; the Refinery rebases at landing"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			skip, reason := doneRebaseSkip(tt.preVerified, tt.receipt, tt.async)
+			if skip != tt.wantSkip || reason != tt.wantReason {
+				t.Fatalf("doneRebaseSkip = (%v, %q), want (%v, %q)", skip, reason, tt.wantSkip, tt.wantReason)
+			}
+			fake := &fakeRebaseGit{}
+			rebased, _, err := autoRebaseOnTarget(fake, "origin/main", 4, skip, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rebased == tt.wantSkip || (fake.rebaseCalls == 1) == tt.wantSkip {
+				t.Fatalf("rebased=%v calls=%d with skip=%v", rebased, fake.rebaseCalls, skip)
+			}
+		})
+	}
+}
+
 // TestAutoRebaseOnTarget_ConflictAborts verifies that a rebase failure causes
 // AbortRebase to fire and the returned error includes remediation guidance.
 func TestAutoRebaseOnTarget_ConflictAborts(t *testing.T) {

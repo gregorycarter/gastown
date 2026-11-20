@@ -1274,9 +1274,13 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 						style.Bold.Render("✓"), filepath.Base(receipt), shortDoneSHA(headSHA), contaminationBase)
 				}
 			}
-			rebased, skipReason, rebaseErr := autoRebaseOnTarget(g, contaminationBase, contam.Behind, donePreVerified || receiptSkip, alreadyPushed)
-			if receiptSkip && skipReason != "" {
-				skipReason = "a passing preflight receipt covers HEAD"
+			// kasb-wko88: --async-preflight proves the exact pushed head, so a
+			// local rebase would discard an approved head (e.g. staging-approved
+			// KYC work) for no gain; the Refinery rebases at landing.
+			skipLocal, skipWhy := doneRebaseSkip(donePreVerified, receiptSkip, doneAsyncPreflight)
+			rebased, skipReason, rebaseErr := autoRebaseOnTarget(g, contaminationBase, contam.Behind, skipLocal, alreadyPushed)
+			if skipWhy != "" && skipReason != "" {
+				skipReason = skipWhy
 			}
 			if rebaseErr != nil {
 				return rebaseErr

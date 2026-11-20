@@ -51,6 +51,24 @@ func autoRebaseOnTarget(g rebaseGit, base string, behind int, preVerified, alrea
 	return true, "", nil
 }
 
+// doneRebaseSkip reports whether gt done leaves the rebase onto the target to
+// the Refinery, and the reason to print instead of autoRebaseOnTarget's own
+// ("" keeps it). --pre-verified keeps its own reason; a passing receipt for
+// HEAD (hq-i2hc3) and --async-preflight (kasb-wko88) both bind proof to the
+// exact pushed head, and the Refinery rebases at landing, returning real
+// conflicts to the same polecat as needs-rebase.
+func doneRebaseSkip(preVerified, receiptCoversHead, asyncPreflight bool) (bool, string) {
+	switch {
+	case preVerified:
+		return true, ""
+	case receiptCoversHead:
+		return true, "a passing preflight receipt covers HEAD"
+	case asyncPreflight:
+		return true, "the async preflight proves the pushed head; the Refinery rebases at landing"
+	}
+	return false, ""
+}
+
 // passingPreflightReceiptForHead returns the path of a passing preflight
 // receipt that covers head for sourceID, or "" when there is none.
 //
