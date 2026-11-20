@@ -49,12 +49,17 @@ func (g *Git) submittedSeriesReceipt(remote, branch, submitted, preLanding, land
 		if len(value) != 40 || !isHexString(value) {
 			return fail("%s must be an immutable full commit SHA", name)
 		}
+	}
+	// Fetch before the existence checks: a batch lander composes and pushes the
+	// pre-landing and landed commits from its own clone, so this repository has
+	// them only after fetching the target (kasb-6fa8o follow-up, 20 Nov 2026).
+	if _, err := g.runWithTimeout(60*time.Second, "fetch", "--no-tags", g.pushTarget(remote), "refs/heads/"+branch); err != nil {
+		return fail("cannot fetch push target: %w", err)
+	}
+	for name, value := range commits {
 		if _, err := g.run("rev-parse", "--verify", value+"^{commit}"); err != nil {
 			return fail("%s commit unavailable: %w", name, err)
 		}
-	}
-	if _, err := g.runWithTimeout(60*time.Second, "fetch", "--no-tags", g.pushTarget(remote), "refs/heads/"+branch); err != nil {
-		return fail("cannot fetch push target: %w", err)
 	}
 	target, err := g.run("rev-parse", "--verify", "FETCH_HEAD^{commit}")
 	if err != nil || len(target) != 40 || !isHexString(target) {

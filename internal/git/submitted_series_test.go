@@ -277,3 +277,43 @@ func TestSubmittedSeriesLandedReceipt_ProvesAdjacentBatchMembers(t *testing.T) {
 		}
 	}
 }
+
+// kasb-6fa8o follow-up: the lander composes the batch in its own clone and
+// pushes it; the proving repository (the rig's .repo.git) has the pre-landing
+// and landed commits only after fetching the target. 20 Nov 09:58-10:13Z every
+// pinned proof failed with "pre-landing commit unavailable".
+func TestSubmittedSeriesLandedReceipt_FetchesLanderCommitsFirst(t *testing.T) {
+	dir, remote, branch := initTestRepoWithRemote(t)
+	baseContent := "one\ntwo\nthree\n"
+	base := vswlCommitFile(t, dir, "f.txt", baseContent, "base")
+	vswlGit(t, dir, "push", "-q", "origin", branch)
+	vswlGit(t, dir, "checkout", "-q", "-b", "member-a")
+	a := vswlCommitFile(t, dir, "a.txt", "a\n", "member A")
+	vswlGit(t, dir, "push", "-q", "origin", "member-a")
+	vswlGit(t, dir, "checkout", "-q", "-b", "member-b", base)
+	b := vswlCommitFile(t, dir, "b.txt", "b\n", "member B")
+	vswlGit(t, dir, "push", "-q", "origin", "member-b")
+
+	// The lander's own clone composes and pushes the batch.
+	lander := t.TempDir()
+	vswlGit(t, lander, "clone", "-q", remote, ".")
+	vswlGit(t, lander, "config", "user.email", "lander@example.test")
+	vswlGit(t, lander, "config", "user.name", "lander")
+	vswlGit(t, lander, "checkout", "-q", branch)
+	vswlGit(t, lander, "cherry-pick", a)
+	landedA := vswlGit(t, lander, "rev-parse", "HEAD")
+	vswlGit(t, lander, "cherry-pick", b)
+	landedB := vswlGit(t, lander, "rev-parse", "HEAD")
+	vswlGit(t, lander, "push", "-q", "origin", branch)
+
+	g := NewGit(dir)
+	if _, err := g.run("cat-file", "-e", landedA+"^{commit}"); err == nil {
+		t.Fatal("fixture: the proving repository must not have the lander's commits yet")
+	}
+	if got, err := g.SubmittedSeriesLandedReceipt("origin", branch, a, base, landedA); err != nil || got != landedA {
+		t.Fatalf("member A: receipt=%q err=%v", got, err)
+	}
+	if got, err := g.SubmittedSeriesLandedReceipt("origin", branch, b, landedA, landedB); err != nil || got != landedB {
+		t.Fatalf("member B: receipt=%q err=%v", got, err)
+	}
+}
