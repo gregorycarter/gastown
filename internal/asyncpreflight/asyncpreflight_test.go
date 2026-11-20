@@ -612,3 +612,94 @@ func TestPrune(t *testing.T) {
 		}
 	})
 }
+
+// kasb-xeon8: kasb-w7f69's async run on d9a48aae8 failed only on arguments; a
+// corrected synchronous preflight then passed on the same head, but the gate's
+// marker fallback kept blocking the reopened MR and Create refused a new run.
+func TestRetireUnblocksAFailedHead(t *testing.T) {
+	withDeadPIDs(t)
+	rig := t.TempDir()
+	now := time.Date(2026, 11, 20, 1, 39, 0, 0, time.UTC)
+	m, path, _, err := Prepare(request(rig, "/w", now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Status, m.Reason = StatusFailed, "--non-behavioral with suites selected"
+	if err := Save(path, m); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{LogPath(path), ReceiptCopyPath(path)} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := RecordMR(path, "kasb-wisp-zuwqr"); err != nil {
+		t.Fatal(err)
+	}
+	// Resubmission strips preflight_run; the fallback still finds the failure.
+	fields := MRFields{Source: src, CommitSHA: headA}
+	if got := Evaluate(rig, fields, headA, now); got.State != GateFailed {
+		t.Fatalf("before retire: %s (%s), want failed", got.State, got.Reason)
+	}
+	retired, err := Retire(path, now)
+	if err != nil || !retired {
+		t.Fatalf("Retire = %v, %v", retired, err)
+	}
+	if got := Evaluate(rig, fields, headA, now); got.State != GateNone {
+		t.Fatalf("after retire: %s (%s), want none", got.State, got.Reason)
+	}
+	for _, p := range []string{path, LogPath(path), ReceiptCopyPath(path), MRSidecarPath(path)} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s still present: %v", p, err)
+		}
+		if prev, _ := filepath.Glob(p + ".*.prev"); len(prev) != 1 {
+			t.Fatalf("%s not kept aside: %v", p, prev)
+		}
+	}
+	// The same head can be async-preflighted again.
+	if _, p2, reused, err := Prepare(request(rig, "/w", now)); err != nil || reused || p2 != path {
+		t.Fatalf("new run after retire: %v reused=%v", err, reused)
+	}
+	// Nothing to retire twice in a row for a fresh (live) run, or a passed one.
+	withProcesses(t, map[int]string{4242: "start-1"})
+	cur, _ := Load(path)
+	running(now)(cur)
+	_ = Save(path, cur)
+	if retired, err := Retire(path, now); err != nil || retired {
+		t.Fatalf("live run retired: %v %v", retired, err)
+	}
+	cur.Status = StatusPassed
+	_ = Save(path, cur)
+	if retired, err := Retire(path, now); err != nil || retired {
+		t.Fatalf("passed run retired: %v %v", retired, err)
+	}
+	if retired, err := Retire(filepath.Join(Dir(rig), "missing--"+headB+".json"), now); err != nil || retired {
+		t.Fatalf("missing marker: %v %v", retired, err)
+	}
+}
+
+// kasb-xeon8: corrected arguments on the same head start a new run; the same
+// arguments are still refused.
+func TestPrepareRetriesAFailedHeadWithNewArguments(t *testing.T) {
+	withDeadPIDs(t)
+	rig := t.TempDir()
+	now := time.Date(2026, 11, 20, 1, 0, 0, 0, time.UTC)
+	m, path, _, err := Prepare(request(rig, "/w", now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Status, m.Reason = StatusFailed, "unknown acceptance test A1"
+	_ = Save(path, m)
+	if _, _, _, err := Prepare(request(rig, "/w", now)); err == nil || !strings.Contains(err.Error(), "already failed") {
+		t.Fatalf("same arguments not refused: %v", err)
+	}
+	fixed := request(rig, "/w", now)
+	fixed.Args = []string{"--requirement", "R1", "--acceptance-test", "A2"}
+	nm, p2, reused, err := Prepare(fixed)
+	if err != nil || reused || p2 != path || nm.Status != StatusStarting {
+		t.Fatalf("corrected arguments: %v reused=%v marker=%+v", err, reused, nm)
+	}
+	if prev, _ := filepath.Glob(path + ".*.prev"); len(prev) != 1 {
+		t.Fatalf("failed marker not kept aside: %v", prev)
+	}
+}

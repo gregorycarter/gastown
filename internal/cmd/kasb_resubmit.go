@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/asyncpreflight"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -143,6 +144,18 @@ func init() {
 		description, err := kasbResubmittedDescription(fresh.MR, head)
 		if err != nil {
 			return err
+		}
+		// kasb-xeon8: the verified receipt now proves this head. Retire a
+		// finished, non-passing async run for the same head, or the gate's
+		// marker fallback would block the reopened MR on the stale failure.
+		if marker, mErr := asyncpreflight.MarkerPath(filepath.Join(town, r.Rig), r.Source, head); mErr == nil {
+			retired, rErr := asyncpreflight.Retire(marker, time.Now())
+			if rErr != nil {
+				return fmt.Errorf("retire the earlier async preflight for %s: %w", head, rErr)
+			}
+			if retired {
+				fmt.Fprintf(cmd.OutOrStdout(), "Retired the earlier async preflight run for %s@%s; the verified receipt proves this head.\n", r.Source, head)
+			}
 		}
 		holdLabel := "needs-rebase"
 		if r.Kind == "same-mr-repair" {
