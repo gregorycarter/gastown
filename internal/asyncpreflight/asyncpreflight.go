@@ -14,7 +14,8 @@
 //     while its MR is pending (active_mr blocks slot reuse) and, as a second
 //     interlock, slot reuse also refuses a sandbox with a running marker.
 //  3. The lander asks `gt mq preflight-gate <rig> <mr>`: pending -> skip the
-//     MR this cycle; passed (receipt for the exact head) -> land; failed, lost
+//     MR this cycle; passed (receipt for the exact head, or carried over to a
+//     rebased head whose change has the same patch-id, kasb-7huzb.41) -> land; failed, lost
 //     or invalid -> MR blocked + needs-repair with a correction reason, which
 //     the existing Kasb same-MR repair sweep re-dispatches to the original
 //     worker.
@@ -285,6 +286,9 @@ type GateResult struct {
 	Reason string `json:"reason"`
 	Marker string `json:"marker,omitempty"`
 	Log    string `json:"log,omitempty"`
+	// Carried is set when a passed receipt was carried over to an identical
+	// rebased change (kasb-7huzb.41).
+	Carried *CarryOver `json:"carried_over,omitempty"`
 	// Run is the loaded marker, when there is one (not serialized).
 	Run *Marker `json:"-"`
 }
@@ -307,6 +311,7 @@ type MRFields struct {
 	CommitSHA  string
 	RunPath    string // preflight_run
 	ReceiptTag string // preflight_receipt
+	Target     string // target (default main)
 }
 
 // ParseMRFields extracts the async preflight fields from an MR description.
@@ -327,6 +332,8 @@ func ParseMRFields(description string) MRFields {
 			f.RunPath = value
 		case "preflight_receipt":
 			f.ReceiptTag = value
+		case "target":
+			f.Target = value
 		}
 	}
 	return f
@@ -403,10 +410,24 @@ func Evaluate(rigPath string, f MRFields, branchHead string, now time.Time) Gate
 	res.Log, res.Run = m.Log, m
 	if m.Source != f.Source || m.Head != f.CommitSHA || !shaRe.MatchString(m.Head) {
 		res.State, res.Reason = GateInvalid, fmt.Sprintf("marker binds %s@%s but the MR is %s@%s", m.Source, short(m.Head), f.Source, short(f.CommitSHA))
+		if m.Source == f.Source && shaRe.MatchString(m.Head) && shaRe.MatchString(f.CommitSHA) {
+			co, r, why := carryOver(rigPath, f, m, f.CommitSHA, branchHead)
+			if co != nil {
+				return carriedResult(res, co, r, m)
+			}
+			res.Reason += "; receipt not carried over: " + why
+		}
 		return res
 	}
 	if branchHead != "" && branchHead != m.Head {
 		res.State, res.Reason = GateMoved, fmt.Sprintf("branch head %s is not the async-preflighted head %s; push no new commits after gt done --async-preflight, or rerun the preflight on the new head and resubmit the same MR", short(branchHead), short(m.Head))
+		if shaRe.MatchString(branchHead) {
+			co, r, why := carryOver(rigPath, f, m, branchHead, branchHead)
+			if co != nil {
+				return carriedResult(res, co, r, m)
+			}
+			res.Reason += "; receipt not carried over: " + why
+		}
 		return res
 	}
 	switch m.Status {
@@ -418,13 +439,9 @@ func Evaluate(rigPath string, f MRFields, branchHead string, now time.Time) Gate
 		res.State, res.Reason = GateLost, fmt.Sprintf("async preflight for %s has no live runner (pid %d gone, reused or hung; last heartbeat %s; timeout %s); log %s", short(m.Head), m.PID, firstNonEmpty(m.HeartbeatAt, m.CreatedAt), m.Timeout(), m.Log)
 		return res
 	case StatusPassed:
-		r, err := ReadReceipt(m.ReceiptCopy)
-		if err != nil {
-			res.State, res.Reason = GateInvalid, fmt.Sprintf("marker says passed but its receipt copy is unreadable: %v", err)
-			return res
-		}
-		if r.Head != m.Head || r.Source != m.Source || !Passing(r.Status) {
-			res.State, res.Reason = GateInvalid, fmt.Sprintf("receipt copy is %s for %s@%s, not a pass for %s@%s", r.Status, r.Source, short(r.Head), m.Source, short(m.Head))
+		r, why := passedReceipt(m)
+		if r == nil {
+			res.State, res.Reason = GateInvalid, why
 			return res
 		}
 		res.State, res.Reason = GatePassed, fmt.Sprintf("preflight %s for %s (receipt %s)", r.Status, short(m.Head), m.ReceiptCopy)

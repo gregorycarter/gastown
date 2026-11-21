@@ -68,7 +68,12 @@ var mqPreflightGateCmd = &cobra.Command{
 	Long: `Report the async preflight state of a merge request (kasb-eel8t.6).
 
   none     the MR was submitted without --async-preflight: land as before (exit 0)
-  passed   a passing receipt for the exact submitted head exists (exit 0)
+  passed   a passing receipt for the exact submitted head exists, or a passing
+           receipt for an earlier head of the same source whose change is
+           identical: git patch-id --verbatim and the changed-path set of
+           merge-base(origin/<target>, head)..head are equal (kasb-7huzb.41).
+           With --apply the carry-over is recorded on the MR
+           (preflight_receipt_carried_from/_to/_patch_id) (exit 0)
   pending  the preflight is still running: skip this MR, do not block (exit 10)
   failed   / lost / invalid / moved: not landable (exit 11); with --apply the MR
            is set blocked + needs-repair with a correction_reason, which the
@@ -93,7 +98,10 @@ other than the preflighted one is "moved".`,
 					"--set-metadata=correction_reason="+reason).Dir(root).WithBeadsDir(beadsDir).WithAutoCommit().Run()
 			},
 			comment: b.AddComment,
-			now:     time.Now,
+			update: func(id, desc string) error {
+				return b.Update(id, beads.UpdateOptions{Description: &desc})
+			},
+			now: time.Now,
 		}
 		res, applied, err := runPreflightGate(filepath.Join(town, rigName), mrID, preflightGateBranchHead, preflightGateApply, deps)
 		if err != nil {
@@ -170,6 +178,7 @@ type preflightGateDeps struct {
 	show    func(id string) (*beads.Issue, error)
 	block   func(id, reason string) error
 	comment func(id, text string) error
+	update  func(id, description string) error // records a receipt carry-over
 	now     func() time.Time
 	stop    func(*asyncpreflight.Marker) bool // default asyncpreflight.Stop
 }
@@ -186,6 +195,17 @@ func runPreflightGate(rigPath, mrID, branchHead string, apply bool, d preflightG
 	}
 	f := asyncpreflight.ParseMRFields(mr.Description)
 	res := asyncpreflight.Evaluate(rigPath, f, branchHead, d.now())
+	if apply && res.Carried != nil && !asyncpreflight.HasCarryFields(mr.Description, res.Carried) {
+		// Record before reporting landable; a failed write fails closed (the
+		// lander skips the MR and asks again next cycle).
+		if d.update == nil {
+			return res, false, fmt.Errorf("recording receipt carry-over on %s: no updater", mrID)
+		}
+		if err := d.update(mrID, asyncpreflight.WithCarryFields(mr.Description, res.Carried)); err != nil {
+			return res, false, fmt.Errorf("recording receipt carry-over on %s: %w", mrID, err)
+		}
+		_ = d.comment(mrID, fmt.Sprintf("preflight-gate %s: %s (kasb-7huzb.41)", d.now().UTC().Format(time.RFC3339), res.Reason))
+	}
 	if apply && res.NeedsFix() && res.Run != nil && asyncpreflight.Live(res.Run, d.now()) {
 		// Superseded (head moved, binding changed): its result can never land.
 		stop := d.stop

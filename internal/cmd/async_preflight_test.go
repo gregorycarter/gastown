@@ -333,3 +333,55 @@ func TestMRStateFromBeads(t *testing.T) {
 		t.Fatal("lookup error treated as known")
 	}
 }
+
+// kasb-7huzb.41: a passed receipt carried over to an identical rebased head is
+// recorded on the MR once; a failed write fails closed.
+func TestPreflightGateRecordsReceiptCarryOver(t *testing.T) {
+	rig, mr, source, show, m := asyncGateFixture(t, asyncpreflight.StatusPassed)
+	raw, _ := json.Marshal(map[string]string{"head_sha": m.Head, "source_bead_id": source.ID, "status": "passed"})
+	if err := os.WriteFile(m.ReceiptCopy, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newHead, orig := strings.Repeat("d", 40), mr.Description
+	old := asyncpreflight.ChangeIdentity
+	t.Cleanup(func() { asyncpreflight.ChangeIdentity = old })
+	asyncpreflight.ChangeIdentity = func(repo, base, head string) (asyncpreflight.ChangeID, error) {
+		if base != "origin/main" {
+			t.Fatalf("base %q", base)
+		}
+		return asyncpreflight.ChangeID{PatchID: strings.Repeat("f", 40), Shape: "100644 100644 M app.py"}, nil
+	}
+	var updates, comments []string
+	updateErr := errors.New("dolt down")
+	deps := preflightGateDeps{show: show, now: time.Now,
+		block:   func(string, string) error { t.Fatal("blocked"); return nil },
+		comment: func(id, text string) error { comments = append(comments, text); return nil },
+		update:  func(id, desc string) error { return updateErr }}
+
+	if _, _, err := runPreflightGate(rig, mr.ID, newHead, true, deps); err == nil || len(comments) != 0 {
+		t.Fatalf("failed record did not fail closed: %v %v", err, comments)
+	}
+	updateErr = nil
+	deps.update = func(id, desc string) error { updates = append(updates, desc); mr.Description = desc; return nil }
+	res, applied, err := runPreflightGate(rig, mr.ID, newHead, true, deps)
+	if err != nil || applied || !res.Landable() || res.Carried == nil {
+		t.Fatalf("res=%+v applied=%v err=%v", res, applied, err)
+	}
+	if len(updates) != 1 || !strings.Contains(updates[0], "preflight_receipt_carried_from: "+m.Head) ||
+		!strings.Contains(updates[0], "preflight_receipt_carried_to: "+newHead) || !strings.Contains(updates[0], "preflight_run: ") {
+		t.Fatalf("updates=%q", updates)
+	}
+	if len(comments) != 1 || !strings.Contains(comments[0], "receipt carried over: "+source.ID+" "+m.Head[:12]+" -> "+newHead[:12]+" (patch-id ffffffffffff)") {
+		t.Fatalf("comments=%q", comments)
+	}
+	// Idempotent: the lander asks again; nothing new is written.
+	if _, _, err := runPreflightGate(rig, mr.ID, newHead, true, deps); err != nil || len(updates) != 1 || len(comments) != 1 {
+		t.Fatalf("re-recorded: %v %d %d", err, len(updates), len(comments))
+	}
+	// Without --apply nothing is written.
+	deps.update = func(string, string) error { t.Fatal("updated without --apply"); return nil }
+	mr.Description = orig
+	if res, _, err := runPreflightGate(rig, mr.ID, newHead, false, deps); err != nil || !res.Landable() {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
