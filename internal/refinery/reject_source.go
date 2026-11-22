@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
@@ -205,6 +206,13 @@ func (m *Manager) recoverRejectedWork(mr *MergeRequest, reason string, opts Reje
 	}
 	townRoot := filepath.Dir(m.rig.Path)
 	if err := reslingRejectedWork(townRoot, mr.IssueID, m.rig.Name, mr.Branch); err != nil {
+		if capacity.IsDispatchHeldExit(err) {
+			// hq-mw7902: the source carries a dispatch-hold label. Skip, not
+			// a failure; releasing the hold is the operator's call.
+			outcome.note("re-sling skipped: source held")
+			logf("[Refinery] Rejection for %s: worker %s dead, source held — not re-slung\n", mr.IssueID, mr.Worker)
+			return
+		}
 		outcome.note("re-sling failed: %v", err)
 		logf("[Refinery] Warning: could not re-sling %s onto %s: %v\n  repair with: gt sling %s %s --branch %s --force\n",
 			mr.IssueID, mr.Branch, err, mr.IssueID, m.rig.Name, mr.Branch)

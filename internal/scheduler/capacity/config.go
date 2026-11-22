@@ -3,7 +3,10 @@
 // resolution) stays in cmd but uses types and pure functions from this package.
 package capacity
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // SchedulerConfig configures the capacity scheduler for polecat dispatch.
 // This is a town-wide setting (not per-rig) because capacity control is host-wide:
@@ -197,6 +200,18 @@ func (c *SchedulerConfig) GetAutoFeedExcludeLabels() []string {
 		return DefaultAutoFeedExcludeLabels
 	}
 	return c.AutoFeedExcludeLabels
+}
+
+// ExitCodeDispatchHeld is the `gt sling` exit code for a bead refused
+// because a dispatch-hold label is on it. Automatic re-sling callers treat it
+// as a skip, not a failure.
+const ExitCodeDispatchHeld = 75
+
+// IsDispatchHeldExit reports whether err is a `gt sling` subprocess exit
+// with ExitCodeDispatchHeld.
+func IsDispatchHeldExit(err error) bool {
+	var exit interface{ ExitCode() int }
+	return errors.As(err, &exit) && exit.ExitCode() == ExitCodeDispatchHeld
 }
 
 // LabelDispatchHold is the explicit temporary dispatch hold. It always holds

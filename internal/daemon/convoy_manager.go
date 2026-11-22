@@ -151,9 +151,9 @@ type ConvoyManager struct {
 	// instead of every scan, and logs only when its state changes.
 	feedBackoff sync.Map // map[string]*convoyFeedBackoff
 
-	// lookupFeedIssue reads a ready issue before feeding it; nil = read the
-	// rig store. Overridable in tests.
-	lookupFeedIssue func(rigName, issueID string) *beadsdk.Issue
+	// lookupFeedIssue reads a ready issue before feeding it (issue, read
+	// failed); nil = read the rig store. Overridable in tests.
+	lookupFeedIssue func(rigName, issueID string) (*beadsdk.Issue, bool)
 	// heldLogged holds the hold label last logged per issue, so a held bead
 	// is logged once per state change instead of every scan (hq-mw7902).
 	heldLogged sync.Map // map[string]string
@@ -234,10 +234,11 @@ func (m *ConvoyManager) clearFeedBackoff(convoyID string) {
 	m.feedBackoff.Delete(convoyID)
 }
 
-// feedIssue reads an issue from the rig's own store before feeding it. An
-// unreadable issue returns nil and is not blocked, so an unavailable store
-// cannot stall the feeder (deferred `gt sling` re-checks holds itself).
-func (m *ConvoyManager) feedIssue(rigName, issueID string) *beadsdk.Issue {
+// feedIssue reads an issue from the rig's own store before feeding it.
+// readFailed is true when the store exists but the read failed. With no
+// store the issue is nil and not failed, so an unavailable store cannot stall
+// the feeder (deferred `gt sling` re-checks holds itself).
+func (m *ConvoyManager) feedIssue(rigName, issueID string) (issue *beadsdk.Issue, readFailed bool) {
 	if m.lookupFeedIssue != nil {
 		return m.lookupFeedIssue(rigName, issueID)
 	}
@@ -245,16 +246,33 @@ func (m *ConvoyManager) feedIssue(rigName, issueID string) *beadsdk.Issue {
 	store := m.stores[rigName]
 	m.storesMu.Unlock()
 	if store == nil {
-		return nil
+		return nil, false
 	}
 
 	ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
 	defer cancel()
 	issue, err := store.GetIssue(ctx, issueID)
 	if err != nil {
-		return nil
+		return nil, true
 	}
-	return issue
+	return issue, false
+}
+
+// pruneHeldLogged forgets held-log state for issues no longer ready in any
+// stranded convoy, so the map does not grow without bound.
+func (m *ConvoyManager) pruneHeldLogged(stranded []strandedConvoyInfo) {
+	ready := make(map[string]bool)
+	for _, c := range stranded {
+		for _, id := range c.ReadyIssues {
+			ready[id] = true
+		}
+	}
+	m.heldLogged.Range(func(key, _ any) bool {
+		if id, ok := key.(string); ok && !ready[id] {
+			m.heldLogged.Delete(key)
+		}
+		return true
+	})
 }
 
 // issueBlocksFeeding reports whether an issue is already claimed by a worker
@@ -702,6 +720,7 @@ func (m *ConvoyManager) scan() {
 	m.recoveryMode.Store(false)
 
 	m.pruneCompletionState(stranded)
+	m.pruneHeldLogged(stranded)
 	var rigs *rigActivity
 	if m.skipInactiveRigs {
 		rigs = newRigActivity(m.townRoot, m.isRigParked)
@@ -1078,8 +1097,17 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 
 		// A bead already hooked or in progress has a worker. `gt sling`
 		// refuses it, so attempting one is pure noise and Dolt load.
-		issue := m.feedIssue(rig, issueID)
+		issue, readFailed := m.feedIssue(rig, issueID)
 		if issueBlocksFeeding(issue) {
+			continue
+		}
+		if !cfgLoaded {
+			schedulerCfg, cfgLoaded = m.schedulerConfig(), true
+		}
+		// In direct dispatch `gt sling` does not re-check holds, so an
+		// issue whose labels cannot be read is not fed (fail closed).
+		if readFailed && schedulerCfg.GetMaxPolecats() <= 0 {
+			m.logger("Convoy %s: cannot read %s to check holds (direct dispatch), skipping", c.ID, issueID)
 			continue
 		}
 
@@ -1087,9 +1115,6 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		// label is held. Skip it without a sling and without counting it as
 		// a feed failure.
 		if issue != nil {
-			if !cfgLoaded {
-				schedulerCfg, cfgLoaded = m.schedulerConfig(), true
-			}
 			if label := schedulerCfg.DispatchHoldLabel(issue.Labels, nil); label != "" {
 				m.noteHeld(c.ID, issueID, label)
 				held++

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -306,7 +307,14 @@ func Redispatch(townRoot, beadID, sourceRig string, maxAttempts int, cooldown ti
 	escalationAgent := resolveAgentForRedispatch(townRoot, targetRig, beadState)
 
 	// Re-dispatch via gt sling
-	err = slingBead(townRoot, beadID, targetRig, escalationAgent)
+	err = slingBeadFn(townRoot, beadID, targetRig, escalationAgent)
+	if capacity.IsDispatchHeldExit(err) {
+		// hq-mw7902: a dispatch-hold label is on the bead. That is a skip,
+		// not a failed attempt; --force never overrides a hold.
+		result.Action = "skipped"
+		result.Message = "bead is held (dispatch-hold label); not re-dispatched"
+		return result
+	}
 	if err != nil {
 		result.Action = "error"
 		result.Error = fmt.Errorf("slinging bead to %s: %w", targetRig, err)
@@ -441,6 +449,9 @@ func resolveAgentForRedispatch(townRoot, targetRig string, beadState *BeadRedisp
 	}
 	return ""
 }
+
+// slingBeadFn is a seam for tests.
+var slingBeadFn = slingBead
 
 // slingBead dispatches a bead to a rig via gt sling.
 // If agent is non-empty, passes --agent <agent> to override the rig's default.

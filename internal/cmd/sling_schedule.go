@@ -61,10 +61,25 @@ type ScheduleOptions struct {
 	Agent        string   // Agent override (e.g., "gemini", "codex")
 	HookRawBead  bool     // Hook raw bead without default formula
 	Ralph        bool     // Ralph Wiggum loop mode
-	// OverrideHold lets an explicit `gt sling --force` of a single bead queue
-	// it despite dispatch-hold labels. The overridden labels are recorded on
-	// the context; epic/convoy/auto-feed scheduling never sets this.
+	// OverrideHold (`gt sling --override-hold`, single bead only) queues a
+	// bead despite dispatch-hold labels. The overridden labels are recorded on
+	// the context. --force does not imply it; batch, epic, convoy and
+	// auto-feed scheduling never set it.
 	OverrideHold bool
+}
+
+// dispatchHeldError is returned when a bead is refused because a hold label
+// is on it. `gt sling` exits with capacity.ExitCodeDispatchHeld so callers
+// that re-sling automatically (Deacon redispatch, Refinery reject) can treat
+// it as a skip rather than a failure.
+type dispatchHeldError struct {
+	beadID string
+	labels []string
+}
+
+func (e *dispatchHeldError) Error() string {
+	return fmt.Sprintf("bead %s is held: %s (remove the label to dispatch, or use --override-hold)",
+		e.beadID, strings.Join(e.labels, ","))
 }
 
 // dispatchHoldLabels returns the labels that hold a bead from dispatch
@@ -125,16 +140,14 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	}
 
 	// Dispatch holds (hq-mw7902): a bead carrying an exclude label or
-	// dispatch:hold is not queued. An explicit single-bead --force records
-	// the labels it overrides so scheduler dispatch honours only those.
+	// dispatch:hold is not queued. Only --override-hold records the labels it
+	// overrides, so scheduler dispatch honours exactly those.
 	held := dispatchHoldLabels(townRoot, info.Labels)
-	if len(held) > 0 && !opts.OverrideHold {
-		return fmt.Errorf("bead %s is held: %s (remove the label to dispatch, or use --force to override)",
-			beadID, strings.Join(held, ","))
-	}
 
 	if existingCtx != nil {
-		if len(held) > 0 && existingFields != nil && !opts.DryRun {
+		// A recovery context (same-MR repair, dependency resume) has an
+		// immutable identity checked every tick; never write into it.
+		if len(held) > 0 && opts.OverrideHold && existingFields != nil && !existingFields.IsRecovery() && !opts.DryRun {
 			existingFields.HoldOverride = strings.Join(held, ",")
 			if err := rigBeads.UpdateSlingContextFields(existingCtx.ID, existingFields); err != nil {
 				return fmt.Errorf("recording hold override on %s: %w", existingCtx.ID, err)
@@ -146,6 +159,10 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		fmt.Printf("%s Bead %s is already scheduled (context: %s), no-op\n",
 			style.Dim.Render("○"), beadID, existingCtx.ID)
 		return nil
+	}
+
+	if len(held) > 0 && !opts.OverrideHold {
+		return &dispatchHeldError{beadID: beadID, labels: held}
 	}
 
 	// Guard against scheduling closed/tombstone beads (defense-in-depth, hq-ki2).
@@ -290,7 +307,6 @@ func runBatchSchedule(beadIDs []string, rigName, townRoot string) error {
 			ResumeBranch: slingResumeBranch,
 			DryRun:       false,
 			Force:        slingForce,
-			OverrideHold: slingForce,
 			NoMerge:      slingNoMerge,
 			ReviewOnly:   slingReviewOnly,
 			Account:      slingAccount,

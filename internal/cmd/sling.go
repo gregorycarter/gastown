@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/witness"
@@ -122,6 +124,7 @@ var (
 	// Flags migrated for polecat spawning (used by sling for work assignment)
 	slingCreate        bool   // --create: create polecat if it doesn't exist
 	slingForce         bool   // --force: force spawn even if polecat has unread mail
+	slingOverrideHold  bool   // --override-hold: queue a bead despite dispatch-hold labels (hq-mw7902)
 	slingAccount       string // --account: Claude Code account handle to use
 	slingAgent         string // --agent: override runtime agent for this sling/spawn
 	slingNoConvoy      bool   // --no-convoy: skip auto-convoy creation
@@ -151,6 +154,7 @@ func init() {
 	// Flags for polecat spawning (when target is a rig)
 	slingCmd.Flags().BoolVar(&slingCreate, "create", false, "Create polecat if it doesn't exist")
 	slingCmd.Flags().BoolVar(&slingForce, "force", false, "Force spawn even if polecat has unread mail")
+	slingCmd.Flags().BoolVar(&slingOverrideHold, "override-hold", false, "Queue a single bead despite dispatch-hold labels (dispatch:hold, scheduler.autofeed_exclude_labels); the overridden labels are recorded on its context")
 	slingCmd.Flags().StringVar(&slingAccount, "account", "", "Claude Code account handle to use")
 	slingCmd.Flags().StringVar(&slingAgent, "agent", "", "Override agent/runtime for this sling (e.g., claude, gemini, codex, or custom alias)")
 	slingCmd.Flags().BoolVar(&slingNoConvoy, "no-convoy", false, "Skip auto-convoy creation for single-issue sling")
@@ -198,6 +202,15 @@ func runSlingRespawnReset(_ *cobra.Command, args []string) error {
 }
 
 func runSling(cmd *cobra.Command, args []string) (retErr error) {
+	// A held bead exits with a distinct code so automatic re-sling callers
+	// can skip it (hq-mw7902). Runs last, after telemetry saw the error.
+	defer func() {
+		var held *dispatchHeldError
+		if errors.As(retErr, &held) {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", held)
+			retErr = NewSilentExit(capacity.ExitCodeDispatchHeld)
+		}
+	}()
 	ctx := context.Background()
 	if cmd != nil {
 		ctx = cmd.Context()
@@ -390,7 +403,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 				Owned:        slingOwned,
 				DryRun:       slingDryRun,
 				Force:        slingForce,
-				OverrideHold: slingForce,
+				OverrideHold: slingOverrideHold,
 				NoMerge:      slingNoMerge,
 				ReviewOnly:   slingReviewOnly,
 				Account:      slingAccount,
@@ -432,7 +445,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			Owned:        slingOwned,
 			DryRun:       slingDryRun,
 			Force:        slingForce,
-			OverrideHold: slingForce,
+			OverrideHold: slingOverrideHold,
 			NoMerge:      slingNoMerge,
 			ReviewOnly:   slingReviewOnly,
 			Account:      slingAccount,
@@ -478,7 +491,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 				Owned:        slingOwned,
 				DryRun:       slingDryRun,
 				Force:        slingForce,
-				OverrideHold: slingForce,
+				OverrideHold: slingOverrideHold,
 				NoMerge:      slingNoMerge,
 				ReviewOnly:   slingReviewOnly,
 				Account:      slingAccount,

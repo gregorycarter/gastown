@@ -14,7 +14,11 @@ import (
 
 // newHoldFeedManager builds a ConvoyManager whose `gt sling` is a mock that
 // records its arguments, and whose issue reads come from issues.
-func newHoldFeedManager(t *testing.T, issues map[string]*beadsdk.Issue, settingsJSON string) (*ConvoyManager, string, *[]string) {
+func newHoldFeedManager(t *testing.T, issues map[string]*beadsdk.Issue, settingsJSON string, unreadableIDs ...string) (*ConvoyManager, string, *[]string) {
+	unreadable := map[string]bool{}
+	for _, id := range unreadableIDs {
+		unreadable[id] = true
+	}
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
@@ -47,7 +51,12 @@ func newHoldFeedManager(t *testing.T, issues map[string]*beadsdk.Issue, settings
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
-	m.lookupFeedIssue = func(_ string, id string) *beadsdk.Issue { return issues[id] }
+	m.lookupFeedIssue = func(_ string, id string) (*beadsdk.Issue, bool) {
+		if issue, ok := issues[id]; ok {
+			return issue, false
+		}
+		return nil, unreadable[id]
+	}
 	return m, slingLog, &logged
 }
 
@@ -150,5 +159,36 @@ func TestFeedFirstReady_UsesConfiguredExcludeLabels(t *testing.T) {
 	// live-validation is not in this town's configured list, so it feeds.
 	if !strings.Contains(got, "sling gt-live gt") {
 		t.Fatalf("bead outside the configured list was not fed: %q", got)
+	}
+}
+
+// Direct dispatch does not re-check holds in `gt sling`, so an issue whose
+// labels cannot be read is not fed there; deferred dispatch still feeds it
+// (scheduleBead re-checks).
+func TestFeedFirstReady_UnreadableIssueFailsClosedInDirectMode(t *testing.T) {
+	m, slingLog, _ := newHoldFeedManager(t, map[string]*beadsdk.Issue{}, "", "gt-unread")
+	m.feedFirstReady(strandedConvoyInfo{ID: "hq-cv4", ReadyIssues: []string{"gt-unread"}})
+	if got := readSlingLog(t, slingLog); got != "" {
+		t.Fatalf("unreadable issue fed in direct mode: %q", got)
+	}
+
+	deferred := `{"type":"town-settings","version":1,"scheduler":{"max_polecats":7}}`
+	m, slingLog, _ = newHoldFeedManager(t, map[string]*beadsdk.Issue{}, deferred, "gt-unread")
+	m.feedFirstReady(strandedConvoyInfo{ID: "hq-cv5", ReadyIssues: []string{"gt-unread"}})
+	if got := readSlingLog(t, slingLog); !strings.Contains(got, "sling gt-unread gt") {
+		t.Fatalf("unreadable issue not fed in deferred mode: %q", got)
+	}
+}
+
+func TestPruneHeldLogged(t *testing.T) {
+	m := &ConvoyManager{}
+	m.heldLogged.Store("gt-gone", "dispatch:hold")
+	m.heldLogged.Store("gt-still", "dispatch:hold")
+	m.pruneHeldLogged([]strandedConvoyInfo{{ID: "hq-cv1", ReadyIssues: []string{"gt-still"}}})
+	if _, ok := m.heldLogged.Load("gt-gone"); ok {
+		t.Error("held-log entry for an issue no longer ready was kept")
+	}
+	if _, ok := m.heldLogged.Load("gt-still"); !ok {
+		t.Error("held-log entry for a still-ready issue was dropped")
 	}
 }

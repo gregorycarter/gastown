@@ -245,6 +245,7 @@ func buildSchedulerDispatchPlan(townRoot string, batchOverride int, cleanup bool
 				return nil, blockedErr
 			}
 		}
+		pruneStaleHoldOverrides(assessments)
 	}
 
 	snapshot, err := polecatCapacitySnapshotForTownNoCleanup(townRoot)
@@ -330,6 +331,7 @@ func runSchedulerQueueHygiene(townRoot string, dryRun bool) error {
 		return fmt.Errorf("assessing scheduled contexts: %w", err)
 	}
 	sweepOrphanWispBlockers(townRoot, assessments, false)
+	pruneStaleHoldOverrides(assessments)
 	return nil
 }
 
@@ -1100,9 +1102,8 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 			if resumeErr != nil {
 				candidate.recoveryError = resumeErr.Error()
 			}
-		} else {
-			applyDispatchHold(&candidate, schedulerCfg)
 		}
+		applyDispatchHold(&candidate, schedulerCfg)
 		assessments = append(assessments, candidate)
 	}
 
@@ -1126,19 +1127,58 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 	return assessments, blockedErr
 }
 
-// applyDispatchHold marks a fresh context held when its work bead now carries
-// a dispatch-hold label it was not explicitly queued over (hq-mw7902). Labels
+// applyDispatchHold marks a context held when its work bead now carries a
+// dispatch-hold label it was not explicitly queued over (hq-mw7902). Labels
 // are re-read every tick, so a hold added after the context was queued still
 // stops it. Held is not ready, and not a dispatch failure: no counter, no
-// respawn. Recovery contexts keep their own hold rule (mqRepairHeld).
+// respawn. Only same-MR repair contexts (ResumeMR) are exempt: they keep
+// their own hold rule (mqRepairHeld). Dependency resumes and every other
+// context apply the shared predicate.
 func applyDispatchHold(a *scheduledContextAssessment, cfg *capacity.SchedulerConfig) {
-	if a == nil || !a.found || a.fields == nil || a.fields.IsRecovery() {
+	if a == nil || !a.found || a.fields == nil || a.fields.ResumeMR != "" {
 		return
 	}
 	if label := cfg.DispatchHoldLabel(a.info.Labels, a.fields.HoldOverrideLabels()); label != "" {
 		a.held = label
 		a.ready = false
 	}
+}
+
+// pruneStaleHoldOverrides drops recorded hold overrides whose label is no
+// longer on the work bead, so re-adding that hold stops the context again
+// (hq-mw7902). Called only on the dispatch and hygiene write paths. Best
+// effort: a failed write keeps the old override until the next tick.
+func pruneStaleHoldOverrides(assessments []scheduledContextAssessment) {
+	for i := range assessments {
+		a := &assessments[i]
+		if !a.found || a.fields == nil || a.fields.HoldOverride == "" || a.context.issue == nil {
+			continue
+		}
+		pruned, changed := prunedHoldOverride(a.fields.HoldOverrideLabels(), a.info.Labels)
+		if !changed {
+			continue
+		}
+		a.fields.HoldOverride = pruned
+		if err := beadsForContextRecord(a.context).UpdateSlingContextFields(a.context.issue.ID, a.fields); err != nil {
+			fmt.Fprintf(os.Stderr, "%s could not prune hold override on %s: %v\n",
+				style.Dim.Render("○"), a.context.issue.ID, err)
+		}
+	}
+}
+
+// prunedHoldOverride keeps the override labels still present on the bead.
+func prunedHoldOverride(override, labels []string) (string, bool) {
+	present := make(map[string]bool, len(labels))
+	for _, l := range labels {
+		present[l] = true
+	}
+	var kept []string
+	for _, l := range override {
+		if present[l] {
+			kept = append(kept, l)
+		}
+	}
+	return strings.Join(kept, ","), len(kept) != len(override)
 }
 
 // Count each preserved source once per prerequisite, including indirect chains.

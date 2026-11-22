@@ -531,6 +531,8 @@ func sameMQResumeContext(a, b *capacity.SlingContextFields) bool {
 	actual.DispatchFailures, expected.DispatchFailures = 0, 0
 	actual.LastFailure, expected.LastFailure = "", ""
 	actual.LastFailureAt, expected.LastFailureAt = "", ""
+	// A hold override is scheduling state, not recovery identity (hq-mw7902).
+	actual.HoldOverride, expected.HoldOverride = "", ""
 	return actual == expected
 }
 
