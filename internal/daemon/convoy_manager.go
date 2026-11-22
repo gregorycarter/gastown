@@ -17,7 +17,9 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/convoy"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -149,6 +151,13 @@ type ConvoyManager struct {
 	// instead of every scan, and logs only when its state changes.
 	feedBackoff sync.Map // map[string]*convoyFeedBackoff
 
+	// lookupFeedIssue reads a ready issue before feeding it; nil = read the
+	// rig store. Overridable in tests.
+	lookupFeedIssue func(rigName, issueID string) *beadsdk.Issue
+	// heldLogged holds the hold label last logged per issue, so a held bead
+	// is logged once per state change instead of every scan (hq-mw7902).
+	heldLogged sync.Map // map[string]string
+
 	// completionSweep is the fallback completion-check interval for stranded
 	// convoys with open tracked issues. <= 0 checks on every scan (legacy).
 	completionSweep time.Duration
@@ -225,21 +234,33 @@ func (m *ConvoyManager) clearFeedBackoff(convoyID string) {
 	m.feedBackoff.Delete(convoyID)
 }
 
-// issueBlocksFeeding reports whether an issue is already claimed by a worker
-// and must not be slung again. Reads the rig's own store; an unreadable issue
-// is not blocked, so an unavailable store cannot stall the feeder.
-func (m *ConvoyManager) issueBlocksFeeding(rigName, issueID string) bool {
+// feedIssue reads an issue from the rig's own store before feeding it. An
+// unreadable issue returns nil and is not blocked, so an unavailable store
+// cannot stall the feeder (deferred `gt sling` re-checks holds itself).
+func (m *ConvoyManager) feedIssue(rigName, issueID string) *beadsdk.Issue {
+	if m.lookupFeedIssue != nil {
+		return m.lookupFeedIssue(rigName, issueID)
+	}
 	m.storesMu.Lock()
 	store := m.stores[rigName]
 	m.storesMu.Unlock()
 	if store == nil {
-		return false
+		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
 	defer cancel()
 	issue, err := store.GetIssue(ctx, issueID)
-	if err != nil || issue == nil {
+	if err != nil {
+		return nil
+	}
+	return issue
+}
+
+// issueBlocksFeeding reports whether an issue is already claimed by a worker
+// and must not be slung again.
+func issueBlocksFeeding(issue *beadsdk.Issue) bool {
+	if issue == nil {
 		return false
 	}
 	switch string(issue.Status) {
@@ -247,6 +268,25 @@ func (m *ConvoyManager) issueBlocksFeeding(rigName, issueID string) bool {
 		return true
 	}
 	return false
+}
+
+// schedulerConfig loads the town scheduler config for hold checks; nil (the
+// defaults) when it cannot be read.
+func (m *ConvoyManager) schedulerConfig() *capacity.SchedulerConfig {
+	settings, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(m.townRoot))
+	if err != nil || settings == nil {
+		return nil
+	}
+	return settings.Scheduler
+}
+
+// noteHeld logs a held issue once per hold label (hq-mw7902).
+func (m *ConvoyManager) noteHeld(convoyID, issueID, label string) {
+	if prev, ok := m.heldLogged.Load(issueID); ok && prev.(string) == label {
+		return
+	}
+	m.heldLogged.Store(issueID, label)
+	m.logger("Convoy %s: skipping %s, held: %s", convoyID, issueID, label)
 }
 
 // NewConvoyManager creates a new convoy manager.
@@ -1004,7 +1044,8 @@ func (m *ConvoyManager) findStranded() ([]strandedConvoyInfo, error) {
 // feedFirstReady iterates through all ready issues in a stranded convoy and
 // dispatches the first one that can be successfully slung. Issues are skipped
 // (with logging) when the prefix is unresolvable, the rig has no route, the
-// rig is parked, or the sling command fails. This ensures convoys progress
+// rig is parked, the issue is held (dispatch:hold or a scheduler exclude
+// label, logged once), or the sling command fails. This ensures convoys progress
 // even when some issues target unavailable rigs.
 func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 	if len(c.ReadyIssues) == 0 {
@@ -1014,6 +1055,9 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		return
 	}
 
+	var schedulerCfg *capacity.SchedulerConfig
+	cfgLoaded := false
+	held := 0
 	for _, issueID := range c.ReadyIssues {
 		prefix := beads.ExtractPrefix(issueID)
 		if prefix == "" {
@@ -1034,9 +1078,25 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 
 		// A bead already hooked or in progress has a worker. `gt sling`
 		// refuses it, so attempting one is pure noise and Dolt load.
-		if m.issueBlocksFeeding(rig, issueID) {
+		issue := m.feedIssue(rig, issueID)
+		if issueBlocksFeeding(issue) {
 			continue
 		}
+
+		// hq-mw7902: a bead carrying dispatch:hold or a scheduler exclude
+		// label is held. Skip it without a sling and without counting it as
+		// a feed failure.
+		if issue != nil {
+			if !cfgLoaded {
+				schedulerCfg, cfgLoaded = m.schedulerConfig(), true
+			}
+			if label := schedulerCfg.DispatchHoldLabel(issue.Labels, nil); label != "" {
+				m.noteHeld(c.ID, issueID, label)
+				held++
+				continue
+			}
+		}
+		m.heldLogged.Delete(issueID)
 
 		m.logger("Convoy %s: feeding %s to %s", c.ID, issueID, rig)
 
@@ -1059,6 +1119,11 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		return // Successfully dispatched one issue
 	}
 
+	if held == len(c.ReadyIssues) {
+		// Every ready issue is held: waiting on a hold is not a failure, so
+		// no backoff; the feed resumes on the first scan after release.
+		return
+	}
 	m.recordFeedFailure(c.ID, fmt.Sprintf("no dispatchable issues (all %d skipped)", len(c.ReadyIssues)))
 }
 

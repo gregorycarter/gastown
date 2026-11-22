@@ -720,6 +720,9 @@ type scheduledContextAssessment struct {
 	// rigHold is "rig parked"/"rig docked" when the target rig takes no
 	// work; its work bead is not read at all.
 	rigHold string
+	// held is the dispatch-hold label (autofeed exclude list or
+	// dispatch:hold) on the work bead now; "" otherwise (hq-mw7902).
+	held string
 }
 
 // pauseReason explains, in one short phrase, why `gt scheduler list` shows a
@@ -737,6 +740,9 @@ func (a scheduledContextAssessment) pauseReason() string {
 	}
 	if a.rigHold != "" {
 		return a.rigHold
+	}
+	if a.held != "" {
+		return "held: " + a.held
 	}
 	if a.recoveryError != "" {
 		return "recovery: " + a.recoveryError
@@ -1058,6 +1064,11 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 		blockedWorkIDs[id] = true
 	}
 
+	schedulerCfg, cfgErr := loadSchedulerConfig(townRoot)
+	if cfgErr != nil {
+		schedulerCfg = nil // default deny-list
+	}
+
 	seenWork := make(map[string]bool)
 	assessments := make([]scheduledContextAssessment, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -1089,6 +1100,8 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 			if resumeErr != nil {
 				candidate.recoveryError = resumeErr.Error()
 			}
+		} else {
+			applyDispatchHold(&candidate, schedulerCfg)
 		}
 		assessments = append(assessments, candidate)
 	}
@@ -1111,6 +1124,21 @@ func assessScheduledContexts(townRoot string) ([]scheduledContextAssessment, err
 	sortScheduledContextAssessments(assessments)
 
 	return assessments, blockedErr
+}
+
+// applyDispatchHold marks a fresh context held when its work bead now carries
+// a dispatch-hold label it was not explicitly queued over (hq-mw7902). Labels
+// are re-read every tick, so a hold added after the context was queued still
+// stops it. Held is not ready, and not a dispatch failure: no counter, no
+// respawn. Recovery contexts keep their own hold rule (mqRepairHeld).
+func applyDispatchHold(a *scheduledContextAssessment, cfg *capacity.SchedulerConfig) {
+	if a == nil || !a.found || a.fields == nil || a.fields.IsRecovery() {
+		return
+	}
+	if label := cfg.DispatchHoldLabel(a.info.Labels, a.fields.HoldOverrideLabels()); label != "" {
+		a.held = label
+		a.ready = false
+	}
 }
 
 // Count each preserved source once per prerequisite, including indirect chains.

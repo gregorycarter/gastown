@@ -411,7 +411,7 @@ func autoFeedScheduler(townRoot string, floorOverride int, dryRun bool) (*autoFe
 	result.OpsWorking = countWorkingOpsBeads(townRoot)
 	policy := autoFeedPolicy{
 		AllowLabels:   schedulerCfg.GetAutoFeedLabels(),
-		ExcludeLabels: schedulerCfg.GetAutoFeedExcludeLabels(),
+		ExcludeLabels: schedulerCfg.DispatchExcludeLabels(),
 		MaxOpsSlots:   schedulerCfg.GetAutoFeedMaxOpsSlots(),
 		OpsWorking:    result.OpsWorking,
 	}

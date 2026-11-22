@@ -53,6 +53,11 @@ type SlingContextFields struct {
 	// dispatch-failure counter decays when this is old: three unrelated
 	// failures spread over a day must not add up to a circuit break.
 	LastFailureAt string `json:"last_failure_at,omitempty"`
+	// HoldOverride is the comma-separated hold labels an explicit
+	// `gt sling --force` overrode when it queued this context. Scheduler
+	// dispatch still refuses any other hold label, including one added after
+	// the context was queued (hq-mw7902). A string keeps the struct comparable.
+	HoldOverride string `json:"hold_override,omitempty"`
 }
 
 // LabelSlingContext is the label used to identify sling context beads.
@@ -297,4 +302,19 @@ func splitVars(vars string) []string {
 // IsRecovery separates preserved-work dispatch from fresh slings.
 func (f *SlingContextFields) IsRecovery() bool {
 	return f != nil && (f.ResumeMR != "" || f.ResumeDependency)
+}
+
+// HoldOverrideLabels returns the hold labels this context was explicitly
+// queued over (see HoldOverride).
+func (f *SlingContextFields) HoldOverrideLabels() []string {
+	if f == nil || strings.TrimSpace(f.HoldOverride) == "" {
+		return nil
+	}
+	var labels []string
+	for _, l := range strings.Split(f.HoldOverride, ",") {
+		if l = strings.TrimSpace(l); l != "" {
+			labels = append(labels, l)
+		}
+	}
+	return labels
 }

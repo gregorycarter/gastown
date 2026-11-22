@@ -199,6 +199,60 @@ func (c *SchedulerConfig) GetAutoFeedExcludeLabels() []string {
 	return c.AutoFeedExcludeLabels
 }
 
+// LabelDispatchHold is the explicit temporary dispatch hold. It always holds
+// a bead, even when autofeed_exclude_labels is configured without it.
+const LabelDispatchHold = "dispatch:hold"
+
+// DispatchExcludeLabels is the auto-feed deny-list plus dispatch:hold.
+func (c *SchedulerConfig) DispatchExcludeLabels() []string {
+	labels := c.GetAutoFeedExcludeLabels()
+	for _, l := range labels {
+		if l == LabelDispatchHold {
+			return labels
+		}
+	}
+	return append(append([]string{}, labels...), LabelDispatchHold)
+}
+
+// DispatchHoldLabels returns the labels that hold a bead from automatic
+// dispatch: the configured auto-feed deny-list plus dispatch:hold. This is the
+// one predicate shared by the auto-feeder, the convoy feed, deferred `gt sling`
+// and scheduler dispatch of existing contexts (hq-mw7902). Order follows labels.
+func (c *SchedulerConfig) DispatchHoldLabels(labels []string) []string {
+	if len(labels) == 0 {
+		return nil
+	}
+	exclude := map[string]bool{}
+	for _, l := range c.DispatchExcludeLabels() {
+		exclude[l] = true
+	}
+	var held []string
+	for _, l := range labels {
+		if exclude[l] {
+			held = append(held, l)
+		}
+	}
+	return held
+}
+
+// DispatchHoldLabel returns the first hold label from DispatchHoldLabels
+// that is not in overridden, or "" when nothing holds the bead.
+func (c *SchedulerConfig) DispatchHoldLabel(labels, overridden []string) string {
+	for _, l := range c.DispatchHoldLabels(labels) {
+		skip := false
+		for _, o := range overridden {
+			if o == l {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			return l
+		}
+	}
+	return ""
+}
+
 // GetAutoFeedMaxOpsSlots returns the ops-slot cap or the default (1).
 // Negative values are clamped to 0 (no ops work auto-fed).
 func (c *SchedulerConfig) GetAutoFeedMaxOpsSlots() int {
