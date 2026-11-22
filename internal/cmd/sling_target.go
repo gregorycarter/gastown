@@ -44,6 +44,17 @@ func resolveTargetAgent(target string) (agentID string, pane string, hookRoot st
 	return agentID, pane, hookRoot, nil
 }
 
+// resolveTargetAgentID converts a target spec to its agent ID without tmux,
+// so hook bookkeeping (gt unhook/unsling, gt hook detach) works for an agent
+// whose session is dead (hq-ee6vdf).
+func resolveTargetAgentID(target string) (string, error) {
+	sessionName, err := resolveRoleToSession(target)
+	if err != nil {
+		return "", err
+	}
+	return sessionToAgentID(sessionName), nil
+}
+
 // sessionToAgentID converts a session name to agent ID format.
 // Uses session.ParseSessionName for consistent parsing across the codebase.
 func sessionToAgentID(sessionName string) string {

@@ -611,6 +611,89 @@ func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool,
 	return true, nil
 }
 
+// ClearAgentHookBeadIfMatches clears the legacy description hook_bead only
+// when it still names expectedHook (hq-ee6vdf). It returns true when a clear
+// was written. Unhook and stale-hook repair use it; a concurrent re-hook to a
+// different bead is left alone.
+func (b *Beads) ClearAgentHookBeadIfMatches(id string, expectedHook string) (bool, error) {
+	if target := b.agentBeadTarget(); target != b {
+		return target.ClearAgentHookBeadIfMatches(id, expectedHook)
+	}
+
+	id = strings.TrimSpace(id)
+	expectedHook = strings.TrimSpace(expectedHook)
+	if id == "" || expectedHook == "" {
+		return false, nil
+	}
+
+	fl, lockErr := b.lockAgentBead(id)
+	if lockErr != nil {
+		return false, fmt.Errorf("locking agent bead %s: %w", id, lockErr)
+	}
+	defer func() { _ = fl.Unlock() }()
+
+	issue, err := b.Show(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !IsAgentBead(issue) {
+		return false, fmt.Errorf("%s is not an agent bead", id)
+	}
+
+	fields := ParseAgentFields(issue.Description)
+	if strings.TrimSpace(fields.HookBead) != expectedHook {
+		return false, nil
+	}
+
+	fields.HookBead = ""
+	description := FormatAgentDescription(issue.Title, fields)
+	if err := b.Update(id, UpdateOptions{Description: &description}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// DescriptionHookStale reports whether an agent's legacy description
+// hook_bead no longer names that agent's work (hq-ee6vdf). Since hq-l6mm5 the
+// work bead (status + assignee) is the hook record, and nothing cleared the
+// description line on unhook, reassign or parking, so check-recovery, nuke
+// and the witness kept seeing work on an empty hook. The line is stale when
+// the named bead is live but assigned to a different agent or to nobody.
+//
+// Not stale (the caller's existing handling applies): an unreadable or
+// terminal bead, or an agent still spawning (its hook is written before the
+// work bead is assigned).
+func DescriptionHookStale(fields *AgentFields, hookIssue *Issue, agent string) bool {
+	if fields == nil || hookIssue == nil || strings.TrimSpace(agent) == "" {
+		return false
+	}
+	if fields.AgentState == string(AgentStateSpawning) {
+		return false
+	}
+	if IssueStatus(hookIssue.Status).IsTerminal() {
+		return false
+	}
+	return !SameAgentAddress(hookIssue.Assignee, agent)
+}
+
+// SameAgentAddress compares two agent addresses, treating the crew/polecats
+// segment as optional ("rig/polecats/name" == "rig/name").
+func SameAgentAddress(a, b string) bool {
+	norm := func(s string) string {
+		s = strings.TrimSpace(s)
+		parts := strings.Split(s, "/")
+		if len(parts) == 3 && (parts[1] == "polecats" || parts[1] == "crew") {
+			return parts[0] + "/" + parts[2]
+		}
+		return s
+	}
+	a, b = norm(a), norm(b)
+	return a != "" && a == b
+}
+
 // ClearAgentPushFailedIfMatches clears only a proven stale push failure. The
 // caller must first prove terminal work, no live session/MR and preserved Git
 // changes. Comparing the complete observed agent fields under the agent lock

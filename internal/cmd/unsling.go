@@ -81,7 +81,8 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	var agentID string
 	var err error
 	if targetAgent != "" {
-		agentID, _, _, err = resolveTargetAgent(targetAgent)
+		// Bookkeeping only: no pane needed, so a dead session is fine.
+		agentID, err = resolveTargetAgentIDFn(targetAgent)
 		if err != nil {
 			return fmt.Errorf("resolving target agent: %w", err)
 		}
@@ -164,6 +165,9 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 		// still assigned to this agent (e.g., hook_bead was cleared but bead status
 		// wasn't updated). Clean them up so gt hook and gt unsling stay consistent.
 		cleaned := cleanStaleHookedBeads(cmd, b, agentID, targetBeadID, townRoot, beadsPath, dryRun)
+		if clearStaleAgentDescriptionHook(cmd, b, townRoot, beadsPath, agentBeadID, agentID, targetBeadID, dryRun) {
+			cleaned = true
+		}
 		if !cleaned {
 			if targetAgent != "" {
 				fmt.Printf("%s No work hooked for %s\n", style.Dim.Render("ℹ"), agentID)
@@ -215,7 +219,12 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 		return nil
 	}
 
-	// No ClearHookBead call needed — agent bead hook slot is no longer maintained (hq-l6mm5).
+	// The hook slot column is no longer maintained (hq-l6mm5), but the
+	// description hook_bead line is still read by check-recovery, nuke and
+	// the witness. Clear it when it names the bead being unhooked (hq-ee6vdf).
+	if _, err := b.ClearAgentHookBeadIfMatches(agentBeadID, hookedBeadID); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: couldn't clear hook_bead on %s: %v\n", agentBeadID, err)
+	}
 
 	// Update hooked bead status from "hooked" back to "open".
 	// Previously, only the agent's hook slot was cleared but the bead itself stayed
@@ -263,6 +272,53 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	fmt.Printf("  Agent %s hook cleared (was: %s)\n", agentID, hookedBeadID)
 
 	return nil
+}
+
+// resolveTargetAgentIDFn is a seam for tests.
+var resolveTargetAgentIDFn = resolveTargetAgentID
+
+// clearStaleAgentDescriptionHook clears the agent's description hook_bead
+// when the hook record is empty (hq-ee6vdf): nothing is hooked to the agent,
+// but the legacy line still names a bead. It clears the line when that bead
+// was named explicitly (gt hook detach <bead> <agent>), is terminal, or is
+// live but assigned elsewhere or to nobody. An unreadable bead is left alone.
+// The named bead itself is never modified. Returns true when it cleared (or,
+// in dry-run, would clear) the line.
+func clearStaleAgentDescriptionHook(cmd *cobra.Command, b *beads.Beads, townRoot, beadsPath, agentBeadID, agentID, targetBeadID string, dryRun bool) bool {
+	_, fields, err := b.GetAgentBead(agentBeadID)
+	if err != nil || fields == nil {
+		return false
+	}
+	hook := strings.TrimSpace(fields.HookBead)
+	if hook == "" || (targetBeadID != "" && hook != targetBeadID) {
+		return false
+	}
+	if targetBeadID == "" {
+		hookB := b
+		if hookPath := beads.ResolveHookDir(townRoot, hook, beadsPath); hookPath != beadsPath {
+			hookB = beads.New(hookPath)
+		}
+		issue, showErr := hookB.Show(hook)
+		if showErr != nil || issue == nil {
+			return false
+		}
+		if !beads.IssueStatus(issue.Status).IsTerminal() && !beads.DescriptionHookStale(fields, issue, agentID) {
+			return false
+		}
+	}
+	if dryRun {
+		fmt.Printf("Would clear stale hook_bead %s from %s\n", hook, agentBeadID)
+		return true
+	}
+	cleared, err := b.ClearAgentHookBeadIfMatches(agentBeadID, hook)
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: couldn't clear stale hook_bead on %s: %v\n", agentBeadID, err)
+		return false
+	}
+	if cleared {
+		fmt.Printf("%s Cleared stale hook_bead %s from %s (nothing hooked)\n", style.Bold.Render("✓"), hook, agentID)
+	}
+	return cleared
 }
 
 // cleanStaleHookedBeads finds and cleans up beads with status "hooked" assigned to

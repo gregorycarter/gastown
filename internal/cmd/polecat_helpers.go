@@ -133,8 +133,9 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 		if infoErr == nil && polecatInfo != nil {
 			currentIssue = polecatInfo.Issue
 		}
+		hookBead, staleHook := agentHookBead(bd, agentIssue, fields, fmt.Sprintf("%s/polecats/%s", target.rigName, target.polecatName))
+		fields = withoutStaleHook(fields, staleHook)
 		sourceHint := agentSourceIssueHint(currentIssue, fields)
-		hookBead := agentHookBead(agentIssue, fields)
 		var gitState *GitState
 		gitStateLoaded := false
 		loadGitState := func() {

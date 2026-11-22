@@ -1112,7 +1112,12 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		input.CleanupStatus = polecat.CleanupStatus(fields.CleanupStatus)
 		status.ActiveMR = fields.ActiveMR
 		input.ActiveMR = fields.ActiveMR
-		hookBead := agentHookBead(agentIssue, fields)
+		hookBead, staleHook := agentHookBead(bd, agentIssue, fields, assignee)
+		if staleHook != "" {
+			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("stale_description_hook=%s (not assigned to %s; ignored)", staleHook, assignee))
+			clearStaleDescriptionHook(bd, agentBeadID, staleHook, &status)
+			fields = withoutStaleHook(fields, staleHook)
+		}
 		hookSafe, hookTerminal, hookBlocker := hookBeadSafeForCleanup(bd, hookBead)
 		workTerminal = beadTerminal || hookTerminal
 		sourceHint := agentSourceIssueHint(status.Issue, fields)
@@ -1447,14 +1452,61 @@ func cleanupStatusBlockerForRecovery(status polecat.CleanupStatus, partialSpawnW
 	return cleanupStatusBlocker(status)
 }
 
-func agentHookBead(agentIssue *beads.Issue, fields *beads.AgentFields) string {
+// agentHookBead returns the agent's hook (hq-ee6vdf). The hook column wins.
+// The description hook_bead line is a legacy copy that unhook, reassign and
+// parking never cleared, so it counts only while the bead it names is still
+// this agent's work; otherwise it is returned as stale and the hook is empty.
+// An unreadable bead keeps the line (fail closed; callers report unverified).
+func agentHookBead(bd issueShower, agentIssue *beads.Issue, fields *beads.AgentFields, assignee string) (hook string, stale string) {
 	if agentIssue != nil && agentIssue.HookBead != "" {
-		return agentIssue.HookBead
+		return agentIssue.HookBead, ""
 	}
-	if fields != nil {
-		return fields.HookBead
+	if fields == nil {
+		return "", ""
 	}
-	return ""
+	hook = strings.TrimSpace(fields.HookBead)
+	if hook == "" || bd == nil {
+		return hook, ""
+	}
+	issue, err := bd.Show(hook)
+	if err != nil || issue == nil {
+		return hook, ""
+	}
+	if beads.DescriptionHookStale(fields, issue, assignee) {
+		return "", hook
+	}
+	return hook, ""
+}
+
+// withoutStaleHook returns fields with a stale description hook removed, so
+// the rest of a recovery or safety check treats the line as absent.
+func withoutStaleHook(fields *beads.AgentFields, stale string) *beads.AgentFields {
+	if fields == nil || stale == "" {
+		return fields
+	}
+	copied := *fields
+	copied.HookBead = ""
+	return &copied
+}
+
+type agentHookClearer interface {
+	ClearAgentHookBeadIfMatches(id string, expectedHook string) (bool, error)
+}
+
+// clearStaleDescriptionHook repairs the agent bead once a stale description
+// hook is proven, so later readers (witness, reuse) stop seeing it. Guarded:
+// it clears only while the line still names the stale bead.
+func clearStaleDescriptionHook(clearer agentHookClearer, agentBeadID, stale string, status *RecoveryStatus) {
+	if clearer == nil || stale == "" {
+		return
+	}
+	cleared, err := clearer.ClearAgentHookBeadIfMatches(agentBeadID, stale)
+	switch {
+	case err != nil:
+		status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("stale_hook_clear_failed=%s: %v", stale, err))
+	case cleared:
+		status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("stale_hook_cleared=%s", stale))
+	}
 }
 
 func activeMRGitSafeForWorktree(worktreePath string) bool {

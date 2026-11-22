@@ -2358,7 +2358,15 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 		input.GitCheckFailed = true
 	}
 	if err == nil && fields != nil {
-		hookSafe, hookTerminal = m.hookBeadSafeForWorkstate(fields.HookBead)
+		var hookStale bool
+		hookSafe, hookTerminal, hookStale = m.hookBeadSafeForWorkstate(fields, m.assigneeID(name))
+		if hookStale {
+			// hq-ee6vdf: the description line names work that is no longer
+			// this polecat's; treat it as absent.
+			copied := *fields
+			copied.HookBead = ""
+			fields = &copied
+		}
 		if !hookSafe {
 			input.HookBead = fields.HookBead
 		}
@@ -2462,18 +2470,24 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	return input
 }
 
-func (m *Manager) hookBeadSafeForWorkstate(hookBead string) (safe bool, terminal bool) {
-	if hookBead == "" {
-		return true, false
+// hookBeadSafeForWorkstate judges the agent's description hook_bead. stale
+// is true when it names live work assigned elsewhere or to nobody
+// (hq-ee6vdf); such a hook is safe and not terminal.
+func (m *Manager) hookBeadSafeForWorkstate(fields *beads.AgentFields, assignee string) (safe bool, terminal bool, stale bool) {
+	if fields == nil || fields.HookBead == "" {
+		return true, false, false
 	}
-	issue, err := m.beads.Show(hookBead)
+	issue, err := m.beads.Show(fields.HookBead)
 	if err != nil || issue == nil {
-		return false, false
+		return false, false, false
 	}
 	if beads.IssueStatus(issue.Status).IsTerminal() {
-		return true, true
+		return true, true, false
 	}
-	return false, false
+	if beads.DescriptionHookStale(fields, issue, assignee) {
+		return true, false, true
+	}
+	return false, false, false
 }
 
 func (m *Manager) assignedBeadTerminal(issueID string) bool {

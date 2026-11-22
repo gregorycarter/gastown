@@ -2065,6 +2065,14 @@ func detectZombieDeadSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 		}
 	}
 
+	// hq-ee6vdf: agent_state=working alone is not work. A polecat whose real
+	// hook is empty (its description hook_bead names a bead now hooked to
+	// another polecat, parked or landed) has nothing to resume, and
+	// restarting it only burns a slot.
+	if !deadSessionHoldsWork(bd, workDir, rigName, polecatName, snapHook, snap) {
+		return ZombieResult{}, false
+	}
+
 	// TOCTOU guard: verify session wasn't recreated since detection.
 	if sessionRecreated(t, sessionName, detectedAt) {
 		return ZombieResult{}, false
@@ -2739,6 +2747,46 @@ func getBeadStatus(bd *BdCli, workDir, beadID string) (string, bool) {
 		return "", true
 	}
 	return issues[0].Status, true
+}
+
+// deadSessionHoldsWork reports whether a dead-session polecat still holds
+// work (hq-ee6vdf). The hook column is trusted; the description hook_bead
+// counts only while its bead is live and assigned to this polecat; failing
+// both, work hooked or in progress under this polecat's address counts. Any
+// lookup failure answers true, keeping the restart (safe default).
+func deadSessionHoldsWork(bd *BdCli, workDir, rigName, polecatName, snapHook string, snap *agentBeadSnapshot) bool {
+	if snapHook != "" {
+		return true
+	}
+	agent := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
+	var fields *beads.AgentFields
+	if snap != nil {
+		fields = snap.Fields
+	}
+	if fields != nil && strings.TrimSpace(fields.HookBead) != "" {
+		hook := strings.TrimSpace(fields.HookBead)
+		output, err := bd.Exec(workDir, "show", hook, "--json")
+		if err != nil || output == "" {
+			return true
+		}
+		var issues []beads.Issue
+		if err := json.Unmarshal([]byte(output), &issues); err != nil {
+			return true
+		}
+		if len(issues) > 0 && !beads.IssueStatus(issues[0].Status).IsTerminal() &&
+			!beads.DescriptionHookStale(fields, &issues[0], agent) {
+			return true
+		}
+	}
+	output, err := bd.Exec(workDir, "list", "--assignee="+agent, "--status=hooked,in_progress", "--json", "--limit=1")
+	if err != nil {
+		return true
+	}
+	var assigned []json.RawMessage
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &assigned); err != nil {
+		return true
+	}
+	return len(assigned) > 0
 }
 
 // resetAbandonedBead resets a dead polecat's hooked bead so it can be re-dispatched.
