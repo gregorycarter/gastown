@@ -10,6 +10,18 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
+// kasbMissingCorrectionReason is recorded when needs-repair arrives without a
+// correction_reason, so the repair still reaches its worker.
+const kasbMissingCorrectionReason = "needs-repair was set without a correction reason: read this MR's comments and its latest preflight and batch-smoke results, then fix the cause on the same branch"
+
+func parseMRMetadata(mr *beads.Issue) map[string]json.RawMessage {
+	metadata := map[string]json.RawMessage{}
+	if mr != nil && len(mr.Metadata) != 0 {
+		_ = json.Unmarshal(mr.Metadata, &metadata)
+	}
+	return metadata
+}
+
 // Kasb's mechanical lander records blocked/needs-rebase, but historically did
 // not emit Hisn's recovery receipt. Derive it only from freshly validated native
 // MR/source/worker state. Never replace an existing (possibly stale) receipt.
@@ -37,7 +49,12 @@ func kasbRecoveryCandidate(mr *beads.Issue, base string, show func(string) (*bea
 		var err error
 		reason, err = mqCorrectionReason(metadata)
 		if err != nil {
-			return nil, err
+			// hq-3zchm: a needs-repair label set by hand or by a hold
+			// without a correction reason left the MR with no worker
+			// forever (kasb-wisp-tnyd9). Give the worker a pointer instead.
+			reason = kasbMissingCorrectionReason
+			encoded, _ := json.Marshal(reason)
+			metadata["correction_reason"] = encoded
 		}
 	}
 	record := mqResumeRecord{SchemaVersion: 1, Kind: kind, Rig: f.Rig, RepairReason: reason,
@@ -105,7 +122,13 @@ func prepareKasbRecovery(town, mrID string, dry bool) (*mqResumeState, error) {
 		return nil, fmt.Errorf("MR changed during recovery preparation")
 	}
 	raw, _ := json.Marshal(state.Record)
-	if err = BdCmd("update", mrID, "--if-status=blocked", "--set-metadata=delivery_recovery="+string(raw)).
+	args := []string{"update", mrID, "--if-status=blocked", "--set-metadata=delivery_recovery=" + string(raw)}
+	if state.Record.Kind == "same-mr-repair" {
+		if _, reasonErr := mqCorrectionReason(parseMRMetadata(mr)); reasonErr != nil {
+			args = append(args, "--set-metadata=correction_reason="+state.Record.RepairReason)
+		}
+	}
+	if err = BdCmd(args...).
 		Dir(root).WithBeadsDir(beads.ResolveBeadsDir(filepath.Join(town, "kasb_core"))).WithAutoCommit().Run(); err != nil {
 		return nil, err
 	}

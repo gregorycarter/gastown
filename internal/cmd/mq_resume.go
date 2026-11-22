@@ -333,7 +333,7 @@ func validateMQResumeWorkerWith(townRoot string, state *mqResumeState, ops mqRes
 		return fmt.Errorf("worker assignments unavailable: %w", err)
 	}
 	for _, issue := range issues {
-		if issue.ID != r.Source && (issue.Status == "hooked" || issue.Status == "in_progress") {
+		if issue.ID != r.Source && (issue.Status == "hooked" || issue.Status == "in_progress") && !parkedBehindOwnMR(issue) {
 			return fmt.Errorf("original worker has other active work")
 		}
 	}

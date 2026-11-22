@@ -34,8 +34,15 @@ func TestKasbSameMRRepairKeepsBindingAndHolds(t *testing.T) {
 			case "reassigned-source":
 				source.Assignee = "kasb_core/polecats/other"
 			}
+			// hq-3zchm (operator, 22 Nov): a repair always gets a worker. A
+			// missing or malformed correction reason is replaced by a pointer
+			// to the MR's comments and receipts instead of dropping the MR.
+			admitted := scenario == "ready" || scenario == "missing-reason" || scenario == "malformed-reason"
+			if scenario != "ready" {
+				reason = kasbMissingCorrectionReason
+			}
 			state, err := kasbRecoveryCandidate(mr, strings.Repeat("b", 40), show)
-			if (err == nil) != (scenario == "ready") {
+			if (err == nil) != admitted {
 				t.Fatalf("state=%v err=%v", state, err)
 			}
 			if err != nil {

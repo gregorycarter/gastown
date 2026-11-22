@@ -192,6 +192,16 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (spawned *Spaw
 				opts.HookBead, rigName, opts.HookBead)
 		}
 		witness.RecordBeadRespawn(townRoot, opts.HookBead)
+		// hq-3zchm: the breaker exists to stop spawn storms, i.e. sessions
+		// that start and keep dying. A spawn that never produced a polecat
+		// (disk full, directory cap, worktree error) is not a respawn; on
+		// 19-22 Nov 59 disk-full refusals alone used up beads' three tries.
+		hookBead := opts.HookBead
+		defer func() {
+			if err != nil {
+				witness.RefundBeadRespawn(townRoot, hookBead)
+			}
+		}()
 	}
 
 	if reclaimed, err := reclaimBrokenIdlePolecatForSling(polecatMgr); err != nil {

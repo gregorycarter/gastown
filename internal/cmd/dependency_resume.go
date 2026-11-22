@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -190,10 +191,31 @@ func recoverDependencies(town string, dry bool, rigs ...string) ([]mqResumeResul
 	}
 	for _, mr := range mrs {
 		state, err := loadMQResumeState(town, rigName, mr.ID)
+		loadErr := err
 		if err != nil && rigName == "kasb_core" {
 			state, err = prepareKasbRecovery(town, mr.ID, dry)
 		}
+		if err != nil && restorableWorkerBranchError(loadErr) {
+			err = loadErr
+		}
+		if restorableWorkerBranchError(err) && rigName == "kasb_core" && beads.HasLabel(mr, "needs-repair") && !mqRepairHeld(mr) {
+			if dry {
+				err = fmt.Errorf("%v; would restore the idle worker to the MR branch", err)
+			} else if restoreErr := restoreRepairWorkerBranch(town, rigName, mr, mqResumeWorkerOps{git: mqResumeGit, running: tmux.NewTmux().HasSession}); restoreErr != nil {
+				err = fmt.Errorf("%v; worker branch not restored: %v", err, restoreErr)
+			} else {
+				state, err = loadMQResumeState(town, rigName, mr.ID)
+				if err != nil {
+					state, err = prepareKasbRecovery(town, mr.ID, dry)
+				}
+			}
+		}
 		if err != nil {
+			// hq-3zchm: a needs-repair MR that cannot be queued used to be
+			// dropped here without a trace, so nobody knew it had no worker.
+			if beads.HasLabel(mr, "needs-repair") || beads.HasLabel(mr, "needs-rebase") {
+				reportRetainedRepair(town, mr.ID, err, dry)
+			}
 			continue
 		}
 		row := mqResumeOutput(state, "ready-to-queue", "")

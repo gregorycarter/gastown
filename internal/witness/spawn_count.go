@@ -89,7 +89,48 @@ func ShouldBlockRespawn(workDir, beadID string) bool {
 	if !ok {
 		return false
 	}
+	if respawnRecordExpired(rec, time.Now()) {
+		return false
+	}
 	return rec.Count >= maxRespawns
+}
+
+// BeadRespawnWindow is how long a bead's respawn count is remembered after
+// its last respawn. The breaker targets spawn storms (a session that dies and
+// is re-slung every few minutes); three dispatches spread over a day are a
+// bead going through work, rebase and repair, not a storm. Before hq-3zchm
+// the count never decayed, so a bead repaired twice was locked out until
+// someone ran `gt sling respawn-reset` (757 skips on 19-22 Nov).
+const BeadRespawnWindow = 2 * time.Hour
+
+func respawnRecordExpired(rec *beadRespawnRecord, now time.Time) bool {
+	return rec != nil && !rec.LastRespawn.IsZero() && now.Sub(rec.LastRespawn) > BeadRespawnWindow
+}
+
+// RefundBeadRespawn takes back one respawn recorded for an attempt that never
+// produced a polecat session (admission, disk or worktree failure).
+func RefundBeadRespawn(workDir, beadID string) {
+	respawnMu.Lock()
+	defer respawnMu.Unlock()
+
+	townRoot, err := workspace.Find(workDir)
+	if err != nil || townRoot == "" {
+		townRoot = workDir
+	}
+	unlock, flockErr := lock.FlockAcquire(beadRespawnStateFile(townRoot) + ".flock")
+	if flockErr == nil {
+		defer unlock()
+	}
+	state := loadBeadRespawnState(townRoot)
+	rec, ok := state.Beads[beadID]
+	if !ok {
+		return
+	}
+	rec.Count--
+	if rec.Count <= 0 {
+		delete(state.Beads, beadID)
+	}
+	_ = saveBeadRespawnState(townRoot, state)
 }
 
 // RecordBeadRespawn increments the respawn count for beadID and returns the new count.
@@ -119,6 +160,9 @@ func RecordBeadRespawn(workDir, beadID string) int {
 	if !ok {
 		rec = &beadRespawnRecord{BeadID: beadID}
 		state.Beads[beadID] = rec
+	}
+	if respawnRecordExpired(rec, time.Now()) {
+		rec.Count = 0
 	}
 	rec.Count++
 	rec.LastRespawn = time.Now().UTC()

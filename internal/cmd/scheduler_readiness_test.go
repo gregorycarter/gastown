@@ -186,7 +186,9 @@ func TestSortScheduledRecoveryFinishesWorkBeforeFreshBeads(t *testing.T) {
 		row("low-priority-mr", 3, "2026-09-19T04:00:00Z", true, false),
 	}
 	sortScheduledContextAssessments(rows)
-	want := []string{"urgent", "mr-older", "mr-newer", "dependency", "fresh-old", "low-priority-mr"}
+	// hq-3zchm (operator, 22 Nov): same-MR repairs go ahead of all new work,
+	// whatever its priority; priority still orders repairs among themselves.
+	want := []string{"mr-older", "mr-newer", "low-priority-mr", "urgent", "dependency", "fresh-old"}
 	for i, id := range want {
 		if rows[i].context.issue.ID != id {
 			t.Fatalf("position %d = %s, want %s", i, rows[i].context.issue.ID, id)

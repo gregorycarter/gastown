@@ -79,6 +79,10 @@ var capacityFailureMarkers = []string{
 	"polecat directories (max",
 	"capacity is full",
 	"no capacity",
+	// hq-3zchm: host back-pressure, not a broken bead. 59 disk-full refusals
+	// on 19-22 Nov circuit-broke contexts such as kasb-7nsis.19.2.
+	"insufficient disk space",
+	"admission is busy",
 }
 
 // classifyDispatchFailure buckets a dispatch error. Unknown errors are

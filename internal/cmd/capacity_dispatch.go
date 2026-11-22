@@ -1150,9 +1150,18 @@ func preservedPrerequisiteCounts(blockers map[string][]string, sources map[strin
 // Priority remains authoritative. At equal priority finish submitted work,
 // then resume preserved dependency work, before starting another fresh bead.
 // Readiness, holds, pressure and capacity admission remain unchanged.
+//
+// hq-3zchm: a same-MR repair or rebase goes ahead of all new work, whatever
+// its priority. It finishes work that is already submitted and holding a
+// pending-MR slot; behind P1 new work, kasb repairs waited a median 1.2 h.
 func sortScheduledContextAssessments(assessments []scheduledContextAssessment) {
 	sort.SliceStable(assessments, func(i, j int) bool {
 		a, b := assessments[i], assessments[j]
+		aRepair := a.fields != nil && a.fields.ResumeMR != ""
+		bRepair := b.fields != nil && b.fields.ResumeMR != ""
+		if aRepair != bRepair {
+			return aRepair
+		}
 		if a.info.Priority != b.info.Priority {
 			return a.info.Priority < b.info.Priority
 		}
