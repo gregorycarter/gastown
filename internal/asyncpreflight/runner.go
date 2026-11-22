@@ -130,6 +130,8 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 
 	receiptAbs := filepath.Join(m.Worktree, m.ReceiptPath)
 	_ = os.Remove(receiptAbs) // never read a receipt from an earlier attempt
+	// Filesystem times can be coarser than the clock; allow a second of slack.
+	runStart := time.Now().Add(-time.Second)
 
 	logFile, err := os.OpenFile(m.Log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -183,6 +185,17 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 		return finish(StatusError, fmt.Sprintf("worktree head moved to %q during the preflight; the receipt does not prove %s", head, m.Head), &exit, "")
 	}
 	raw, err := os.ReadFile(receiptAbs)
+	if err != nil && code == 0 {
+		// hq-4gmjjb: an infrastructure-only head takes preflight's
+		// infrastructure route, which records its proof under
+		// .delivery/infrastructure-receipts/ and ignores --receipt.
+		if adopted, ok := adoptInfrastructureReceipt(m, runStart); ok {
+			raw, err = adopted, nil
+			_ = os.MkdirAll(filepath.Dir(receiptAbs), 0o755)
+			_ = writeFileAtomic(receiptAbs, raw) // the requested path now holds the proof too
+			fmt.Fprintf(logFile, "%s adopted the infrastructure receipt for %s@%s as the async receipt\n", stamp(), m.Source, short(m.Head))
+		}
+	}
 	if err != nil {
 		return finish(StatusError, fmt.Sprintf("preflight exited %d without a receipt at %s", code, m.ReceiptPath), &exit, "")
 	}
