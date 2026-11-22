@@ -2,6 +2,9 @@ package witness
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -83,9 +86,83 @@ func TestDeadSessionHoldsWork(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			bd, _ := staleHookBd(tc.show, tc.list, tc.listErr)
-			if got := deadSessionHoldsWork(bd, t.TempDir(), "kasb_core", "deathclaw", tc.snapHook, tc.snap); got != tc.want {
+			if got := deadSessionHoldsWork(bd, t.TempDir(), t.TempDir(), "kasb_core", "deathclaw", tc.snapHook, tc.snap); got != tc.want {
 				t.Fatalf("deadSessionHoldsWork = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// Review item 5: the fallback counts open and blocked work too (as the
+// daemon's hasAssignedOpenWork), lists in the rig database, and reads the
+// description hook bead from its own database by prefix.
+func TestDeadSessionHoldsWork_StatusesAndRouting(t *testing.T) {
+	townRoot := t.TempDir()
+	for _, dir := range []string{".beads", "kasb_core/mayor/rig/.beads", "hisn/mayor/rig/.beads"} {
+		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	routes := `{"prefix":"kasb-","path":"kasb_core/mayor/rig"}` + "\n" + `{"prefix":"hisn-","path":"hisn/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatal(err)
+	}
+	type call struct {
+		dir  string
+		args string
+	}
+	var calls []call
+	bd := &BdCli{
+		Exec: func(workDir string, args ...string) (string, error) {
+			calls = append(calls, call{workDir, strings.Join(args, " ")})
+			if args[0] == "show" {
+				return `[{"id":"hisn-x","status":"hooked","assignee":"kasb_core/polecats/other"}]`, nil
+			}
+			return `[{"id":"kasb-open","status":"open","assignee":"kasb_core/polecats/deathclaw"}]`, nil
+		},
+		Run: func(string, ...string) error { return nil },
+	}
+	if !deadSessionHoldsWork(bd, filepath.Join(townRoot, "witness"), townRoot, "kasb_core", "deathclaw", "", workingSnap("hisn-x")) {
+		t.Fatal("assigned open work not counted")
+	}
+	if len(calls) != 2 {
+		t.Fatalf("calls = %+v", calls)
+	}
+	if calls[0].dir != filepath.Join(townRoot, "hisn/mayor/rig") {
+		t.Errorf("hook bead read from %q, want its prefix database", calls[0].dir)
+	}
+	if calls[1].dir != filepath.Join(townRoot, "kasb_core/mayor/rig") {
+		t.Errorf("assigned work listed in %q, want the rig database", calls[1].dir)
+	}
+	if !strings.Contains(calls[1].args, "--status=hooked,in_progress,open,blocked") {
+		t.Errorf("list statuses = %q, want hooked,in_progress,open,blocked", calls[1].args)
+	}
+}
+
+// Review item 7: slotOpenDecision's description-hook check uses the same
+// stale rule.
+func TestWitnessDescriptionHookStale(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stub")
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	stub := "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in show) echo \"[{\\\"id\\\":\\\"kasb-x\\\",\\\"status\\\":\\\"hooked\\\",\\\"assignee\\\":\\\"${STUB_ASSIGNEE}\\\"}]\"; exit 0;; esac; done\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(stub), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	fields := &beads.AgentFields{AgentState: "working", HookBead: "kasb-x"}
+
+	t.Setenv("STUB_ASSIGNEE", "kasb_core/polecats/scavenger")
+	if !witnessDescriptionHookStale(beads.New(dir), fields, "kasb_core/polecats/deathclaw") {
+		t.Error("hook assigned to another polecat not stale")
+	}
+	t.Setenv("STUB_ASSIGNEE", "kasb_core/polecats/deathclaw")
+	if witnessDescriptionHookStale(beads.New(dir), fields, "kasb_core/polecats/deathclaw") {
+		t.Error("own hook judged stale")
 	}
 }

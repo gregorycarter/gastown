@@ -616,8 +616,16 @@ func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool,
 // was written. Unhook and stale-hook repair use it; a concurrent re-hook to a
 // different bead is left alone.
 func (b *Beads) ClearAgentHookBeadIfMatches(id string, expectedHook string) (bool, error) {
+	return b.ClearAgentStaleHookIfMatches(id, expectedHook, nil)
+}
+
+// ClearAgentStaleHookIfMatches is ClearAgentHookBeadIfMatches with a re-check
+// under the agent lock: it refuses while the agent is spawning, and, when
+// stillStale is non-nil, clears only if stillStale(fields) — which should
+// re-read the work bead — still proves the line stale.
+func (b *Beads) ClearAgentStaleHookIfMatches(id string, expectedHook string, stillStale func(fields *AgentFields) bool) (bool, error) {
 	if target := b.agentBeadTarget(); target != b {
-		return target.ClearAgentHookBeadIfMatches(id, expectedHook)
+		return target.ClearAgentStaleHookIfMatches(id, expectedHook, stillStale)
 	}
 
 	id = strings.TrimSpace(id)
@@ -646,6 +654,11 @@ func (b *Beads) ClearAgentHookBeadIfMatches(id string, expectedHook string) (boo
 	fields := ParseAgentFields(issue.Description)
 	if strings.TrimSpace(fields.HookBead) != expectedHook {
 		return false, nil
+	}
+	if stillStale != nil {
+		if fields.AgentState == string(AgentStateSpawning) || !stillStale(fields) {
+			return false, nil
+		}
 	}
 
 	fields.HookBead = ""
@@ -680,10 +693,11 @@ func DescriptionHookStale(fields *AgentFields, hookIssue *Issue, agent string) b
 }
 
 // SameAgentAddress compares two agent addresses, treating the crew/polecats
-// segment as optional ("rig/polecats/name" == "rig/name").
+// segment as optional ("rig/polecats/name" == "rig/name") and a trailing
+// slash as insignificant ("mayor/" == "mayor").
 func SameAgentAddress(a, b string) bool {
 	norm := func(s string) string {
-		s = strings.TrimSpace(s)
+		s = strings.TrimSuffix(strings.TrimSpace(s), "/")
 		parts := strings.Split(s, "/")
 		if len(parts) == 3 && (parts[1] == "polecats" || parts[1] == "crew") {
 			return parts[0] + "/" + parts[2]

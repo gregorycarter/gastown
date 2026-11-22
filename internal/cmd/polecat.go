@@ -1115,7 +1115,9 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		hookBead, staleHook := agentHookBead(bd, agentIssue, fields, assignee)
 		if staleHook != "" {
 			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("stale_description_hook=%s (not assigned to %s; ignored)", staleHook, assignee))
-			clearStaleDescriptionHook(bd, agentBeadID, staleHook, &status)
+			if polecatCheckRecoveryReconcileCleanup {
+				clearStaleDescriptionHook(bd, bd, agentBeadID, assignee, staleHook, &status)
+			}
 			fields = withoutStaleHook(fields, staleHook)
 		}
 		hookSafe, hookTerminal, hookBlocker := hookBeadSafeForCleanup(bd, hookBead)
@@ -1490,17 +1492,23 @@ func withoutStaleHook(fields *beads.AgentFields, stale string) *beads.AgentField
 }
 
 type agentHookClearer interface {
-	ClearAgentHookBeadIfMatches(id string, expectedHook string) (bool, error)
+	ClearAgentStaleHookIfMatches(id string, expectedHook string, stillStale func(fields *beads.AgentFields) bool) (bool, error)
 }
 
 // clearStaleDescriptionHook repairs the agent bead once a stale description
-// hook is proven, so later readers (witness, reuse) stop seeing it. Guarded:
-// it clears only while the line still names the stale bead.
-func clearStaleDescriptionHook(clearer agentHookClearer, agentBeadID, stale string, status *RecoveryStatus) {
-	if clearer == nil || stale == "" {
+// hook is proven, so later readers (witness, reuse) stop seeing it. Under the
+// agent lock it re-checks that the line still names the stale bead, that the
+// agent is not spawning, and (re-reading the work bead) that the bead is
+// still assigned elsewhere or to nobody.
+func clearStaleDescriptionHook(clearer agentHookClearer, bd issueShower, agentBeadID, assignee, stale string, status *RecoveryStatus) {
+	if clearer == nil || bd == nil || stale == "" {
 		return
 	}
-	cleared, err := clearer.ClearAgentHookBeadIfMatches(agentBeadID, stale)
+	stillStale := func(fields *beads.AgentFields) bool {
+		issue, err := bd.Show(stale)
+		return err == nil && issue != nil && beads.DescriptionHookStale(fields, issue, assignee)
+	}
+	cleared, err := clearer.ClearAgentStaleHookIfMatches(agentBeadID, stale, stillStale)
 	switch {
 	case err != nil:
 		status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("stale_hook_clear_failed=%s: %v", stale, err))

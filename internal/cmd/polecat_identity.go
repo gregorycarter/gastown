@@ -315,7 +315,8 @@ func runPolecatIdentityList(cmd *cobra.Command, args []string) error {
 			SessionRunning: sessionRunning,
 		}
 		if info.HookBead == "" {
-			info.HookBead = fields.HookBead
+			// hq-ee6vdf: show the description hook only while it is real.
+			info.HookBead, _ = agentHookBead(bd, nil, fields, rigName+"/polecats/"+name)
 		}
 		identities = append(identities, info)
 	}
@@ -436,7 +437,7 @@ func runPolecatIdentityShow(cmd *cobra.Command, args []string) error {
 			CV:        cv,
 		}
 		if output.HookBead == "" {
-			output.HookBead = fields.HookBead
+			output.HookBead, _ = agentHookBead(bd, nil, fields, rigName+"/polecats/"+polecatName)
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -479,10 +480,7 @@ func runPolecatIdentityShow(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Agent State:   %s\n", stateStr)
 
 	// Hook
-	hookBead := issue.HookBead
-	if hookBead == "" {
-		hookBead = fields.HookBead
-	}
+	hookBead, _ := agentHookBead(bd, issue, fields, rigName+"/polecats/"+polecatName)
 	if hookBead != "" {
 		fmt.Printf("  Hook:          %s\n", hookBead)
 	} else {

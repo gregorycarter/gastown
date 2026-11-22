@@ -278,10 +278,12 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 var resolveTargetAgentIDFn = resolveTargetAgentID
 
 // clearStaleAgentDescriptionHook clears the agent's description hook_bead
-// when the hook record is empty (hq-ee6vdf): nothing is hooked to the agent,
-// but the legacy line still names a bead. It clears the line when that bead
-// was named explicitly (gt hook detach <bead> <agent>), is terminal, or is
-// live but assigned elsewhere or to nobody. An unreadable bead is left alone.
+// when the hook record is empty (hq-ee6vdf): nothing is hooked or in progress
+// under the agent (a failed lookup refuses), but the legacy line still names
+// a bead. With an explicit bead (gt hook detach <bead> <agent>) it must be
+// the one named. The line is cleared only when that bead is terminal or live
+// but assigned elsewhere or to nobody, re-checked under the agent lock. An
+// unreadable bead is left alone.
 // The named bead itself is never modified. Returns true when it cleared (or,
 // in dry-run, would clear) the line.
 func clearStaleAgentDescriptionHook(cmd *cobra.Command, b *beads.Beads, townRoot, beadsPath, agentBeadID, agentID, targetBeadID string, dryRun bool) bool {
@@ -293,24 +295,32 @@ func clearStaleAgentDescriptionHook(cmd *cobra.Command, b *beads.Beads, townRoot
 	if hook == "" || (targetBeadID != "" && hook != targetBeadID) {
 		return false
 	}
-	if targetBeadID == "" {
-		hookB := b
-		if hookPath := beads.ResolveHookDir(townRoot, hook, beadsPath); hookPath != beadsPath {
-			hookB = beads.New(hookPath)
-		}
+	// The hook record must be provably empty: any hooked or in_progress
+	// work under this agent, or a failed lookup, refuses the clear.
+	if active, listErr := agentHasActiveWork(b, townRoot, beadsPath, agentID); listErr != nil || active {
+		return false
+	}
+	hookB := b
+	if hookPath := beads.ResolveHookDir(townRoot, hook, beadsPath); hookPath != beadsPath {
+		hookB = beads.New(hookPath)
+	}
+	// Explicit or not, the line is cleared only when its bead is terminal or
+	// live but assigned elsewhere or to nobody.
+	stale := func(f *beads.AgentFields) bool {
 		issue, showErr := hookB.Show(hook)
 		if showErr != nil || issue == nil {
 			return false
 		}
-		if !beads.IssueStatus(issue.Status).IsTerminal() && !beads.DescriptionHookStale(fields, issue, agentID) {
-			return false
-		}
+		return beads.IssueStatus(issue.Status).IsTerminal() || beads.DescriptionHookStale(f, issue, agentID)
+	}
+	if !stale(fields) {
+		return false
 	}
 	if dryRun {
 		fmt.Printf("Would clear stale hook_bead %s from %s\n", hook, agentBeadID)
 		return true
 	}
-	cleared, err := b.ClearAgentHookBeadIfMatches(agentBeadID, hook)
+	cleared, err := b.ClearAgentStaleHookIfMatches(agentBeadID, hook, stale)
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: couldn't clear stale hook_bead on %s: %v\n", agentBeadID, err)
 		return false
@@ -319,6 +329,29 @@ func clearStaleAgentDescriptionHook(cmd *cobra.Command, b *beads.Beads, townRoot
 		fmt.Printf("%s Cleared stale hook_bead %s from %s (nothing hooked)\n", style.Bold.Render("✓"), hook, agentID)
 	}
 	return cleared
+}
+
+// agentHasActiveWork reports whether any bead is hooked or in_progress under
+// agentID, in the agent's rig database or the town database.
+func agentHasActiveWork(b *beads.Beads, townRoot, beadsPath, agentID string) (bool, error) {
+	stores := []*beads.Beads{b}
+	if townRoot != "" {
+		if townBeadsPath := filepath.Join(townRoot, ".beads"); townBeadsPath != beadsPath {
+			stores = append(stores, beads.New(townBeadsPath))
+		}
+	}
+	for _, store := range stores {
+		for _, status := range []string{beads.StatusHooked, string(beads.StatusInProgress)} {
+			found, err := store.List(beads.ListOptions{Status: status, Assignee: agentID, Priority: -1})
+			if err != nil {
+				return false, err
+			}
+			if len(found) > 0 {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // cleanStaleHookedBeads finds and cleans up beads with status "hooked" assigned to

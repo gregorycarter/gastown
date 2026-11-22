@@ -92,27 +92,55 @@ func TestAgentHookBead_KeepsRealHook(t *testing.T) {
 
 type fakeHookClearer struct {
 	id, hook string
+	fields   *beads.AgentFields
 	cleared  bool
 	err      error
 }
 
-func (f *fakeHookClearer) ClearAgentHookBeadIfMatches(id, hook string) (bool, error) {
+// ClearAgentStaleHookIfMatches mimics the locked re-check: it clears only
+// when stillStale (re-reading the work bead) still holds.
+func (f *fakeHookClearer) ClearAgentStaleHookIfMatches(id, hook string, stillStale func(*beads.AgentFields) bool) (bool, error) {
 	f.id, f.hook = id, hook
-	return f.cleared, f.err
+	if f.err != nil {
+		return false, f.err
+	}
+	f.cleared = stillStale(f.fields)
+	return f.cleared, nil
 }
 
 func TestClearStaleDescriptionHook(t *testing.T) {
+	const me = "kasb_core/polecats/deathclaw"
+	fields := &beads.AgentFields{AgentState: "working", HookBead: "kasb-qyar.185.2"}
+	elsewhere := fakeIssueShower{issue: &beads.Issue{ID: "kasb-qyar.185.2", Status: "hooked", Assignee: "kasb_core/polecats/scavenger"}}
+
 	status := &RecoveryStatus{}
-	clearer := &fakeHookClearer{cleared: true}
-	clearStaleDescriptionHook(clearer, "kasb-kasb_core-polecat-deathclaw", "kasb-qyar.185.2", status)
-	if clearer.id != "kasb-kasb_core-polecat-deathclaw" || clearer.hook != "kasb-qyar.185.2" {
-		t.Fatalf("clear called with (%q, %q)", clearer.id, clearer.hook)
+	clearer := &fakeHookClearer{fields: fields}
+	clearStaleDescriptionHook(clearer, elsewhere, "kasb-kasb_core-polecat-deathclaw", me, "kasb-qyar.185.2", status)
+	if !clearer.cleared || clearer.id != "kasb-kasb_core-polecat-deathclaw" || clearer.hook != "kasb-qyar.185.2" {
+		t.Fatalf("clear not applied: %+v", clearer)
 	}
 	if len(status.Diagnostics) != 1 || status.Diagnostics[0] != "stale_hook_cleared=kasb-qyar.185.2" {
 		t.Fatalf("diagnostics = %v", status.Diagnostics)
 	}
 	if status.NeedsRecovery {
 		t.Fatal("clearing a stale hook must not mark the polecat as needing recovery")
+	}
+
+	// Re-check under the lock: the bead was re-hooked to this polecat in the
+	// meantime, so nothing is cleared.
+	status = &RecoveryStatus{}
+	clearer = &fakeHookClearer{fields: fields}
+	mine := fakeIssueShower{issue: &beads.Issue{ID: "kasb-qyar.185.2", Status: "hooked", Assignee: me}}
+	clearStaleDescriptionHook(clearer, mine, "kasb-kasb_core-polecat-deathclaw", me, "kasb-qyar.185.2", status)
+	if clearer.cleared || len(status.Diagnostics) != 0 {
+		t.Fatalf("cleared a hook that is real again: cleared=%v diag=%v", clearer.cleared, status.Diagnostics)
+	}
+
+	// Spawning agent: never stale.
+	clearer = &fakeHookClearer{fields: &beads.AgentFields{AgentState: "spawning", HookBead: "kasb-qyar.185.2"}}
+	clearStaleDescriptionHook(clearer, elsewhere, "kasb-kasb_core-polecat-deathclaw", me, "kasb-qyar.185.2", &RecoveryStatus{})
+	if clearer.cleared {
+		t.Fatal("cleared a spawning agent's hook")
 	}
 }
 
@@ -154,22 +182,34 @@ func setupUnhookNoSessionTown(t *testing.T) (logPath string) {
 	t.Cleanup(func() { session.SetDefaultRegistry(old) })
 
 	logPath = filepath.Join(townRoot, "bd.log")
-	agentDesc := `zz-gastown-polecat-nux\n\nrole_type: polecat\nrig: gastown\nagent_state: working\nhook_bead: zz-stale\ncleanup_status: null\nactive_mr: null\nnotification_level: null`
+	// Responses are steered per test through env vars:
+	//   STUB_AGENT_STATE   agent_state in the agent description (default working)
+	//   STUB_STALE_ASSIGNEE assignee of zz-stale (default another polecat)
+	//   STUB_LIST_FAIL=1   every bd list fails
+	//   STUB_IN_PROGRESS=1 an in_progress bead is assigned to the agent
 	bdScript := `#!/bin/sh
 echo "$*" >> "${BD_LOG}"
-show_id=""
-prev=""
+show_id=""; prev=""; prev_cmd=""; status=""
 for a in "$@"; do
   if [ "$prev" = "show" ]; then show_id="$a"; fi
+  case "$a" in --status=*) status="${a#--status=}" ;; esac
   case "$a" in --*) ;; *) [ -z "$prev_cmd" ] && prev_cmd="$a" ;; esac
   prev="$a"
 done
+state="${STUB_AGENT_STATE:-working}"
+assignee="${STUB_STALE_ASSIGNEE-gastown/polecats/scavenger}"
 case "$prev_cmd" in
-  list) echo '[]' ;;
+  list)
+    [ "${STUB_LIST_FAIL:-}" = "1" ] && { echo "dolt down" >&2; exit 1; }
+    if [ "${STUB_IN_PROGRESS:-}" = "1" ] && [ "$status" = "in_progress" ]; then
+      echo '[{"id":"zz-live","title":"Live","status":"in_progress","assignee":"gastown/polecats/nux"}]'
+    else
+      echo '[]'
+    fi ;;
   show)
     case "$show_id" in
-      zz-gastown-polecat-nux) printf '%s\n' '[{"id":"zz-gastown-polecat-nux","title":"zz-gastown-polecat-nux","status":"open","labels":["gt:agent"],"description":"` + agentDesc + `"}]' ;;
-      zz-stale) echo '[{"id":"zz-stale","title":"Stale","status":"hooked","assignee":"gastown/polecats/scavenger"}]' ;;
+      zz-gastown-polecat-nux) printf '[{"id":"zz-gastown-polecat-nux","title":"zz-gastown-polecat-nux","status":"open","labels":["gt:agent"],"description":"zz-gastown-polecat-nux\\n\\nrole_type: polecat\\nrig: gastown\\nagent_state: %s\\nhook_bead: zz-stale\\ncleanup_status: null\\nactive_mr: null\\nnotification_level: null"}]\n' "$state" ;;
+      zz-stale) printf '[{"id":"zz-stale","title":"Stale","status":"hooked","assignee":"%s"}]\n' "$assignee" ;;
       *) echo '[]' ;;
     esac ;;
   update) ;;
@@ -225,5 +265,64 @@ func TestUnslingTargetWorksWithoutSessionAndClearsStaleHook(t *testing.T) {
 	}
 	if !cleared {
 		t.Fatalf("stale hook_bead was not cleared; bd log:\n%s", log)
+	}
+}
+
+// agentDescriptionCleared reports whether the bd log shows the agent bead's
+// description rewritten without the stale hook.
+func agentDescriptionCleared(t *testing.T, logPath string) bool {
+	t.Helper()
+	log, _ := os.ReadFile(logPath)
+	for _, line := range strings.Split(string(log), "\n") {
+		if strings.Contains(line, "update") && strings.Contains(line, "zz-gastown-polecat-nux") && !strings.Contains(line, "hook_bead: zz-stale") {
+			return true
+		}
+	}
+	return false
+}
+
+// The clear needs proof every time, explicit bead or not (review item 6).
+func TestUnslingRefusesUnprovenStaleHookClear(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		args []string
+	}{
+		{"explicit bead still mine", map[string]string{"STUB_STALE_ASSIGNEE": "gastown/polecats/nux"}, []string{"zz-stale", "gastown/polecats/nux"}},
+		{"list error", map[string]string{"STUB_LIST_FAIL": "1"}, []string{"gastown/polecats/nux"}},
+		{"in_progress work assigned", map[string]string{"STUB_IN_PROGRESS": "1"}, []string{"gastown/polecats/nux"}},
+		{"agent spawning", map[string]string{"STUB_AGENT_STATE": "spawning", "STUB_STALE_ASSIGNEE": ""}, []string{"gastown/polecats/nux"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logPath := setupUnhookNoSessionTown(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			_ = runUnslingWith(&cobra.Command{}, tc.args, false, false)
+			if agentDescriptionCleared(t, logPath) {
+				t.Fatal("description hook cleared without proof that it is stale")
+			}
+		})
+	}
+}
+
+// An explicit bead that is assigned elsewhere is cleared.
+func TestUnslingExplicitStaleBeadIsCleared(t *testing.T) {
+	logPath := setupUnhookNoSessionTown(t)
+	if err := runUnslingWith(&cobra.Command{}, []string{"zz-stale", "gastown/polecats/nux"}, false, false); err != nil {
+		t.Fatalf("detach failed: %v", err)
+	}
+	if !agentDescriptionCleared(t, logPath) {
+		t.Fatal("explicit stale bead was not cleared")
+	}
+}
+
+func TestSameAgentAddressTrailingSlash(t *testing.T) {
+	if !beads.SameAgentAddress("mayor/", "mayor") || !beads.SameAgentAddress("gastown/polecats/nux", "gastown/nux/") {
+		t.Fatal("trailing slash must not matter")
+	}
+	if beads.SameAgentAddress("", "/") {
+		t.Fatal("empty addresses must not match")
 	}
 }
