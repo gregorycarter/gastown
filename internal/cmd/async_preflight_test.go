@@ -259,7 +259,7 @@ func TestPreflightGateStopsSupersededRunner(t *testing.T) {
 	deps := preflightGateDeps{show: show, now: time.Now,
 		block:   func(string, string) error { blocked = true; return nil },
 		comment: func(string, string) error { return nil },
-		stop:    func(x *asyncpreflight.Marker) bool { stopped = x; return true }}
+		stop:    func(_ string, x *asyncpreflight.Marker) bool { stopped = x; return true }}
 	res, applied, err := runPreflightGate(rig, mr.ID, strings.Repeat("d", 40), true, deps)
 	if err != nil || !applied || !blocked || res.State != asyncpreflight.GateMoved {
 		t.Fatalf("res=%+v applied=%v err=%v", res, applied, err)

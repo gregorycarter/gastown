@@ -141,11 +141,11 @@ func Retire(markerPath string, now time.Time) (bool, error) {
 	// A runner that is still alive (for example, a stale heartbeat) would Save
 	// the marker back after a rename. Ask it to stop and retire on a later try.
 	if err == nil && runnerPresent(m) {
-		Stop(m)
+		Stop(markerPath, m)
 		return false, fmt.Errorf("async preflight runner pid %d for %s@%s is still alive; asked it to stop, retry once it has exited", m.PID, m.Source, short(m.Head))
 	}
 	stamp := now.UnixNano()
-	for _, p := range []string{MRSidecarPath(markerPath), ReceiptCopyPath(markerPath), LogPath(markerPath), markerPath} {
+	for _, p := range []string{MRSidecarPath(markerPath), ReceiptCopyPath(markerPath), LogPath(markerPath), StopRequestPath(markerPath), markerPath} {
 		if _, statErr := os.Lstat(p); statErr != nil {
 			continue
 		}

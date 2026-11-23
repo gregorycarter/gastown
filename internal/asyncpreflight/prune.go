@@ -63,7 +63,7 @@ func Prune(rigPath string, now time.Time, mrState func(mrID string) MRState) Pru
 			st = mrState(mr)
 		}
 		superseded := st.Known && (st.Closed || (st.Head != "" && st.Head != m.Head))
-		if live && superseded && Stop(m) {
+		if live && superseded && Stop(p, m) {
 			res.Stopped = append(res.Stopped, p)
 			continue // the runner records its stop; prune on a later pass
 		}
@@ -84,7 +84,7 @@ func Prune(rigPath string, now time.Time, mrState func(mrID string) MRState) Pru
 }
 
 func removeRun(markerPath string) {
-	for _, p := range []string{markerPath, LogPath(markerPath), ReceiptCopyPath(markerPath), MRSidecarPath(markerPath)} {
+	for _, p := range []string{markerPath, LogPath(markerPath), ReceiptCopyPath(markerPath), MRSidecarPath(markerPath), StopRequestPath(markerPath)} {
 		_ = os.Remove(p)
 	}
 }

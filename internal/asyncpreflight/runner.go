@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,7 +31,16 @@ type RunDeps struct {
 	Heartbeat time.Duration
 	// Timeout overrides the marker's hard timeout (tests).
 	Timeout time.Duration
+	// Pressure describes the host's load when a preflight dies (tests override it).
+	Pressure func() string
+	// Signals returns a fresh stop context for the one rerun after the host
+	// stopped the runner (default: SIGTERM, SIGINT and SIGHUP).
+	Signals func() (context.Context, context.CancelFunc)
 }
+
+// RecheckEnvironmentReason is passed to the one rerun of a preflight whose
+// process group died without writing a receipt (hq-y1q7ew).
+const RecheckEnvironmentReason = "async preflight process group died without a receipt; rerun once on the same head (hq-y1q7ew)"
 
 // DefaultRunDeps uses the real git and process execution.
 func DefaultRunDeps() RunDeps {
@@ -41,9 +51,31 @@ func DefaultRunDeps() RunDeps {
 			out, err := c.Output()
 			return strings.TrimSpace(string(out)), err
 		},
-		Exec: ExecInGroup,
-		Now:  time.Now,
+		Exec:     ExecInGroup,
+		Now:      time.Now,
+		Pressure: HostPressure,
+		Signals: func() (context.Context, context.CancelFunc) {
+			return signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+		},
 	}
+}
+
+// HostPressure reports the load average and, where the host exposes it, the
+// memory level, so an infrastructure death records what the host was doing.
+func HostPressure() string {
+	var parts []string
+	if raw, err := os.ReadFile("/proc/loadavg"); err == nil {
+		parts = append(parts, "loadavg "+strings.Join(strings.Fields(string(raw))[:3], " "))
+	} else if out, err := exec.Command("sysctl", "-n", "vm.loadavg").Output(); err == nil {
+		parts = append(parts, "loadavg "+strings.Trim(strings.TrimSpace(string(out)), "{} "))
+	}
+	if out, err := exec.Command("sysctl", "-n", "kern.memorystatus_level").Output(); err == nil {
+		parts = append(parts, "memory free "+strings.TrimSpace(string(out))+"%")
+	}
+	if len(parts) == 0 {
+		return "host pressure unavailable"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // ExecInGroup runs argv in its own process group and kills the group when
@@ -79,6 +111,12 @@ func ExecInGroup(ctx context.Context, dir string, argv []string, log io.Writer) 
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
+		// hq-y1q7ew: name the signal that ended the group, to find what kills it.
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			fmt.Fprintf(log, "preflight process group leader was terminated by signal %s\n", status.Signal())
+		} else if code := exitErr.ExitCode(); code > 128 && code < 128+65 {
+			fmt.Fprintf(log, "preflight exited %d: a child reported death by signal %s\n", code, syscall.Signal(code-128))
+		}
 		return exitErr.ExitCode(), nil
 	}
 	return -1, err
@@ -117,6 +155,7 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 		})
 		return nil
 	}
+	_ = os.Remove(StopRequestPath(markerPath)) // a request belongs to an earlier run
 	save(func(m *Marker) {
 		m.Status, m.PID, m.PIDStart, m.StartedAt, m.HeartbeatAt = StatusRunning, os.Getpid(), ProcessStartTime(os.Getpid()), stamp(), stamp()
 	})
@@ -129,75 +168,140 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 	}
 
 	receiptAbs := filepath.Join(m.Worktree, m.ReceiptPath)
-	_ = os.Remove(receiptAbs) // never read a receipt from an earlier attempt
-	// Filesystem times can be coarser than the clock; allow a second of slack.
-	runStart := time.Now().Add(-time.Second)
-
+	stopRerunSignals := func() {}
+	defer func() { stopRerunSignals() }()
 	logFile, err := os.OpenFile(m.Log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return finish(StatusError, fmt.Sprintf("cannot open log %s: %v", m.Log, err), nil, "")
 	}
 	defer logFile.Close()
-	fmt.Fprintf(logFile, "%s async preflight %s@%s in %s: %s\n", stamp(), m.Source, m.Head, m.Worktree, strings.Join(m.Command, " "))
-
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-t.C:
-				save(func(m *Marker) { m.HeartbeatAt = stamp() })
-			}
-		}
-	}()
 	timeout := deps.Timeout
 	if timeout <= 0 {
 		timeout = m.Timeout()
 	}
-	runCtx, cancelRun := context.WithTimeout(ctx, timeout)
-	code, execErr := deps.Exec(runCtx, m.Worktree, m.Command, logFile)
-	timedOut := ctx.Err() == nil && errors.Is(runCtx.Err(), context.DeadlineExceeded)
-	cancelRun()
-	close(stop)
-	wg.Wait()
-	fmt.Fprintf(logFile, "%s preflight exited %d (%v)\n", stamp(), code, execErr)
-	exit := code
 
-	if ctx.Err() != nil {
-		return finish(StatusError, "async preflight runner was stopped before the preflight finished", &exit, "")
-	}
-	if timedOut {
-		reason := fmt.Sprintf("preflight exceeded its %s timeout and was killed", timeout)
-		raw, _ := json.Marshal(map[string]string{"head_sha": m.Head, "source_bead_id": m.Source, "status": ReceiptTimedOut, "reason": reason})
-		_ = writeFileAtomic(m.ReceiptCopy, raw)
-		return finish(StatusFailed, reason, &exit, ReceiptTimedOut)
-	}
-	if execErr != nil {
-		return finish(StatusError, fmt.Sprintf("preflight could not run: %v", execErr), &exit, "")
-	}
-	if head, err := deps.Git(m.Worktree, "rev-parse", "HEAD"); err != nil || head != m.Head {
-		return finish(StatusError, fmt.Sprintf("worktree head moved to %q during the preflight; the receipt does not prove %s", head, m.Head), &exit, "")
-	}
-	raw, err := os.ReadFile(receiptAbs)
-	if err != nil && code == 0 {
-		// hq-4gmjjb: an infrastructure-only head takes preflight's
-		// infrastructure route, which records its proof under
-		// .delivery/infrastructure-receipts/ and ignores --receipt.
-		if adopted, ok := adoptInfrastructureReceipt(m, runStart); ok {
-			raw, err = adopted, nil
-			_ = os.MkdirAll(filepath.Dir(receiptAbs), 0o755)
-			_ = writeFileAtomic(receiptAbs, raw) // the requested path now holds the proof too
-			fmt.Fprintf(logFile, "%s adopted the infrastructure receipt for %s@%s as the async receipt\n", stamp(), m.Source, short(m.Head))
+	pressure := func() string {
+		if deps.Pressure == nil {
+			return "host pressure unavailable"
 		}
+		return deps.Pressure()
 	}
-	if err != nil {
-		return finish(StatusError, fmt.Sprintf("preflight exited %d without a receipt at %s", code, m.ReceiptPath), &exit, "")
+	runParent := ctx
+	command := m.Command
+	attempt := 1
+	// rerunnable prepares the one rerun after an infrastructure death: the
+	// preflight recorded no product failure (no receipt), so rerun it on the
+	// same, unchanged head with --recheck-environment (hq-y1q7ew). It reports
+	// false when the worktree no longer holds that head cleanly.
+	rerunnable := func(reason string) bool {
+		if head, err := deps.Git(m.Worktree, "rev-parse", "HEAD"); err != nil || head != m.Head {
+			return false
+		}
+		if dirty, err := deps.Git(m.Worktree, "status", "--porcelain", "--untracked-files=no"); err != nil || dirty != "" {
+			return false
+		}
+		if runParent.Err() != nil {
+			if deps.Signals == nil {
+				return false
+			}
+			runParent, stopRerunSignals = deps.Signals()
+		}
+		fmt.Fprintf(logFile, "%s %s; rerunning once on %s with --recheck-environment\n", stamp(), reason, short(m.Head))
+		save(func(m *Marker) {
+			m.RecheckedEnvironment = truncate(reason, 1500)
+			m.StartedAt, m.HeartbeatAt = stamp(), stamp() // the rerun gets its own timeout
+		})
+		command = withRecheckEnvironment(m.Command)
+		attempt++
+		return true
+	}
+	var raw []byte
+	var code int
+	var exit int
+	for {
+		_ = os.Remove(receiptAbs) // never read a receipt from an earlier attempt
+		// Filesystem times can be coarser than the clock; allow a second of slack.
+		runStart := time.Now().Add(-time.Second)
+		fmt.Fprintf(logFile, "%s async preflight %s@%s in %s: %s\n", stamp(), m.Source, m.Head, m.Worktree, strings.Join(command, " "))
+
+		stop := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			t := time.NewTicker(interval)
+			defer t.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-t.C:
+					save(func(m *Marker) { m.HeartbeatAt = stamp() })
+				}
+			}
+		}()
+		runCtx, cancelRun := context.WithTimeout(runParent, timeout)
+		var execErr error
+		code, execErr = deps.Exec(runCtx, m.Worktree, command, logFile)
+		timedOut := runParent.Err() == nil && errors.Is(runCtx.Err(), context.DeadlineExceeded)
+		cancelRun()
+		close(stop)
+		wg.Wait()
+		fmt.Fprintf(logFile, "%s preflight exited %d (%v)\n", stamp(), code, execErr)
+		exit = code
+
+		if runParent.Err() != nil {
+			reason := fmt.Sprintf("async preflight runner was stopped before the preflight finished (%v; %s)", context.Cause(runParent), pressure())
+			if _, statErr := os.Stat(StopRequestPath(markerPath)); statErr == nil {
+				// gt asked this runner to stop (a superseded or retired run): never rerun.
+				return finish(StatusError, reason+"; stop requested by gt", &exit, "")
+			}
+			if attempt > 1 {
+				return finish(StatusError, reason+"; the one --recheck-environment rerun was also stopped", &exit, "")
+			}
+			if !rerunnable(reason) {
+				return finish(StatusError, reason, &exit, "")
+			}
+			continue
+		}
+		if timedOut {
+			reason := fmt.Sprintf("preflight exceeded its %s timeout and was killed", timeout)
+			raw, _ := json.Marshal(map[string]string{"head_sha": m.Head, "source_bead_id": m.Source, "status": ReceiptTimedOut, "reason": reason})
+			_ = writeFileAtomic(m.ReceiptCopy, raw)
+			return finish(StatusFailed, reason, &exit, ReceiptTimedOut)
+		}
+		if execErr != nil {
+			return finish(StatusError, fmt.Sprintf("preflight could not run: %v", execErr), &exit, "")
+		}
+		if head, err := deps.Git(m.Worktree, "rev-parse", "HEAD"); err != nil || head != m.Head {
+			return finish(StatusError, fmt.Sprintf("worktree head moved to %q during the preflight; the receipt does not prove %s", head, m.Head), &exit, "")
+		}
+		raw, err = os.ReadFile(receiptAbs)
+		if err != nil && code == 0 {
+			// hq-4gmjjb: an infrastructure-only head takes preflight's
+			// infrastructure route, which records its proof under
+			// .delivery/infrastructure-receipts/ and ignores --receipt.
+			if adopted, ok := adoptInfrastructureReceipt(m, runStart); ok {
+				raw, err = adopted, nil
+				_ = os.MkdirAll(filepath.Dir(receiptAbs), 0o755)
+				_ = writeFileAtomic(receiptAbs, raw) // the requested path now holds the proof too
+				fmt.Fprintf(logFile, "%s adopted the infrastructure receipt for %s@%s as the async receipt\n", stamp(), m.Source, short(m.Head))
+			}
+		}
+		if err == nil {
+			break
+		}
+		// hq-y1q7ew: no receipt means the preflight recorded no product failure;
+		// the host killed its process group. Record what the host was doing and
+		// rerun once on the same, unchanged head. A second death stays an infra
+		// ERROR, never a product failure.
+		reason := fmt.Sprintf("preflight exited %d without a receipt at %s (%s)", code, m.ReceiptPath, pressure())
+		if attempt > 1 {
+			return finish(StatusError, reason+"; the one --recheck-environment rerun also died", &exit, "")
+		}
+		if !rerunnable(reason) {
+			return finish(StatusError, reason, &exit, "")
+		}
 	}
 	var r struct {
 		Receipt
@@ -227,6 +331,21 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 		reason += ": " + strings.Join(reasons, "; ")
 	}
 	return finish(StatusFailed, reason, &exit, r.Status)
+}
+
+// StopRequestPath records that gt itself asked a runner to stop, so the
+// runner does not mistake a deliberate stop for a host kill.
+func StopRequestPath(markerPath string) string { return sibling(markerPath, ".stop-requested") }
+
+// withRecheckEnvironment returns command with preflight's --recheck-environment
+// reason, unless the command already carries one.
+func withRecheckEnvironment(command []string) []string {
+	for _, arg := range command {
+		if arg == "--recheck-environment" || strings.HasPrefix(arg, "--recheck-environment=") {
+			return command
+		}
+	}
+	return append(append([]string(nil), command...), "--recheck-environment", RecheckEnvironmentReason)
 }
 
 func writeFileAtomic(path string, raw []byte) error {

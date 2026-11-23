@@ -100,6 +100,9 @@ type Marker struct {
 	ExitCode      *int     `json:"exit_code,omitempty"`
 	ReceiptStatus string   `json:"receipt_status,omitempty"`
 	Reason        string   `json:"reason,omitempty"`
+	// RecheckedEnvironment is the infrastructure death that made the runner
+	// rerun this head once with --recheck-environment (hq-y1q7ew).
+	RecheckedEnvironment string `json:"rechecked_environment,omitempty"`
 }
 
 var (
@@ -270,10 +273,12 @@ func Live(m *Marker, now time.Time) bool {
 // Stop sends SIGTERM to a run's runner when it is still the recorded process
 // (PID and start time match). The runner then kills the preflight's process
 // group and records an error. Returns whether a signal was sent.
-func Stop(m *Marker) bool {
+func Stop(markerPath string, m *Marker) bool {
 	if m == nil || (m.Status != StatusRunning && m.Status != StatusStarting) || !runnerPresent(m) {
 		return false
 	}
+	// hq-y1q7ew: mark the stop as gt's own, so the runner does not rerun.
+	_ = os.WriteFile(StopRequestPath(markerPath), []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o644)
 	return killProcess(m.PID, syscall.SIGTERM) == nil
 }
 

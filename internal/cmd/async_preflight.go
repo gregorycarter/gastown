@@ -180,7 +180,7 @@ type preflightGateDeps struct {
 	comment func(id, text string) error
 	update  func(id, description string) error // records a receipt carry-over
 	now     func() time.Time
-	stop    func(*asyncpreflight.Marker) bool // default asyncpreflight.Stop
+	stop    func(markerPath string, m *asyncpreflight.Marker) bool // default asyncpreflight.Stop
 }
 
 // runPreflightGate evaluates an MR and, with apply, returns a not-landable
@@ -212,7 +212,7 @@ func runPreflightGate(rigPath, mrID, branchHead string, apply bool, d preflightG
 		if stop == nil {
 			stop = asyncpreflight.Stop
 		}
-		if stop(res.Run) {
+		if stop(res.Marker, res.Run) {
 			res.Reason += "; superseded runner stopped"
 		}
 	}

@@ -390,7 +390,8 @@ func TestRunOutcomes(t *testing.T) {
 		{"light receipt never passes", func(r *runFixture) {
 			r.receipt = map[string]any{"head_sha": headA, "source_bead_id": src, "status": "passed_light"}
 		}, StatusFailed, "passed_light", 1, "passed_light"},
-		{"no receipt", func(r *runFixture) { r.exit = 2 }, StatusError, "", 1, "without a receipt"},
+		// hq-y1q7ew: no receipt is an infrastructure death; one rerun, then ERROR.
+		{"no receipt", func(r *runFixture) { r.exit = 2 }, StatusError, "", 2, "the one --recheck-environment rerun also died"},
 		{"receipt for another head", func(r *runFixture) {
 			r.receipt = map[string]any{"head_sha": headB, "source_bead_id": src, "status": "passed"}
 		}, StatusError, "passed", 1, "receipt binds"},
@@ -519,13 +520,17 @@ func TestProcessStartTimeAndStop(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- c.Wait() }()
+	path := filepath.Join(t.TempDir(), "run.json")
 	m := &Marker{Status: StatusRunning, PID: c.Process.Pid, PIDStart: "not-this-process"}
-	if Stop(m) {
+	if Stop(path, m) {
 		t.Fatal("stopped a process whose start time does not match (reused PID)")
 	}
 	m.PIDStart = processStartTime(c.Process.Pid)
-	if !Stop(m) {
+	if !Stop(path, m) {
 		t.Fatal("did not stop the recorded runner")
+	}
+	if _, err := os.Stat(StopRequestPath(path)); err != nil {
+		t.Fatalf("a deliberate stop left no stop request: %v", err)
 	}
 	select {
 	case <-done:
