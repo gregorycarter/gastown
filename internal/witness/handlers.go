@@ -1885,7 +1885,7 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	// but fail before exiting the polecat session. If successful MR evidence exists
 	// and the hook is either gone or still open, nudge the live session to finish
 	// instead of letting it sit idle forever.
-	if zombie, found := detectSubmittedStillRunning(bd, workDir, polecatName, sessionName, t, hb, snap, witCfg.HeartbeatStartupGraceD()); found {
+	if zombie, found := detectSubmittedStillRunning(bd, workDir, townRoot, rigName, polecatName, sessionName, t, hb, snap, witCfg.HeartbeatStartupGraceD()); found {
 		return zombie, true
 	}
 
@@ -1928,7 +1928,7 @@ func stuckInDoneRestartVeto(pendingMR, agentAlive bool, preflight string) string
 	return ""
 }
 
-func detectSubmittedStillRunning(bd *BdCli, workDir, polecatName, sessionName string, t *tmux.Tmux, hb *polecat.SessionHeartbeat, snap *agentBeadSnapshot, staleThreshold time.Duration) (ZombieResult, bool) {
+func detectSubmittedStillRunning(bd *BdCli, workDir, townRoot, rigName, polecatName, sessionName string, t *tmux.Tmux, hb *polecat.SessionHeartbeat, snap *agentBeadSnapshot, staleThreshold time.Duration) (ZombieResult, bool) {
 	snapState, snapHook := "", ""
 	if snap != nil {
 		snapState, snapHook = snap.AgentState, snap.HookBead
@@ -1943,6 +1943,13 @@ func detectSubmittedStillRunning(bd *BdCli, workDir, polecatName, sessionName st
 	}
 	age, shouldNudge := isSubmittedStillRunningCandidate(snap, hb, staleThreshold)
 	if !shouldNudge {
+		return ZombieResult{}, false
+	}
+	// kasb-2ifwk: submission evidence on the agent bead can be an old,
+	// closed or superseded MR while the same session works a live
+	// assignment. Never tell a busy worker to exit.
+	if veto := submittedExitNudgeVeto(bd, workDir, townRoot, rigName, polecatName, sessionName, snapHook, snap, t); veto != "" {
+		fmt.Fprintf(os.Stderr, "witness: not nudging %s/%s to exit as submitted-still-running: %s\n", rigName, polecatName, veto)
 		return ZombieResult{}, false
 	}
 

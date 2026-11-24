@@ -121,3 +121,33 @@ func TestPendingMRBlocker(t *testing.T) {
 		})
 	}
 }
+
+// kasb-2ifwk: a live session's own agent stack is excluded; the work it
+// started is not.
+func TestWorktreeActivityBlockerExcluding(t *testing.T) {
+	sandbox := filepath.Join(t.TempDir(), "polecats", "nuka")
+	worktree := filepath.Join(sandbox, "kasb_core")
+	agentOnly := []ProcessPath{
+		{PID: 83037, Command: "codex", FD: "cwd", Path: worktree},
+		{PID: 84197, Command: "codex-code-mode", FD: "cwd", Path: worktree},
+	}
+	stack := map[int]bool{83037: true, 84197: true}
+
+	withProcessPaths(t, agentOnly, nil)
+	if got := WorktreeActivityBlockerExcluding("", sandbox, time.Now(), stack); got != "" {
+		t.Errorf("idle agent stack only: blocker = %q, want none", got)
+	}
+	if got := WorktreeActivityBlockerExcluding("", sandbox, time.Now(), nil); !strings.Contains(got, "pid=83037") {
+		t.Errorf("nothing excluded: blocker = %q, want the agent itself", got)
+	}
+
+	withProcessPaths(t, append(agentOnly, ProcessPath{PID: 35041, Command: "python3", FD: "cwd", Path: filepath.Join(worktree, "apps", "api")}), nil)
+	if got := WorktreeActivityBlockerExcluding("", sandbox, time.Now(), stack); !strings.Contains(got, "pid=35041(python3)") || strings.Contains(got, "83037") {
+		t.Errorf("test run under the agent: blocker = %q, want only pid 35041", got)
+	}
+
+	withProcessPaths(t, nil, errors.New("lsof failed"))
+	if got := WorktreeActivityBlockerExcluding("", sandbox, time.Now(), stack); !strings.HasPrefix(got, "worktree_activity=unknown") {
+		t.Errorf("lsof error: blocker = %q, want unknown (fail closed)", got)
+	}
+}

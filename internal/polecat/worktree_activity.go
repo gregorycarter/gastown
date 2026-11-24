@@ -107,6 +107,10 @@ func parseLsofFields(out []byte) []ProcessPath {
 // parent) whose cwd, executed code or a file open for writing lies at or
 // below root.
 func LiveProcessesUnder(root string) ([]ProcessPath, error) {
+	return liveProcessesUnder(root, nil)
+}
+
+func liveProcessesUnder(root string, exclude map[int]bool) ([]ProcessPath, error) {
 	paths, err := ListProcessPaths()
 	if err != nil {
 		return nil, err
@@ -116,7 +120,7 @@ func LiveProcessesUnder(root string) ([]ProcessPath, error) {
 	seen := map[int]bool{}
 	var hits []ProcessPath
 	for _, p := range paths {
-		if p.PID == self || p.PID == parent || seen[p.PID] || !p.usesSandbox() {
+		if p.PID == self || p.PID == parent || exclude[p.PID] || seen[p.PID] || !p.usesSandbox() {
 			continue
 		}
 		for _, r := range roots {
@@ -138,6 +142,14 @@ func LiveProcessesUnder(root string) ([]ProcessPath, error) {
 // receipt (kasb-84hoc). Detection failures are themselves a reason: an
 // unverifiable sandbox is never reclaimable.
 func WorktreeActivityBlocker(rigPath, sandboxDir string, now time.Time) string {
+	return WorktreeActivityBlockerExcluding(rigPath, sandboxDir, now, nil)
+}
+
+// WorktreeActivityBlockerExcluding is WorktreeActivityBlocker that ignores
+// the given processes: a live session's own agent stack (its pane, shell and
+// agent binary sit in the worktree while the agent is idle), so that only
+// work the agent started, or a detached run, counts (kasb-2ifwk).
+func WorktreeActivityBlockerExcluding(rigPath, sandboxDir string, now time.Time, exclude map[int]bool) string {
 	if strings.TrimSpace(sandboxDir) == "" {
 		return "worktree_activity=unknown: empty sandbox path"
 	}
@@ -150,7 +162,7 @@ func WorktreeActivityBlocker(rigPath, sandboxDir string, now time.Time) string {
 			return reason
 		}
 	}
-	procs, err := LiveProcessesUnder(sandboxDir)
+	procs, err := liveProcessesUnder(sandboxDir, exclude)
 	if err != nil {
 		return "worktree_activity=unknown: " + err.Error()
 	}
