@@ -40,6 +40,25 @@ func checkRoleLocation(info RoleInfo) error {
 	return nil
 }
 
+// roleHomeWithoutWorktree returns why a role's git checks do not apply, or
+// "" when they do. Only the witness qualifies, and only while its canonical
+// home (and cwd) has no git metadata of its own: workers (polecat, crew, refinery) must
+// always prove their worktree, and town roles use the town repository.
+func roleHomeWithoutWorktree(info RoleInfo) string {
+	if info.Role != RoleWitness || info.Home == "" {
+		return ""
+	}
+	for _, dir := range []string{info.Home, info.WorkDir} {
+		if dir == "" {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil || !os.IsNotExist(err) {
+			return ""
+		}
+	}
+	return "role home " + info.Home + " is not a git worktree"
+}
+
 func primeCheckCommand(cwd, name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -120,27 +139,39 @@ func runPrimeCheck(cmd *cobra.Command, info RoleInfo, beadID string) error {
 		out, err := primeCheckCommand(gitDir, "git", args...)
 		return strings.TrimSpace(string(out)), err
 	}
-	repoRoot, err := readGit("rev-parse", "--show-toplevel")
-	if err != nil {
-		return err
-	}
-	if townRepository {
-		actualRoot, err := filepath.EvalSymlinks(repoRoot)
-		if err != nil || actualRoot != gitDir {
-			return fmt.Errorf("Git repository is not the canonical town %s", gitDir)
+	var repoRoot, branch, head, status string
+	gitSkipped := ""
+	if reason := roleHomeWithoutWorktree(info); reason != "" {
+		// kasb-84hoc: the witness lives in <rig>/witness, which holds only
+		// runtime state; the session Git ceiling hides the town repository, so
+		// every git read failed and the witness could not pass the check.
+		// There is no worktree to protect here: skip the git checks only.
+		gitSkipped = reason
+		repoRoot = info.Home
+	} else {
+		var err error
+		repoRoot, err = readGit("rev-parse", "--show-toplevel")
+		if err != nil {
+			return err
 		}
-	}
-	branch, err := readGit("branch", "--show-current")
-	if err != nil {
-		return err
-	}
-	head, err := readGit("rev-parse", "HEAD")
-	if err != nil {
-		return err
-	}
-	status, err := readGit("status", "--porcelain=v1", "--untracked-files=normal")
-	if err != nil {
-		return err
+		if townRepository {
+			actualRoot, err := filepath.EvalSymlinks(repoRoot)
+			if err != nil || actualRoot != gitDir {
+				return fmt.Errorf("Git repository is not the canonical town %s", gitDir)
+			}
+		}
+		branch, err = readGit("branch", "--show-current")
+		if err != nil {
+			return err
+		}
+		head, err = readGit("rev-parse", "HEAD")
+		if err != nil {
+			return err
+		}
+		status, err = readGit("status", "--porcelain=v1", "--untracked-files=normal")
+		if err != nil {
+			return err
+		}
 	}
 	if beadID == "" && info.Role == RolePolecat {
 		beadID = parseBranchName(branch).Issue
@@ -154,6 +185,12 @@ func runPrimeCheck(cmd *cobra.Command, info RoleInfo, beadID string) error {
 	result := map[string]interface{}{"ok": true, "role": getAgentIdentity(info), "cwd": info.WorkDir, "git_cwd": gitDir, "branch": branch, "head": head, "changed_paths": 0, "checked_at": time.Now().UTC().Format(time.RFC3339)}
 	if status != "" {
 		result["changed_paths"] = len(strings.Split(status, "\n"))
+	}
+	if gitSkipped != "" {
+		delete(result, "git_cwd")
+		delete(result, "branch")
+		delete(result, "head")
+		result["git_skipped"] = gitSkipped
 	}
 	if beadID != "" {
 		dir := beads.ResolveHookDir(info.TownRoot, beadID, rigBeadsRoot(info))

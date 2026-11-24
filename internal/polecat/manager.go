@@ -2459,15 +2459,31 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 		input.IgnoreCleanupStatus = true
 	}
 	input.MQNotRequired = m.mqNotRequiredSource(workIssue)
-	if input.MQCheckRequired && input.HasSubmittableWork && !input.AssignedBeadTerminal && !input.MQNotRequired {
+	if input.MQCheckRequired && input.HasSubmittableWork && !input.MQNotRequired {
 		mr, err := m.beads.FindMRForBranchAny(input.Branch)
 		if err != nil {
 			input.MQLookupFailed = true
 		} else {
 			input.MRSubmitted = mr != nil
 		}
+		// kasb-84hoc: the MR bead of a landed change can be gone; a closed
+		// source whose change a target commit names is landed, not unsubmitted.
+		if !input.MRSubmitted && input.AssignedBeadTerminal {
+			input.LandedOnTarget = SourceLandedOnTarget(clonePath, workIssue, targetRefs)
+		}
 	}
 	return input
+}
+
+// SourceLandedOnTarget reports whether a commit on the polecat's target branch
+// names sourceIssue. A lookup failure is "not landed" (fail closed: the caller
+// then keeps the NEEDS_MQ_SUBMIT verdict).
+func SourceLandedOnTarget(clonePath, sourceIssue string, targetRefs []string) bool {
+	if strings.TrimSpace(clonePath) == "" || strings.TrimSpace(sourceIssue) == "" {
+		return false
+	}
+	sha, _, err := git.NewGit(clonePath).LandedIssueCommit(sourceIssue, targetRefs)
+	return err == nil && sha != ""
 }
 
 // hookBeadSafeForWorkstate judges the agent's description hook_bead. stale

@@ -37,8 +37,14 @@ type WorkstateInput struct {
 	HasSubmittableWork             bool
 	MQNotRequired                  bool
 	AssignedBeadTerminal           bool
-	MRSubmitted                    bool
-	MQLookupFailed                 bool
+	// LandedOnTarget is direct proof that the source bead's change is on the
+	// target branch: a target commit names the bead (the lander rebases, so
+	// neither the SHA nor always the patch-id survives). Together with a
+	// terminal source it settles the merge-queue question even after the MR
+	// bead has been compacted away (kasb-84hoc).
+	LandedOnTarget bool
+	MRSubmitted    bool
+	MQLookupFailed bool
 }
 
 // WorkstateDisposition is the canonical polecat lifecycle decision. It is pure
@@ -190,6 +196,8 @@ func decideWorkPreservation(in WorkstateInput) WorkstateDisposition {
 			d.MQStatus = "not_required"
 		} else if in.MRSubmitted {
 			d.MQStatus = "submitted"
+		} else if in.AssignedBeadTerminal && in.LandedOnTarget {
+			d.MQStatus = "landed"
 		} else {
 			d.Verdict = WorkstateVerdictNeedsMQSubmit
 			d.Reason = "mq-not-submitted"

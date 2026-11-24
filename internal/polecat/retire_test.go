@@ -83,7 +83,7 @@ if os.path.basename(sys.argv[0])=='tmux':
  print("can't find session",file=sys.stderr);sys.exit(1)
 if m.get('lookupError'): print('synthetic lookup failure',file=sys.stderr);sys.exit(1)
 if 'show' in a:
- ident=a[a.index('show')+1]
+ ident=[x for x in a[a.index('show')+1:] if not x.startswith('-')][0]
  if 'polecat' in ident: print(json.dumps([{'id':ident,'title':'worker','status':'open','issue_type':'task','labels':['gt:agent'],'description':m['description']}]))
  elif ident=='gt-task': print(json.dumps([{'id':ident,'status':m['sourceStatus'],'issue_type':'task'}]))
  elif ident=='gt-mr': print(json.dumps([{'id':ident,'status':'blocked','labels':['gt:merge-request']}]))

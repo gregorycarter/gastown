@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/asyncpreflight"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/channelevents"
 	"github.com/steveyegge/gastown/internal/config"
@@ -858,6 +859,7 @@ func shouldNotifyMayorSlotOpen(workDir, rigName, polecatName string) (bool, stri
 
 	var status struct {
 		Verdict  string   `json:"verdict"`
+		Reason   string   `json:"reason,omitempty"`
 		Blockers []string `json:"blockers,omitempty"`
 	}
 	jsonOutput := strings.TrimSpace(output)
@@ -866,6 +868,12 @@ func shouldNotifyMayorSlotOpen(workDir, rigName, polecatName string) (bool, stri
 	}
 	if err := json.Unmarshal([]byte(jsonOutput), &status); err != nil {
 		return false, fmt.Sprintf("check-recovery json parse failed: %v", err)
+	}
+	// kasb-84hoc: check-recovery withholds SAFE_TO_NUKE while the session is
+	// live. A completed worker's session is usually still exiting when its
+	// POLECAT_DONE arrives, so a live session alone does not close the slot.
+	if status.Verdict == "WORKING" && status.Reason == "live-session" {
+		return true, ""
 	}
 	if status.Verdict != "SAFE_TO_NUKE" {
 		reason := "check-recovery verdict=" + status.Verdict
@@ -1789,7 +1797,23 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	// Legacy detection: Check for done-intent stuck too long (polecat hung in gt done).
 	// gt-dsgp: Restart instead of nuke — the session is stuck trying to exit,
 	// a fresh start will let it retry or pick up its hook cleanly.
-	if doneIntent != nil && time.Since(doneIntent.Timestamp) > witCfg.DoneIntentStuckTimeoutD() {
+	stuckInDone := doneIntent != nil && time.Since(doneIntent.Timestamp) > witCfg.DoneIntentStuckTimeoutD()
+	if stuckInDone {
+		// kasb-84hoc: an old done-intent label is not proof of a hung gt done.
+		// After gt done submitted, a bounced (BLOCKED needs-repair) MR sends
+		// the same worker back to work in the same session; a restart kills
+		// that work and its preflight. Fall through to the other checks.
+		preflight, preflightErr := asyncpreflight.ActiveForWorktree(filepath.Join(townRoot, rigName), filepath.Join(townRoot, rigName, "polecats", polecatName), time.Now())
+		if preflightErr != nil {
+			preflight = "async_preflight=unknown: " + preflightErr.Error()
+		}
+		pendingMR := hasPendingMRFromSnapshot(bd, workDir, rigName, polecatName, snap)
+		if veto := stuckInDoneRestartVeto(pendingMR, pendingMR && t.IsAgentAlive(sessionName), preflight); veto != "" {
+			fmt.Fprintf(os.Stderr, "witness: not restarting %s/%s as stuck-in-done: %s\n", rigName, polecatName, veto)
+			stuckInDone = false
+		}
+	}
+	if stuckInDone {
 		zombie := ZombieResult{
 			PolecatName:    polecatName,
 			AgentState:     snapState,
@@ -1886,6 +1910,22 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	}
 
 	return ZombieResult{}, false
+}
+
+// stuckInDoneRestartVeto returns why a polecat whose done-intent label is
+// older than the stuck timeout must not be restarted as stuck-in-done: an
+// async preflight still runs in its sandbox (or cannot be ruled out), or its
+// MR is still open or blocked while its agent is alive, so the worker has
+// resumed (or is repairing) the work rather than hanging in gt done
+// (kasb-84hoc). Empty means the restart may proceed.
+func stuckInDoneRestartVeto(pendingMR, agentAlive bool, preflight string) string {
+	if preflight != "" {
+		return preflight
+	}
+	if pendingMR && agentAlive {
+		return "merge request still open or blocked and the agent is alive"
+	}
+	return ""
 }
 
 func detectSubmittedStillRunning(bd *BdCli, workDir, polecatName, sessionName string, t *tmux.Tmux, hb *polecat.SessionHeartbeat, snap *agentBeadSnapshot, staleThreshold time.Duration) (ZombieResult, bool) {

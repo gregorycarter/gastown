@@ -167,6 +167,8 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 		return finish(StatusError, fmt.Sprintf("worktree %s has tracked changes before the preflight: %s %v", m.Worktree, truncate(dirty, 300), err), nil, "")
 	}
 
+	// Immutable run identity, read by the heartbeat without the marker lock.
+	ident := runIdentity{Source: m.Source, Head: m.Head, Worktree: m.Worktree, CreatedAt: m.CreatedAt}
 	receiptAbs := filepath.Join(m.Worktree, m.ReceiptPath)
 	stopRerunSignals := func() {}
 	defer func() { stopRerunSignals() }()
@@ -224,6 +226,12 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 		runStart := time.Now().Add(-time.Second)
 		fmt.Fprintf(logFile, "%s async preflight %s@%s in %s: %s\n", stamp(), m.Source, m.Head, m.Worktree, strings.Join(command, " "))
 
+		runCtx, cancelRun := context.WithTimeout(runParent, timeout)
+		// kasb-84hoc: the heartbeat also watches for supersession and stops the
+		// preflight's process group at once, instead of finishing a run whose
+		// receipt cannot prove the head (~420 wall-min a day were lost this way).
+		execCtx, cancelExec := context.WithCancelCause(runCtx)
+		var superseded string // guarded by mu
 		stop := make(chan struct{})
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -237,19 +245,34 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 					return
 				case <-t.C:
 					save(func(m *Marker) { m.HeartbeatAt = stamp() })
+					if why := supersession(deps, markerPath, ident); why != "" {
+						mu.Lock()
+						superseded = why
+						mu.Unlock()
+						fmt.Fprintf(logFile, "%s %s; stopping the preflight process group\n", stamp(), why)
+						cancelExec(errors.New(why))
+						return
+					}
 				}
 			}
 		}()
-		runCtx, cancelRun := context.WithTimeout(runParent, timeout)
 		var execErr error
-		code, execErr = deps.Exec(runCtx, m.Worktree, command, logFile)
+		code, execErr = deps.Exec(execCtx, m.Worktree, command, logFile)
 		timedOut := runParent.Err() == nil && errors.Is(runCtx.Err(), context.DeadlineExceeded)
+		cancelExec(nil)
 		cancelRun()
 		close(stop)
 		wg.Wait()
 		fmt.Fprintf(logFile, "%s preflight exited %d (%v)\n", stamp(), code, execErr)
 		exit = code
 
+		mu.Lock()
+		supersededReason := superseded
+		mu.Unlock()
+		if supersededReason != "" {
+			// Never rerun: no receipt for this head can help any more.
+			return finish(StatusError, supersededReason, &exit, "")
+		}
 		if runParent.Err() != nil {
 			reason := fmt.Sprintf("async preflight runner was stopped before the preflight finished (%v; %s)", context.Cause(runParent), pressure())
 			if _, statErr := os.Stat(StopRequestPath(markerPath)); statErr == nil {
@@ -331,6 +354,56 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 		reason += ": " + strings.Join(reasons, "; ")
 	}
 	return finish(StatusFailed, reason, &exit, r.Status)
+}
+
+// runIdentity is what a run proves: a source bead at a head in a worktree.
+type runIdentity struct {
+	Source, Head, Worktree, CreatedAt string
+}
+
+// supersession returns why a running preflight can no longer produce a useful
+// receipt (kasb-84hoc), or "" to keep running:
+//   - the worktree HEAD moved away from the head under test: the receipt
+//     would bind a head the worktree no longer holds, and Run would record an
+//     error at the end anyway;
+//   - a newer marker exists for the same source bead at another head: gt done
+//     rebound the MR to that run, so this one proves nothing anyone will read.
+//
+// A git error is not evidence of a move (an index.lock race, say): keep running.
+func supersession(deps RunDeps, markerPath string, id runIdentity) string {
+	if head, err := deps.Git(id.Worktree, "rev-parse", "HEAD"); err == nil && head != "" && head != id.Head {
+		return fmt.Sprintf("worktree head moved to %s during the preflight; the receipt cannot prove %s, so the run was stopped early", short(head), short(id.Head))
+	}
+	if newer := NewerMarkerForSource(markerPath, id.Source, id.Head, id.CreatedAt); newer != "" {
+		return fmt.Sprintf("superseded by a newer async preflight %s for %s; the run on %s was stopped early", filepath.Base(newer), id.Source, short(id.Head))
+	}
+	return ""
+}
+
+// NewerMarkerForSource returns the path of a marker in markerPath's directory
+// for the same source at a different head, created after createdAt.
+func NewerMarkerForSource(markerPath, source, head, createdAt string) string {
+	if !sourceRe.MatchString(source) {
+		return ""
+	}
+	created, err := time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return ""
+	}
+	files, _ := filepath.Glob(filepath.Join(filepath.Dir(markerPath), source+"--*.json"))
+	for _, p := range files {
+		if p == markerPath || strings.HasSuffix(p, ".receipt.json") {
+			continue
+		}
+		other, err := Load(p)
+		if err != nil || other.Source != source || other.Head == head {
+			continue
+		}
+		if otherCreated, err := time.Parse(time.RFC3339Nano, other.CreatedAt); err == nil && otherCreated.After(created) {
+			return p
+		}
+	}
+	return ""
 }
 
 // StopRequestPath records that gt itself asked a runner to stop, so the

@@ -215,6 +215,17 @@ func (m *Manager) inspectRetirement(name string) (Retirement, *beads.Issue, erro
 	} else if !r.Empty {
 		return refuse("source identity unavailable")
 	}
+	// kasb-84hoc: a BLOCKED (needs-repair/needs-rebase) or open MR for the
+	// source goes back to this worker even when active_mr no longer names it.
+	if blocker := PendingMRBlocker(m.beads, name, r.Branch, r.Source); blocker != "" {
+		return refuse(blocker)
+	}
+	// kasb-84hoc: a detached async preflight (and its pytest children) runs in
+	// the sandbox after gt done and outlives the session. Any live process
+	// rooted in the sandbox, or an unverifiable one, retains it.
+	if blocker := WorktreeActivityBlocker(m.rig.Path, dir, time.Now()); blocker != "" {
+		return refuse(blocker)
+	}
 	r.Status = "eligible"
 	return r, agent, nil
 }

@@ -2818,3 +2818,41 @@ func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 		t.Errorf("action = %q, should not archive when work is not merged", z.Action)
 	}
 }
+
+// kasb-84hoc: the patrol restarted raider as stuck-in-done while its MR was
+// BLOCKED needs-repair and its session was repairing it.
+func TestStuckInDoneRestartVeto(t *testing.T) {
+	cases := []struct {
+		name                  string
+		pendingMR, agentAlive bool
+		preflight             string
+		veto                  bool
+	}{
+		{"hung gt done without MR", false, true, "", false},
+		{"dead agent with MR", true, false, "", false},
+		{"open MR and live agent", true, true, "", true},
+		{"async preflight running", false, false, "async_preflight=running source=kasb-x", true},
+		{"preflight state unknown", false, false, "async_preflight=unknown: unreadable", true},
+	}
+	for _, tc := range cases {
+		if got := stuckInDoneRestartVeto(tc.pendingMR, tc.agentAlive, tc.preflight); (got != "") != tc.veto {
+			t.Errorf("%s: veto = %q, want veto=%v", tc.name, got, tc.veto)
+		}
+	}
+}
+
+func TestShouldNotifyMayorSlotOpenLiveSessionOnly(t *testing.T) {
+	prev := slotOpenRecoveryCheck
+	t.Cleanup(func() { slotOpenRecoveryCheck = prev })
+	for output, want := range map[string]bool{
+		`{"verdict":"WORKING","reason":"live-session","blockers":["session_state=running"]}`:                   true,
+		`{"verdict":"WORKING","reason":"live-activity","blockers":["live_process_in_worktree pid=1(pytest)"]}`: false,
+		`{"verdict":"WORKING","reason":"not-idle"}`:                                                            false,
+		`{"verdict":"SAFE_TO_NUKE"}`: true,
+	} {
+		slotOpenRecoveryCheck = func(string, string, string) (string, error) { return output, nil }
+		if got, reason := shouldNotifyMayorSlotOpen("/tmp", "kasb_core", "raider"); got != want {
+			t.Errorf("%s: notify=%v (%s), want %v", output, got, reason, want)
+		}
+	}
+}

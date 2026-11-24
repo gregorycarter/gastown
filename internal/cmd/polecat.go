@@ -1180,10 +1180,21 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	}
 
 	status.CleanupStatus = input.CleanupStatus
+	// kasb-84hoc: an OPEN or BLOCKED MR found by branch or source bead keeps
+	// the sandbox even when the agent bead's active_mr pointer is stale.
+	if input.ActiveMRBlocker == "" {
+		input.ActiveMRBlocker = polecat.PendingMRBlocker(bd, polecatName, status.Branch, status.Issue)
+	}
 	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr)
 	appendRecoveryGitStateDiagnostic(&status, p.ClonePath, gitState, gitErr)
 	disposition := polecat.DecideWorkstate(input)
 	applyWorkstateDispositionToRecoveryStatus(&status, disposition)
+	worktreeActivity := ""
+	if status.Verdict == polecat.WorkstateVerdictSafeToNuke {
+		// One host-wide lsof scan; only a SAFE_TO_NUKE verdict needs it.
+		worktreeActivity = polecat.WorktreeActivityBlocker(r.Path, filepath.Join(r.Path, "polecats", polecatName), time.Now())
+	}
+	applyLiveActivityToRecoveryStatus(&status, liveActivityBlockers(input.SessionKnown, input.SessionRunning, worktreeActivity))
 
 	if polecatCheckRecoveryReconcileCleanup {
 		reconcileCleanupStatusIfSafe(&status, bd, agentBeadID, p, fields)
@@ -1214,6 +1225,13 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	switch status.Verdict {
+	case polecat.WorkstateVerdictWorking:
+		fmt.Printf("  Verdict:         %s\n", style.Warning.Render(polecat.WorkstateVerdictWorking))
+		fmt.Println()
+		fmt.Printf("  %s Polecat is in use; not safe to nuke:\n", style.Warning.Render("⚠"))
+		for _, blocker := range status.Blockers {
+			fmt.Printf("    - %s\n", blocker)
+		}
 	case "NEEDS_MQ_SUBMIT":
 		fmt.Printf("  Verdict:         %s\n", style.Warning.Render("NEEDS_MQ_SUBMIT"))
 		fmt.Printf("  MQ Status:       %s\n", status.MQStatus)
@@ -1287,15 +1305,75 @@ func applyMQFactsToWorkstateInput(input *polecat.WorkstateInput, status *Recover
 	if targetRefLookupFailed {
 		input.MQLookupFailed = true
 	}
-	if !input.HasSubmittableWork || input.MQNotRequired || input.AssignedBeadTerminal {
+	if !input.HasSubmittableWork || input.MQNotRequired {
 		return
 	}
+	// A closed MR for the branch also proves submission, so look it up even
+	// when the source is terminal (kasb-84hoc).
 	mr, mrErr := bd.FindMRForBranchAny(status.Branch)
 	if mrErr != nil {
 		input.MQLookupFailed = true
 		return
 	}
 	input.MRSubmitted = mr != nil
+	if !input.MRSubmitted && input.AssignedBeadTerminal {
+		// The MR bead is gone after the merge: a closed source whose change a
+		// target commit names is landed, not unsubmitted.
+		input.LandedOnTarget = polecat.SourceLandedOnTarget(worktreePath, status.Issue, targetRefs)
+	}
+}
+
+// Reasons check-recovery reports with a WORKING verdict for a polecat that
+// is still in use (kasb-84hoc).
+const (
+	recoveryReasonLiveSession  = "live-session"
+	recoveryReasonLiveActivity = "live-activity"
+)
+
+// liveActivityBlockers lists what makes a polecat busy right now, whatever
+// its bead state: a live tmux session (or an unverifiable one) and live use
+// of its sandbox by an async preflight or any process (kasb-84hoc).
+func liveActivityBlockers(sessionKnown, sessionRunning bool, worktreeActivity string) []string {
+	var blockers []string
+	switch {
+	case !sessionKnown:
+		blockers = append(blockers, "session_state=unknown")
+	case sessionRunning:
+		blockers = append(blockers, "session_state=running")
+	}
+	if worktreeActivity != "" {
+		blockers = append(blockers, worktreeActivity)
+	}
+	return blockers
+}
+
+// applyLiveActivityToRecoveryStatus withdraws SAFE_TO_NUKE from a polecat
+// that is still in use. Bead and git state can all look finished while the
+// worker's session is repairing a bounced MR or a detached preflight (and its
+// pytest children) still runs in the worktree; a nuke on that verdict kills
+// the run and corrupts its receipt (kasb-84hoc). The verdict becomes WORKING:
+// leave it alone, nothing to recover. Other verdicts are already not safe and
+// keep their meaning; the activity is added as a diagnostic.
+func applyLiveActivityToRecoveryStatus(status *RecoveryStatus, blockers []string) {
+	if len(blockers) == 0 {
+		return
+	}
+	if status.Verdict != polecat.WorkstateVerdictSafeToNuke {
+		for _, blocker := range blockers {
+			status.Diagnostics = append(status.Diagnostics, "live_activity: "+blocker)
+		}
+		return
+	}
+	status.Verdict = polecat.WorkstateVerdictWorking
+	status.Reason = recoveryReasonLiveActivity
+	if len(blockers) == 1 && blockers[0] == "session_state=running" {
+		// Only the session is live: the witness still treats a completed
+		// worker's slot as open while its session finishes exiting.
+		status.Reason = recoveryReasonLiveSession
+	}
+	status.SafeToNuke = false
+	status.Reusable = false
+	status.Blockers = append(status.Blockers, blockers...)
 }
 
 func applyWorkstateDispositionToRecoveryStatus(status *RecoveryStatus, disposition polecat.WorkstateDisposition) {

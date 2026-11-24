@@ -6,11 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // polecatTarget represents a polecat to operate on.
@@ -217,8 +220,43 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 		}
 	}
 
+	// Check 2b (kasb-84hoc): an OPEN or BLOCKED MR for this polecat's source
+	// bead, found without relying on the agent bead's active_mr pointer.
+	if result.OpenMR == "" && infoErr == nil && polecatInfo != nil && polecatInfo.Issue != "" {
+		if blocker := polecat.PendingMRBlocker(sourcePendingMRFinder{bd}, target.polecatName, polecatInfo.Branch, polecatInfo.Issue); blocker != "" {
+			result.Reasons = append(result.Reasons, blocker)
+		}
+	}
+
+	// Check 4 (kasb-84hoc): the polecat is still in use: a live session, or
+	// an async preflight or any other process in its sandbox. Removing the
+	// sandbox kills that run and corrupts its receipt.
+	sessionName := session.PolecatSessionName(session.PrefixFor(target.rigName), target.polecatName)
+	running, sessionErr := nukeSessionProbe(sessionName)
+	activity := ""
+	if target.r != nil {
+		activity = polecat.WorktreeActivityBlocker(target.r.Path, filepath.Join(target.r.Path, "polecats", target.polecatName), time.Now())
+	}
+	result.Reasons = append(result.Reasons, liveActivityBlockers(sessionErr == nil, running, activity)...)
+
 	result.Blocked = len(result.Reasons) > 0
 	return result
+}
+
+// nukeSessionProbe reports whether a polecat's tmux session is live; tests
+// replace it.
+var nukeSessionProbe = func(sessionName string) (bool, error) {
+	return tmux.NewTmux().HasSession(sessionName)
+}
+
+// sourcePendingMRFinder limits PendingMRBlocker to the source-bead lookup:
+// checkPolecatSafety already checks (and reports) the branch MR itself.
+type sourcePendingMRFinder struct{ bd *beads.Beads }
+
+func (f sourcePendingMRFinder) FindMRForBranch(string) (*beads.Issue, error) { return nil, nil }
+
+func (f sourcePendingMRFinder) FindPendingMRsForIssue(issueID string) ([]*beads.Issue, error) {
+	return f.bd.FindPendingMRsForIssue(issueID)
 }
 
 func rigPrefix(r *rig.Rig) string {
