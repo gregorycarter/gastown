@@ -33,6 +33,12 @@ var (
 	errQueueCap   = errors.New("lease-wait cap exceeded")
 )
 
+// DefaultBackstopMargin is the slack above the queue cap plus run timeout for the
+// outer context deadline, so a stalled or panicked heartbeat can never leave a
+// preflight running forever; in normal operation the heartbeat always fires
+// first and this is pure backstop (kasb-9oupz.70).
+const DefaultBackstopMargin = 5 * time.Minute
+
 // RunDeps are the runner's side effects, injectable for tests.
 type RunDeps struct {
 	// Git runs git in dir and returns trimmed stdout.
@@ -47,6 +53,8 @@ type RunDeps struct {
 	Timeout time.Duration
 	// QueueCap overrides the marker's heavy-work lease-wait cap (tests).
 	QueueCap time.Duration
+	// BackstopMargin overrides the outer-deadline slack (tests).
+	BackstopMargin time.Duration
 	// Pressure describes the host's load when a preflight dies (tests override it).
 	Pressure func() string
 	// Signals returns a fresh stop context for the one rerun after the host
@@ -201,6 +209,10 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 	if queueCap <= 0 {
 		queueCap = m.QueueCap()
 	}
+	backstopMargin := deps.BackstopMargin
+	if backstopMargin <= 0 {
+		backstopMargin = DefaultBackstopMargin
+	}
 	// kasb-9oupz.70: tell the preflight where to report its heavy-work lease
 	// state. This runner process serves exactly one marker, so setting it in the
 	// environment is safe. A preflight that does not write the sentinel (an older
@@ -261,8 +273,11 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 		// kasb-9oupz.70: it also enforces the hard timeout, measured from lease
 		// acquisition (the sentinel the preflight writes), with a separate
 		// generous cap on the lease wait alone that reports lease starvation, not
-		// failed_timeout.
-		execCtx, cancelExec := context.WithCancelCause(runParent)
+		// failed_timeout. An outer deadline (queue cap + run timeout + margin) is
+		// the backstop: if the heartbeat stalls or panics the preflight is still
+		// killed, never left running forever.
+		outerCtx, cancelOuter := context.WithTimeout(runParent, queueCap+timeout+backstopMargin)
+		execCtx, cancelExec := context.WithCancelCause(outerCtx)
 		var superseded string   // guarded by mu
 		var timedOutKind string // "", "run" or "queue"; guarded by mu
 		stop := make(chan struct{})
@@ -345,7 +360,11 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 		}()
 		var execErr error
 		code, execErr = deps.Exec(execCtx, m.Worktree, command, logFile)
+		// The outer deadline fired without the heartbeat classifying the kill:
+		// the heartbeat stalled. Classify it as a backstop timeout below.
+		backstop := runParent.Err() == nil && errors.Is(outerCtx.Err(), context.DeadlineExceeded)
 		cancelExec(nil)
+		cancelOuter()
 		close(stop)
 		wg.Wait()
 		fmt.Fprintf(logFile, "%s preflight exited %d (%v)\n", stamp(), code, execErr)
@@ -387,6 +406,15 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 			raw, _ := json.Marshal(map[string]string{"head_sha": m.Head, "source_bead_id": m.Source, "status": ReceiptLeaseWaitExhausted, "reason": reason})
 			_ = writeFileAtomic(m.ReceiptCopy, raw)
 			return finish(StatusError, reason, &exit, ReceiptLeaseWaitExhausted)
+		}
+		if backstop {
+			// The heartbeat did not classify the kill (stalled or panicked), but
+			// the outer deadline stopped the preflight. Record a failed_timeout so
+			// the run never lands silently; name the backstop for diagnosis.
+			reason := fmt.Sprintf("preflight exceeded the absolute cap (%s) and was killed by the backstop; the heartbeat did not classify it (%s)", queueCap+timeout+backstopMargin, pressure())
+			raw, _ := json.Marshal(map[string]string{"head_sha": m.Head, "source_bead_id": m.Source, "status": ReceiptTimedOut, "reason": reason})
+			_ = writeFileAtomic(m.ReceiptCopy, raw)
+			return finish(StatusFailed, reason, &exit, ReceiptTimedOut)
 		}
 		if execErr != nil {
 			return finish(StatusError, fmt.Sprintf("preflight could not run: %v", execErr), &exit, "")

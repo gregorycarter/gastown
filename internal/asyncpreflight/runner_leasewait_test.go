@@ -149,6 +149,35 @@ func TestLegacyNoSentinelKeepsSubmissionTimeout(t *testing.T) {
 	}
 }
 
+// TestBackstopKillsWhenHeartbeatStalls: with the heartbeat effectively stalled
+// (its interval longer than the whole run), the outer deadline still stops the
+// preflight and records a failed_timeout, so a stuck heartbeat can never leave a
+// run going forever (kasb-9oupz.70).
+func TestBackstopKillsWhenHeartbeatStalls(t *testing.T) {
+	r := newRunFixture(t)
+	r.heads = []string{headA}
+	deps := r.deps()
+	deps.Heartbeat = 10 * time.Second // never ticks within the test: a stalled heartbeat
+	deps.Timeout = 30 * time.Millisecond
+	deps.QueueCap = 30 * time.Millisecond
+	deps.BackstopMargin = 40 * time.Millisecond // outer deadline = 100ms
+	deps.Exec = func(ctx context.Context, dir string, argv []string, log io.Writer) (int, error) {
+		<-ctx.Done() // a hung preflight the heartbeat never catches
+		return -1, nil
+	}
+	start := time.Now()
+	if err := Run(context.Background(), r.path, deps); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("backstop did not fire; ran %s", time.Since(start))
+	}
+	m, _ := Load(r.path)
+	if m.Status != StatusFailed || m.ReceiptStatus != ReceiptTimedOut || !strings.Contains(m.Reason, "backstop") {
+		t.Fatalf("expected backstop failed_timeout, got %s / %s / %q", m.Status, m.ReceiptStatus, m.Reason)
+	}
+}
+
 // TestLiveUsesLeaseClock covers the gate side: a running marker is live for the
 // run timeout measured from lease acquisition, or for the queue cap while still
 // waiting — not just StartedAt+Timeout (kasb-9oupz.70).
