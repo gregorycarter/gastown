@@ -796,8 +796,17 @@ type DeliveryConfig struct {
 
 	// AsyncPreflightTimeout is the hard timeout of one async preflight run as
 	// a Go duration ("2h", "90m"). On expiry the runner kills the preflight and
-	// records a failed (failed_timeout) result. Default 2h.
+	// records a failed (failed_timeout) result. Default 2h. kasb-9oupz.70: the
+	// timeout is measured from heavy-work lease acquisition, not submission, so a
+	// long wait in the shared-workload queue no longer eats the run budget.
 	AsyncPreflightTimeout string `json:"async_preflight_timeout,omitempty"`
+
+	// AsyncPreflightQueueCap is the generous cap on the heavy-work lease wait
+	// alone, as a Go duration ("6h"). While the preflight is still waiting for a
+	// lease the run timeout does not apply; on the queue cap the runner records a
+	// lease_wait_exhausted result (lease starvation), never failed_timeout.
+	// Default 6h (kasb-9oupz.70).
+	AsyncPreflightQueueCap string `json:"async_preflight_queue_cap,omitempty"`
 }
 
 // DefaultAsyncPreflightTimeout is used when AsyncPreflightTimeout is empty or invalid.
@@ -811,6 +820,19 @@ func (s *RigSettings) AsyncPreflightTimeoutOrDefault() time.Duration {
 		}
 	}
 	return DefaultAsyncPreflightTimeout
+}
+
+// DefaultAsyncPreflightQueueCap is used when AsyncPreflightQueueCap is empty or invalid.
+const DefaultAsyncPreflightQueueCap = 6 * time.Hour
+
+// AsyncPreflightQueueCapOrDefault returns the configured heavy-work lease-wait cap.
+func (s *RigSettings) AsyncPreflightQueueCapOrDefault() time.Duration {
+	if s != nil && s.Delivery != nil && s.Delivery.AsyncPreflightQueueCap != "" {
+		if d, err := time.ParseDuration(s.Delivery.AsyncPreflightQueueCap); err == nil && d > 0 {
+			return d
+		}
+	}
+	return DefaultAsyncPreflightQueueCap
 }
 
 // DefaultAsyncPreflightCommand is used when DeliveryConfig.AsyncPreflightCommand is empty.

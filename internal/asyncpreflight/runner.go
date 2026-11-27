@@ -19,6 +19,20 @@ import (
 // ReceiptTimedOut is the receipt status recorded when the hard timeout fires.
 const ReceiptTimedOut = "failed_timeout"
 
+// ReceiptLeaseWaitExhausted is the receipt status recorded when a preflight
+// waited out the queue cap for a heavy-work lease and never acquired one. It is
+// lease starvation, not a code failure, so it is never failed_timeout
+// (kasb-9oupz.70).
+const ReceiptLeaseWaitExhausted = "lease_wait_exhausted"
+
+// errRunTimeout and errQueueCap are the causes the heartbeat uses to stop the
+// preflight's process group, so the outcome is classified without racing the
+// context's own error (kasb-9oupz.70).
+var (
+	errRunTimeout = errors.New("run timeout exceeded")
+	errQueueCap   = errors.New("lease-wait cap exceeded")
+)
+
 // RunDeps are the runner's side effects, injectable for tests.
 type RunDeps struct {
 	// Git runs git in dir and returns trimmed stdout.
@@ -31,6 +45,8 @@ type RunDeps struct {
 	Heartbeat time.Duration
 	// Timeout overrides the marker's hard timeout (tests).
 	Timeout time.Duration
+	// QueueCap overrides the marker's heavy-work lease-wait cap (tests).
+	QueueCap time.Duration
 	// Pressure describes the host's load when a preflight dies (tests override it).
 	Pressure func() string
 	// Signals returns a fresh stop context for the one rerun after the host
@@ -181,6 +197,17 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 	if timeout <= 0 {
 		timeout = m.Timeout()
 	}
+	queueCap := deps.QueueCap
+	if queueCap <= 0 {
+		queueCap = m.QueueCap()
+	}
+	// kasb-9oupz.70: tell the preflight where to report its heavy-work lease
+	// state. This runner process serves exactly one marker, so setting it in the
+	// environment is safe. A preflight that does not write the sentinel (an older
+	// one, or a command that takes no lease) leaves the timeout measured from
+	// submission, exactly as before.
+	_ = os.Remove(LeaseSentinelPath(markerPath)) // a sentinel belongs to an earlier run
+	_ = os.Setenv(LeaseSentinelEnv, LeaseSentinelPath(markerPath))
 
 	pressure := func() string {
 		if deps.Pressure == nil {
@@ -209,9 +236,11 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 			runParent, stopRerunSignals = deps.Signals()
 		}
 		fmt.Fprintf(logFile, "%s %s; rerunning once on %s with --recheck-environment\n", stamp(), reason, short(m.Head))
+		_ = os.Remove(LeaseSentinelPath(markerPath)) // the rerun re-acquires its own lease (kasb-9oupz.70)
 		save(func(m *Marker) {
 			m.RecheckedEnvironment = truncate(reason, 1500)
 			m.StartedAt, m.HeartbeatAt = stamp(), stamp() // the rerun gets its own timeout
+			m.LeaseAcquiredAt, m.LeaseWaiting = "", false
 		})
 		command = withRecheckEnvironment(m.Command)
 		attempt++
@@ -223,15 +252,19 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 	for {
 		_ = os.Remove(receiptAbs) // never read a receipt from an earlier attempt
 		// Filesystem times can be coarser than the clock; allow a second of slack.
-		runStart := time.Now().Add(-time.Second)
+		runStart := deps.Now().Add(-time.Second)
 		fmt.Fprintf(logFile, "%s async preflight %s@%s in %s: %s\n", stamp(), m.Source, m.Head, m.Worktree, strings.Join(command, " "))
 
-		runCtx, cancelRun := context.WithTimeout(runParent, timeout)
-		// kasb-84hoc: the heartbeat also watches for supersession and stops the
+		// kasb-84hoc: the heartbeat watches for supersession and stops the
 		// preflight's process group at once, instead of finishing a run whose
 		// receipt cannot prove the head (~420 wall-min a day were lost this way).
-		execCtx, cancelExec := context.WithCancelCause(runCtx)
-		var superseded string // guarded by mu
+		// kasb-9oupz.70: it also enforces the hard timeout, measured from lease
+		// acquisition (the sentinel the preflight writes), with a separate
+		// generous cap on the lease wait alone that reports lease starvation, not
+		// failed_timeout.
+		execCtx, cancelExec := context.WithCancelCause(runParent)
+		var superseded string   // guarded by mu
+		var timedOutKind string // "", "run" or "queue"; guarded by mu
 		stop := make(chan struct{})
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -239,12 +272,66 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 			defer wg.Done()
 			t := time.NewTicker(interval)
 			defer t.Stop()
+			var leaseAt time.Time // acquisition time; zero until the lease is acquired
+			waiting := false      // the preflight reported it is queued for a lease
 			for {
 				select {
 				case <-stop:
 					return
 				case <-t.C:
 					save(func(m *Marker) { m.HeartbeatAt = stamp() })
+					if leaseAt.IsZero() {
+						if s, err := ReadLeaseSentinel(markerPath); err == nil && s != nil {
+							switch s.Phase {
+							case LeasePhaseAcquired:
+								if at, perr := time.Parse(time.RFC3339Nano, s.At); perr == nil {
+									leaseAt = at
+								} else {
+									leaseAt = deps.Now()
+								}
+								acquired := leaseAt.UTC().Format(time.RFC3339Nano)
+								save(func(m *Marker) { m.LeaseAcquiredAt, m.LeaseWaiting = acquired, false })
+								fmt.Fprintf(logFile, "%s heavy-work lease acquired after %.0fs; the %s run timeout starts now (kasb-9oupz.70)\n", stamp(), s.QueueSeconds, timeout)
+							case LeasePhaseWaiting:
+								if !waiting {
+									waiting = true
+									save(func(m *Marker) { m.LeaseWaiting = true })
+								}
+							}
+						}
+					}
+					now := deps.Now()
+					switch {
+					case !leaseAt.IsZero():
+						if now.Sub(leaseAt) > timeout {
+							mu.Lock()
+							timedOutKind = "run"
+							mu.Unlock()
+							fmt.Fprintf(logFile, "%s preflight exceeded its %s run timeout after the lease; stopping the process group\n", stamp(), timeout)
+							cancelExec(errRunTimeout)
+							return
+						}
+					case waiting:
+						if now.Sub(runStart) > queueCap {
+							mu.Lock()
+							timedOutKind = "queue"
+							mu.Unlock()
+							fmt.Fprintf(logFile, "%s preflight waited the full %s for a heavy-work lease; stopping the process group (lease starvation, not a code timeout)\n", stamp(), queueCap)
+							cancelExec(errQueueCap)
+							return
+						}
+					default:
+						// No lease report (older preflight, or no lease taken):
+						// measure from submission, exactly as before.
+						if now.Sub(runStart) > timeout {
+							mu.Lock()
+							timedOutKind = "run"
+							mu.Unlock()
+							fmt.Fprintf(logFile, "%s preflight exceeded its %s timeout; stopping the process group\n", stamp(), timeout)
+							cancelExec(errRunTimeout)
+							return
+						}
+					}
 					if why := supersession(deps, markerPath, ident); why != "" {
 						mu.Lock()
 						superseded = why
@@ -258,9 +345,7 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 		}()
 		var execErr error
 		code, execErr = deps.Exec(execCtx, m.Worktree, command, logFile)
-		timedOut := runParent.Err() == nil && errors.Is(runCtx.Err(), context.DeadlineExceeded)
 		cancelExec(nil)
-		cancelRun()
 		close(stop)
 		wg.Wait()
 		fmt.Fprintf(logFile, "%s preflight exited %d (%v)\n", stamp(), code, execErr)
@@ -268,6 +353,7 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 
 		mu.Lock()
 		supersededReason := superseded
+		tko := timedOutKind
 		mu.Unlock()
 		if supersededReason != "" {
 			// Never rerun: no receipt for this head can help any more.
@@ -287,11 +373,20 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 			}
 			continue
 		}
-		if timedOut {
+		if tko == "run" {
 			reason := fmt.Sprintf("preflight exceeded its %s timeout and was killed", timeout)
 			raw, _ := json.Marshal(map[string]string{"head_sha": m.Head, "source_bead_id": m.Source, "status": ReceiptTimedOut, "reason": reason})
 			_ = writeFileAtomic(m.ReceiptCopy, raw)
 			return finish(StatusFailed, reason, &exit, ReceiptTimedOut)
+		}
+		if tko == "queue" {
+			// Lease starvation: never failed_timeout. Reported as an error with a
+			// distinct status so the lander does not bounce the MR to its worker as
+			// a code failure; the repeated-pending cap is kasb-9oupz.63.2.
+			reason := fmt.Sprintf("preflight waited the full %s for a heavy-work lease and never acquired one (lease starvation; %s); not a code failure", queueCap, pressure())
+			raw, _ := json.Marshal(map[string]string{"head_sha": m.Head, "source_bead_id": m.Source, "status": ReceiptLeaseWaitExhausted, "reason": reason})
+			_ = writeFileAtomic(m.ReceiptCopy, raw)
+			return finish(StatusError, reason, &exit, ReceiptLeaseWaitExhausted)
 		}
 		if execErr != nil {
 			return finish(StatusError, fmt.Sprintf("preflight could not run: %v", execErr), &exit, "")

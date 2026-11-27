@@ -343,7 +343,7 @@ func startAsyncPreflightForDone(settings *config.RigSettings, rigPath, rigName, 
 	m, path, reused, err := asyncpreflight.Prepare(asyncpreflight.StartRequest{
 		RigPath: rigPath, Rig: rigName, Source: issueID, Branch: branch, Head: head,
 		Worktree: worktree, Prefix: settings.AsyncPreflightCommandOrDefault(), Args: preflightArgs,
-		Timeout: settings.AsyncPreflightTimeoutOrDefault(), Now: now,
+		Timeout: settings.AsyncPreflightTimeoutOrDefault(), QueueCap: settings.AsyncPreflightQueueCapOrDefault(), Now: now,
 	})
 	if err != nil {
 		return nil, err

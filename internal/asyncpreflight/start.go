@@ -19,6 +19,7 @@ type StartRequest struct {
 	Prefix   []string      // preflight argv prefix from rig settings
 	Args     []string      // the polecat's preflight arguments
 	Timeout  time.Duration // hard timeout of the run (0: DefaultTimeout)
+	QueueCap time.Duration // cap on the heavy-work lease wait (0: DefaultQueueCap)
 	Now      time.Time
 }
 
@@ -101,6 +102,7 @@ func Prepare(req StartRequest) (m *Marker, path string, reused bool, err error) 
 		Status:        StatusStarting,
 		CreatedAt:     req.Now.UTC().Format(time.RFC3339Nano),
 		TimeoutSecs:   int(req.Timeout / time.Second),
+		QueueCapSecs:  int(req.QueueCap / time.Second),
 	}
 	if err := Create(path, m); err != nil {
 		return nil, "", false, err

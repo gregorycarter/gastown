@@ -71,8 +71,56 @@ const StartGrace = 3 * time.Minute
 const LostAfter = HeartbeatFresh
 
 // DefaultTimeout bounds one preflight run; on expiry the runner kills the
-// preflight and records a failed (timed_out) result.
+// preflight and records a failed (timed_out) result. kasb-9oupz.70: it is
+// measured from heavy-work lease acquisition when the preflight reports one.
 const DefaultTimeout = 2 * time.Hour
+
+// DefaultQueueCap bounds the heavy-work lease wait alone, before the run begins.
+// On this cap the runner records lease starvation, never failed_timeout
+// (kasb-9oupz.70).
+const DefaultQueueCap = 6 * time.Hour
+
+// Lease sentinel phases, written by the preflight command next to the marker so
+// the runner can start the run timeout at lease acquisition (kasb-9oupz.70).
+const (
+	LeasePhaseWaiting  = "waiting"  // the preflight is queued for a heavy-work lease
+	LeasePhaseAcquired = "acquired" // the lease is held; the run is under way
+)
+
+// LeaseSentinel is the preflight's report of its heavy-work lease state. The
+// path is in the environment variable LeaseSentinelEnv when the runner launches
+// the preflight; the preflight writes it on entry to and exit from the lease
+// wait. A missing sentinel means the preflight does not report its lease (an
+// older preflight, or a command that takes no lease): the runner then measures
+// the timeout from submission, exactly as before (kasb-9oupz.70).
+type LeaseSentinel struct {
+	Phase        string  `json:"phase"`
+	At           string  `json:"at,omitempty"` // RFC3339Nano; acquisition time when phase is acquired
+	QueueSeconds float64 `json:"queue_seconds,omitempty"`
+}
+
+// LeaseSentinelEnv names the environment variable the runner sets to the lease
+// sentinel path for the preflight to write.
+const LeaseSentinelEnv = "GT_ASYNC_PREFLIGHT_LEASE_SENTINEL"
+
+// LeaseSentinelPath is the lease sentinel next to the marker.
+func LeaseSentinelPath(markerPath string) string { return sibling(markerPath, ".lease") }
+
+// ReadLeaseSentinel reads the lease sentinel, or (nil, nil) when none exists.
+func ReadLeaseSentinel(markerPath string) (*LeaseSentinel, error) {
+	raw, err := os.ReadFile(LeaseSentinelPath(markerPath))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var s LeaseSentinel
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
 
 // StaleAfter is the age after which finished or dead markers are pruned.
 const StaleAfter = 7 * 24 * time.Hour
@@ -93,6 +141,7 @@ type Marker struct {
 	PID           int      `json:"pid,omitempty"`
 	PIDStart      string   `json:"pid_start,omitempty"` // kernel start time of PID
 	TimeoutSecs   int      `json:"timeout_seconds,omitempty"`
+	QueueCapSecs  int      `json:"queue_cap_seconds,omitempty"` // generous cap on the lease wait (kasb-9oupz.70)
 	CreatedAt     string   `json:"created_at"`
 	StartedAt     string   `json:"started_at,omitempty"`
 	HeartbeatAt   string   `json:"heartbeat_at,omitempty"`
@@ -103,6 +152,14 @@ type Marker struct {
 	// RecheckedEnvironment is the infrastructure death that made the runner
 	// rerun this head once with --recheck-environment (hq-y1q7ew).
 	RecheckedEnvironment string `json:"rechecked_environment,omitempty"`
+	// LeaseAcquiredAt is when the preflight acquired its heavy-work lease, as the
+	// runner learned from the lease sentinel. When set, the hard run timeout is
+	// measured from here, not from StartedAt (kasb-9oupz.70).
+	LeaseAcquiredAt string `json:"lease_acquired_at,omitempty"`
+	// LeaseWaiting is true while the preflight has started but is still waiting
+	// for a heavy-work lease; the run is then bounded by the queue cap, not the
+	// run timeout (kasb-9oupz.70).
+	LeaseWaiting bool `json:"lease_waiting,omitempty"`
 }
 
 var (
@@ -227,6 +284,14 @@ func (m *Marker) Timeout() time.Duration {
 	return time.Duration(m.TimeoutSecs) * time.Second
 }
 
+// QueueCap returns the generous cap on the heavy-work lease wait (kasb-9oupz.70).
+func (m *Marker) QueueCap() time.Duration {
+	if m == nil || m.QueueCapSecs <= 0 {
+		return DefaultQueueCap
+	}
+	return time.Duration(m.QueueCapSecs) * time.Second
+}
+
 func age(stamp string, now time.Time) (time.Duration, bool) {
 	t, err := time.Parse(time.RFC3339Nano, stamp)
 	if err != nil {
@@ -262,7 +327,18 @@ func Live(m *Marker, now time.Time) bool {
 		if !ok || hb >= HeartbeatFresh || !runnerPresent(m) {
 			return false
 		}
-		if started, ok := age(m.StartedAt, now); ok && started > m.Timeout()+StartGrace {
+		// kasb-9oupz.70: the hard timeout runs from lease acquisition; while the
+		// preflight is still waiting for a lease the run is bounded by the
+		// generous queue cap instead. With neither signal (an older preflight)
+		// the timeout runs from StartedAt, exactly as before.
+		base, limit := m.StartedAt, m.Timeout()
+		switch {
+		case m.LeaseAcquiredAt != "":
+			base, limit = m.LeaseAcquiredAt, m.Timeout()
+		case m.LeaseWaiting:
+			base, limit = m.StartedAt, m.QueueCap()
+		}
+		if elapsed, ok := age(base, now); ok && elapsed > limit+StartGrace {
 			return false
 		}
 		return true
