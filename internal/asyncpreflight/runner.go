@@ -435,6 +435,20 @@ func Run(ctx context.Context, markerPath string, deps RunDeps) error {
 			}
 		}
 		if err == nil {
+			// kasb-9oupz.71: a receipt whose failures are entirely environmental
+			// (failures_all_environmental, set by preflight) is not a product
+			// failure. Rerun once on the same head, as for an infra death, keeping
+			// the MR and its staging approval; the gate sees a failure only if the
+			// rerun also fails. A missing field (an older preflight) means no rerun.
+			if attempt == 1 && receiptAllEnvironmental(raw) {
+				_ = writeFileAtomic(sibling(markerPath, ".receipt-environmental.json"), raw) // keep both receipts
+				reason := "all preflight failures were classified environmental; rerunning once on the same head (kasb-9oupz.71)"
+				if rerunnable(reason) {
+					continue
+				}
+				// Not rerunnable (head moved or the runner was stopped): fall
+				// through and record the environmental receipt as it stands.
+			}
 			break
 		}
 		// hq-y1q7ew: no receipt means the preflight recorded no product failure;
@@ -542,6 +556,17 @@ func withRecheckEnvironment(command []string) []string {
 		}
 	}
 	return append(append([]string(nil), command...), "--recheck-environment", RecheckEnvironmentReason)
+}
+
+// receiptAllEnvironmental reports whether a receipt marks every failure
+// environmental (failures_all_environmental, kasb-9oupz.71). A missing field
+// (an older preflight, or a command that takes no lease) is false, so the
+// runner keeps its prior behaviour.
+func receiptAllEnvironmental(raw []byte) bool {
+	var r struct {
+		FailuresAllEnvironmental bool `json:"failures_all_environmental"`
+	}
+	return json.Unmarshal(raw, &r) == nil && r.FailuresAllEnvironmental
 }
 
 func writeFileAtomic(path string, raw []byte) error {
