@@ -21,6 +21,16 @@ import (
 
 const polecatAdmissionReservationTTL = 30 * time.Minute
 
+// polecatAdmissionDeadPIDGrace bounds how long a reservation whose dispatch
+// process is already dead may hold a slot (hq-5qfnoa). A dispatch killed by the
+// daemon's 5 m timeout is SIGKILLed, so its deferred Release never runs and the
+// reservation would otherwise linger the full 30 m TTL, starving capacity. The
+// grace is the handoff window: long enough that a just-spawned polecat has
+// reparented and registered as a working session, so reaping never frees a slot
+// out from under a registering polecat. A genuinely live admitter is never
+// reaped on age at all.
+const polecatAdmissionDeadPIDGrace = 2 * time.Minute
+
 var acquirePolecatAdmissionFn = acquirePolecatAdmission
 
 type polecatCapacitySnapshot struct {
@@ -499,11 +509,16 @@ func cleanupStalePolecatAdmissionReservations(townRoot string, now time.Time) er
 		if reservation.PID <= 0 {
 			continue
 		}
-		age := now.Sub(reservation.CreatedAt)
 		if processAlive(reservation.PID) {
+			// A genuinely live admitter is in-flight; never reap it (reaping could
+			// double-admit). The daemon's own 5 m dispatch timeout means a live
+			// admitter cannot outlive its dispatch anyway.
 			continue
 		}
-		if age < polecatAdmissionReservationTTL {
+		// hq-5qfnoa: the dispatch is dead (SIGKILLed by the 5 m timeout, so its
+		// deferred Release never ran). Reap the leaked reservation after the short
+		// handoff grace rather than the old 30 m TTL, which starved capacity.
+		if now.Sub(reservation.CreatedAt) < polecatAdmissionDeadPIDGrace {
 			continue
 		}
 		_ = os.Remove(filepath.Join(dir, reservation.ID+".json"))
